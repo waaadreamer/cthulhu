@@ -284,7 +284,7 @@ class Azathoth(OwnerChat, MemoryAgent):
                           "origin": title or "、".join(sorted({m["sender_name"] for m in batch}))}
         guide = {
             "progress": "这是任务过程中的进展。tell_owner 只写一两句话的进展（像思考过程里的一步：做了什么、发现了什么、下一步），不要展开细节。",
-            "blocked": "任务受阻。tell_owner 用两三句话说清卡在哪里、需要主人决定什么。",
+            "blocked": "任务受阻。tell_owner 用两三句话说清卡在哪里，并以一个主人可以直接回答的具体问题结尾。",
             "summary": "黑山羊标记这个任务已完成。先核对结果是否满足主人的意图，再用 tell_owner 写给主人的完整总结："
                        "结论先行，然后是关键结果、遗留问题；过程不用重复，主人可以展开查看之前的进展。",
             "notice": "这是尤格的监督报告。tell_owner 用一两句话告诉主人要点；需要主人决定时说清楚。",

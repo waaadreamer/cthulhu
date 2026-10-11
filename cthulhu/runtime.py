@@ -189,6 +189,7 @@ class CodexRuntime:
         return thread
 
     async def resume_thread(self, thread_id: str, handler: ToolHandler | None) -> str:
+        # Codex keeps the developer instructions the thread was started with; callers rotate threads when the skill changes.
         await self.request("thread/resume", self._thread_params(None) | {"threadId": thread_id, "excludeTurns": True})
         if handler:
             self.tool_handlers[thread_id] = handler

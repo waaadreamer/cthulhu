@@ -12,6 +12,7 @@ Subclasses decide what goes into permanent vs temporary context.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -74,6 +75,12 @@ class Agent:
         self.memory: list[dict] = []
         self.memory_seen: dict[str, dict[int, str]] = {}  # thread -> permanent memory that thread already holds
         self._load_threads(launch.get("thread_id"))
+        # thread -> fingerprint of the skill text it was started with (memory is excluded: it is pushed as deltas)
+        self.skill_fp_path = state_dir / "skill_fingerprints.json"
+        try:
+            self.skill_fingerprints: dict[str, str] = json.loads(self.skill_fp_path.read_text())
+        except (OSError, ValueError):
+            self.skill_fingerprints = {}
         self.queue: list[dict] = []
         self.seen: set[str] = set()
         self.wake = asyncio.Event()
@@ -122,6 +129,10 @@ class Agent:
 
     async def extra_context(self) -> str:
         return ""
+
+    def skill_fingerprint(self) -> str:
+        text = load_role("contract") + self.skill() + json.dumps(self.tools(), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
 
     def send_tool(self, extra: dict | None = None) -> dict:
         return tool("temple_send", "通过中心神殿给另一个 agent 发消息。接收方由程序校验权限；对方回复会作为新消息到达，不要等待或轮询。",
@@ -203,9 +214,13 @@ class Agent:
         elif tid and tid not in self.loaded:
             try:
                 if hasattr(rt, "instructions"):
-                    # Claude sessions reopen with a fresh system prompt (current permanent memory).
+                    # Claude sessions reopen with a fresh system prompt (current skill and permanent memory).
                     await rt.resume_thread(tid, self.call_tool, instructions=await self.instructions(), tools=self.tools())
                     self.memory_seen[tid] = {m["id"]: memory_line(m) for m in self.memory}
+                elif self.skill_fingerprints.get(tid) != self.skill_fingerprint():
+                    # A Codex thread keeps its original prompt; after a skill change start over (handoff bridges it).
+                    log.info("%s skill changed; starting a new %s thread", self.name, label)
+                    tid = None
                 else:
                     await rt.resume_thread(tid, self.call_tool)
             except Exception as e:
@@ -214,6 +229,8 @@ class Agent:
         if tid is None:
             tid = await rt.start_thread(await self.instructions(), self.tools(), self.call_tool)
             self.memory_seen[tid] = {m["id"]: memory_line(m) for m in self.memory}
+            self.skill_fingerprints[tid] = self.skill_fingerprint()
+            self.skill_fp_path.write_text(json.dumps(self.skill_fingerprints))
         self.loaded.add(tid)
         if self.threads.get(label) != tid:
             self.threads[label] = tid
