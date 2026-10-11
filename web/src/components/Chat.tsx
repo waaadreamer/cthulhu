@@ -1,5 +1,5 @@
 import { KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowUp, Check, ChevronDown, Copy, Loader2, Search, Sparkles, Square, Terminal, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, CircleAlert, CircleCheck, Copy, Loader2, Search, Sparkles, Square, Terminal, X } from 'lucide-react'
 import { Agent, api, modelLabel, ROLE_META, timeLabel, Turn } from '../api'
 import { Stream } from '../useTemple'
 import { Avatar, stateOf } from './Avatar'
@@ -126,7 +126,9 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
           {results && <p className="text-center text-xs text-slate-500">找到 {results.length} 条相关对话</p>}
           {!results && hasMore && <div className="flex justify-center"><Loader2 className="h-4 w-4 animate-spin text-slate-600" /></div>}
           {!results && turns.length === 0 && <Empty agent={agent} />}
-          {shown.map((t) => <TurnView key={t.id} turn={t} agent={agent} stream={streams[t.id]} highlight={search ?? undefined} />)}
+          {group(shown).map((g) => g.kind === 'task'
+            ? <TaskView key={g.key} turns={g.turns} agent={agent} />
+            : <TurnView key={g.key} turn={g.turns[0]} agent={agent} stream={streams[g.turns[0].id]} highlight={search ?? undefined} />)}
         </div>
       </div>
 
@@ -206,6 +208,76 @@ function TurnView({ turn, agent, stream, highlight }: { turn: Turn; agent: Agent
       </div>
     </div>
   )
+}
+
+type Group = { kind: 'turn' | 'task'; key: string; turns: Turn[] }
+
+/** Proactive notes about the same task collapse into one block; everything else stays a turn. */
+function group(turns: Turn[]): Group[] {
+  const out: Group[] = []
+  const open = new Map<string, Group>()
+  for (const t of turns) {
+    if (!t.user_text && t.task_id) {
+      const g = open.get(t.task_id)
+      if (g) { g.turns.push(t); continue }
+      const ng: Group = { kind: 'task', key: `task-${t.task_id}-${t.id}`, turns: [t] }
+      open.set(t.task_id, ng)
+      out.push(ng)
+      continue
+    }
+    out.push({ kind: 'turn', key: t.id, turns: [t] })
+  }
+  return out
+}
+
+/** A task's reports: progress steps fold into a chain of thought; the final summary stays open. */
+function TaskView({ turns, agent }: { turns: Turn[]; agent: Agent }) {
+  const final = [...turns].reverse().find((t) => t.kind === 'summary')
+  const steps = turns.filter((t) => t !== final)
+  const done = !!final
+  const [open, setOpen] = useState(!done)
+  const blocked = !done && steps[steps.length - 1]?.kind === 'blocked'
+  const title = turns[0].task_title || turns[0].origin || '任务'
+  const last = steps[steps.length - 1]
+  return (
+    <div className="flex gap-3 animate-rise">
+      <Avatar role={agent.role} size="sm" />
+      <div className="min-w-0 flex-1 pt-0.5">
+        <div className="mb-1.5 flex items-center gap-1.5 text-xs">
+          {done ? <CircleCheck className="h-3.5 w-3.5 text-emerald-400" />
+            : blocked ? <CircleAlert className="h-3.5 w-3.5 text-amber-300" />
+            : <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />}
+          <span className="font-medium text-slate-200">{title}</span>
+          <span className="text-slate-500">· {done ? '已完成' : blocked ? '需要你决定' : '进行中'} · {timeLabel(turns[turns.length - 1].created_at)}</span>
+        </div>
+        {steps.length > 0 && (
+          <div className="mb-3 overflow-hidden rounded-xl border border-white/[0.06] bg-black/20">
+            <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-400 hover:text-slate-200">
+              <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-300" />
+              <span className="truncate">{open ? `过程 · ${steps.length} 步` : `过程 · ${steps.length} 步 · ${firstLine(last.reply)}`}</span>
+              <ChevronDown className={`ml-auto h-3.5 w-3.5 shrink-0 transition ${open ? 'rotate-180' : ''}`} />
+            </button>
+            {open && (
+              <ol className="space-y-2.5 border-t border-white/[0.06] px-3 py-3">
+                {steps.map((t) => (
+                  <li key={t.id} className="relative border-l border-white/10 pl-4 text-sm text-slate-300">
+                    <span className={`absolute -left-[4.5px] top-1.5 h-2 w-2 rounded-full ${t.kind === 'blocked' ? 'bg-amber-300' : 'bg-violet-400/70'}`} />
+                    <div className="mb-0.5 text-[11px] text-slate-500">{timeLabel(t.created_at)}</div>
+                    <Markdown text={t.reply} />
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        )}
+        {final && <><Markdown text={final.reply} /><Footer turn={final} /></>}
+      </div>
+    </div>
+  )
+}
+
+function firstLine(text: string) {
+  return text.replace(/[#*`>]/g, '').split('\n').find((l) => l.trim())?.trim() ?? ''
 }
 
 function mark(text: string, q?: string) {

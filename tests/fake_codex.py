@@ -8,6 +8,7 @@ Memory distillation turns (with outputSchema) return {"add": [...], "update": []
 """
 import itertools
 import json
+import re
 import sys
 
 ids = itertools.count(1)
@@ -28,6 +29,12 @@ def finish(thread, turn, text):
     out({"method": "thread/tokenUsage/updated", "params": {"threadId": thread, "turnId": turn, "tokenUsage": {
         "total": {"inputTokens": 10}, "last": {"inputTokens": 10}, "modelContextWindow": 1000}}})
     out({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": turn, "status": "completed", "error": None, "items": []}}})
+
+
+def with_task(args, text):
+    # "$TASK" in a CALL is replaced by the task id the incoming message was tagged with.
+    m = re.search(r"任务 (task_\w+)", text)
+    return args.replace("$TASK", m.group(1)) if m else args
 
 
 for line in sys.stdin:
@@ -59,6 +66,7 @@ for line in sys.stdin:
         elif "CALL " in body:
             _, rest = body.split("CALL ", 1)
             name, args = rest.split(" ", 1)
+            args = with_task(args, text)
             cid = next(ids)
             pending[cid] = (p["threadId"], turn)
             out({"id": cid, "method": "item/tool/call", "params": {"threadId": p["threadId"], "turnId": turn,

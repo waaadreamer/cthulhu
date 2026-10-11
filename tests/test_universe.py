@@ -113,20 +113,42 @@ class Universe(unittest.TestCase):
         self.assertEqual(r["status"], 403)
 
     def test_azathoth_messages_shub_and_shub_memory_only_from_azathoth(self):
-        self.chat("az", 'CALL temple_send {"to": "sh", "text": "去建一个 old_one"}')
+        self.chat("az", 'CALL temple_send {"to": "sh", "title": "建 old_one", "text": "去建一个 old_one"}')
         msgs = self.wait(lambda: [m for m in self.api("messages?agent_id=sh") if m["sender"] == "az" and m["state"] == "handled"])
         self.assertEqual(msgs[0]["receiver"], "sh")
         self.wait(lambda: self.api("memory?agent_id=sh"))
 
-    def test_subordinate_report_always_reaches_owner(self):
-        # Azathoth calls tell_owner itself; nothing sent back to shub, so it is a completion summary.
-        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_send {\\"to\\": \\"az\\", \\"text\\": \\"CALL tell_owner {\\\\\\"text\\\\\\": \\\\\\"lab 巡检完成\\\\\\"}\\"}"}')
-        note = self.wait(lambda: next(t for t in self.api("chat?agent_id=az") if not t["user_text"] and t["reply"] == "lab 巡检完成"))
-        self.assertIn("任务完成", note["origin"])
+    @staticmethod
+    def via_shub(report: dict) -> str:
+        """An owner prompt that makes azathoth send shub a task, and shub answer with `report` (tagged with that task)."""
+        inner = "CALL temple_send " + json.dumps({"to": "az", "task_id": "$TASK", **report}, ensure_ascii=False)
+        return "CALL temple_send " + json.dumps({"to": "sh", "title": "查磁盘", "text": inner}, ensure_ascii=False)
+
+    def notes(self):
+        return [t for t in self.api("chat?agent_id=az&limit=200") if not t["user_text"]]
+
+    def test_task_progress_and_done_reports(self):
+        tell = lambda s: "CALL tell_owner " + json.dumps({"text": s}, ensure_ascii=False)
+        self.chat("az", self.via_shub({"status": "progress", "text": tell("步骤：已创建执行者")}))
+        step = self.wait(lambda: next(t for t in self.notes() if t["reply"] == "步骤：已创建执行者"))
+        self.assertEqual(step["kind"], "progress")
+        self.assertEqual(step["task_title"], "查磁盘")
+        self.assertEqual(step["task_state"], "open")
+        # Follow-up on the same task; shub marks it done, so azathoth's note is the summary.
+        follow = "CALL temple_send " + json.dumps({"to": "sh", "task_id": step["task_id"], "text": "CALL temple_send " + json.dumps(
+            {"to": "az", "task_id": "$TASK", "status": "done", "text": tell("总结：磁盘剩 4.9G")}, ensure_ascii=False)}, ensure_ascii=False)
+        self.chat("az", follow)
+        final = self.wait(lambda: next(t for t in self.notes() if t["reply"] == "总结：磁盘剩 4.9G"))
+        self.assertEqual((final["kind"], final["task_id"], final["task_state"]), ("summary", step["task_id"], "done"))
         # Azathoth forgets tell_owner: the program reminds it, then delivers the reply itself.
-        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_send {\\"to\\": \\"az\\", \\"text\\": \\"磁盘查完了\\"}"}')
-        note = self.wait(lambda: next(t for t in self.api("chat?agent_id=az") if not t["user_text"] and "tell_owner" in t["reply"]), 30)
-        self.assertIn("任务完成", note["origin"])
+        self.chat("az", self.via_shub({"status": "done", "text": "磁盘查完了"}))
+        self.wait(lambda: next(t for t in self.notes() if "tell_owner" in t["reply"] and t["kind"] == "summary"), 30)
+
+    def test_shub_report_needs_task_status(self):
+        turn = self.chat("az", "CALL temple_send " + json.dumps({"to": "sh", "title": "无状态", "text": "CALL temple_send " + json.dumps(
+            {"to": "az", "task_id": "$TASK", "text": "没写状态"}, ensure_ascii=False)}, ensure_ascii=False))
+        self.wait(lambda: next(m for m in self.api("messages?agent_id=sh") if "没写状态" in m["text"] and m["state"] == "handled"))
+        self.assertFalse([m for m in self.api("messages?agent_id=az") if m["text"] == "没写状态"])
 
     def test_memory_revised_in_place_and_pushed_to_live_thread(self):
         self.chat("az", "记一下这个")
@@ -155,7 +177,7 @@ class Universe(unittest.TestCase):
         self.assertIn('"g1"', turn["reply"])
 
     def test_spawn_and_patrol(self):
-        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_spawn {\\"name\\": \\"研究员\\", \\"galaxy_id\\": \\"g1\\", \\"task\\": \\"调研\\", \\"skill\\": \\"你是研究员\\"}"}')
+        self.chat("az", 'CALL temple_send {"to": "sh", "title": "建研究员", "text": "CALL temple_spawn {\\"name\\": \\"研究员\\", \\"galaxy_id\\": \\"g1\\", \\"task\\": \\"调研\\", \\"skill\\": \\"你是研究员\\"}"}')
         old = self.wait(lambda: next(a for a in self.api("directory")["agents"] if a["role"] == "old_one" and a["online"]), 30)
         # The old_one starts on its task by itself.
         self.wait(lambda: self.api(f"latest?agent_id={old['id']}").get("last_status") == "completed")

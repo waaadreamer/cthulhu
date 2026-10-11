@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS patrols (
     summary TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tasks (          -- one piece of work azathoth handed to shub
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open',      -- open | done (set by shub's report)
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -118,7 +125,9 @@ class Store:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
         for ddl in ("ALTER TABLE chat_turns ADD COLUMN model TEXT", "ALTER TABLE chat_turns ADD COLUMN origin TEXT",
-                    "ALTER TABLE memory ADD COLUMN updated_at REAL"):
+                    "ALTER TABLE memory ADD COLUMN updated_at REAL", "ALTER TABLE messages ADD COLUMN task_id TEXT",
+                    "ALTER TABLE messages ADD COLUMN status TEXT", "ALTER TABLE chat_turns ADD COLUMN task_id TEXT",
+                    "ALTER TABLE chat_turns ADD COLUMN kind TEXT"):
             try:
                 self.db.execute(ddl)
             except sqlite3.OperationalError:
@@ -189,10 +198,11 @@ class Store:
     # messages
 
     def add_message(self, sender: str, receiver: str, text: str, kind="message",
-                    priority=0, reply_to=None, message_id=None) -> dict:
+                    priority=0, reply_to=None, message_id=None, task_id=None, status=None) -> dict:
         mid = message_id or new_id("msg")
-        self.x("INSERT INTO messages (id, sender, receiver, kind, priority, text, reply_to, created_at)"
-               " VALUES (?,?,?,?,?,?,?,?)", (mid, sender, receiver, kind, priority, text, reply_to, time.time()))
+        self.x("INSERT INTO messages (id, sender, receiver, kind, priority, text, reply_to, created_at, task_id, status)"
+               " VALUES (?,?,?,?,?,?,?,?,?,?)",
+               (mid, sender, receiver, kind, priority, text, reply_to, time.time(), task_id, status))
         return self.message(mid)
 
     def message(self, mid: str) -> dict | None:
@@ -205,11 +215,18 @@ class Store:
         self.x("UPDATE messages SET state=?, handled_at=? WHERE id=?",
                (state, time.time() if state == "handled" else None, mid))
 
-    def messages(self, agent_id: str | None = None, limit=100, before: float | None = None) -> list[dict]:
+    def messages(self, agent_id: str | None = None, limit=100, before: float | None = None,
+                 search: str | None = None, task_id: str | None = None) -> list[dict]:
         sql, args = "SELECT * FROM messages WHERE 1=1", []
         if agent_id:
             sql += " AND (sender=? OR receiver=?)"
             args += [agent_id, agent_id]
+        if search:
+            sql += " AND text LIKE ?"
+            args.append(f"%{search}%")
+        if task_id:
+            sql += " AND task_id=?"
+            args.append(task_id)
         if before:
             sql += " AND created_at<?"
             args.append(before)
@@ -219,6 +236,26 @@ class Store:
     def pending_counts(self) -> dict[str, int]:
         return {r["receiver"]: r["n"] for r in
                 self.q("SELECT receiver, COUNT(*) n FROM messages WHERE state!='handled' GROUP BY receiver")}
+
+    # tasks
+
+    def add_task(self, title: str) -> dict:
+        tid, now = new_id("task"), time.time()
+        self.x("INSERT INTO tasks (id, title, created_at, updated_at) VALUES (?,?,?,?)", (tid, title, now, now))
+        return self.task(tid)
+
+    def task(self, task_id: str) -> dict | None:
+        return self.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+
+    def set_task(self, task_id: str, state: str) -> None:
+        self.x("UPDATE tasks SET state=?, updated_at=? WHERE id=?", (state, time.time(), task_id))
+
+    def tasks(self, search: str | None = None, limit=20) -> list[dict]:
+        sql, args = "SELECT * FROM tasks", []
+        if search:
+            sql += " WHERE title LIKE ? OR id IN (SELECT task_id FROM messages WHERE text LIKE ?)"
+            args += [f"%{search}%"] * 2
+        return self.q(sql + " ORDER BY updated_at DESC LIMIT ?", (*args, limit))
 
     # permanent memory
 
@@ -256,8 +293,11 @@ class Store:
                (turn_id, agent_id, user_text, now, now))
         return self.turn(turn_id)
 
+    TURN_SQL = ("SELECT c.*, t.title AS task_title, t.state AS task_state FROM chat_turns c"
+                " LEFT JOIN tasks t ON t.id = c.task_id")
+
     def turn(self, turn_id: str) -> dict | None:
-        t = self.one("SELECT * FROM chat_turns WHERE id=?", (turn_id,))
+        t = self.one(self.TURN_SQL + " WHERE c.id=?", (turn_id,))
         if t:
             t["activity"] = json.loads(t["activity"])
         return t
@@ -269,14 +309,14 @@ class Store:
         self.x(f"UPDATE chat_turns SET {cols}, updated_at=? WHERE id=?", (*fields.values(), time.time(), turn_id))
 
     def turns(self, agent_id: str, limit=50, before: float | None = None, search: str | None = None) -> list[dict]:
-        sql, args = "SELECT * FROM chat_turns WHERE agent_id=?", [agent_id]
+        sql, args = self.TURN_SQL + " WHERE c.agent_id=?", [agent_id]
         if before:
-            sql += " AND created_at<?"
+            sql += " AND c.created_at<?"
             args.append(before)
         if search:
-            sql += " AND (user_text LIKE ? OR reply LIKE ?)"
+            sql += " AND (c.user_text LIKE ? OR c.reply LIKE ?)"
             args += [f"%{search}%"] * 2
-        rows = self.q(sql + " ORDER BY created_at DESC LIMIT ?", (*args, limit))
+        rows = self.q(sql + " ORDER BY c.created_at DESC LIMIT ?", (*args, limit))
         for t in rows:
             t["activity"] = json.loads(t["activity"])
         return rows[::-1]

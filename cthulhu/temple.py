@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 SESSION_TTL = 30 * 86400
 OWNER_PRIORITY = 10
+TASK_STATUSES = ("progress", "blocked", "done")
 
 
 @dataclass(eq=False)
@@ -159,7 +160,7 @@ class Temple:
     # messaging
 
     async def route(self, sender: str, receiver: str, text: str, *, kind="message",
-                    priority=0, reply_to=None, message_id=None) -> dict:
+                    priority=0, reply_to=None, message_id=None, task_id=None, status=None) -> dict:
         sender_role, receiver_role = self.role_of(sender), self.role_of(receiver)
         if receiver_role is None:
             raise Denied(f"unknown agent {receiver}")
@@ -169,10 +170,29 @@ class Temple:
         roles.require_send(sender_role, receiver_role)
         if not text.strip():
             raise ValueError("empty message")
-        msg = self.store.add_message(sender, receiver, text, kind, priority, reply_to, message_id)
+        msg = self.store.add_message(sender, receiver, text, kind, priority, reply_to, message_id, task_id, status)
         await self.deliver(msg)
         await self.broadcast({"type": "message", "message": msg})
         return msg
+
+    def task_fields(self, sender_role: str, receiver_role: str | None, p: dict) -> tuple[str | None, str | None]:
+        """Work azathoth hands to shub is a task; shub's reports on it must say whether it is finished."""
+        task_id = p.get("task_id") or None
+        if task_id and not self.store.task(task_id):
+            raise ValueError(f"unknown task {task_id}")
+        if sender_role == Role.AZATHOTH and receiver_role == Role.SHUB:
+            if not task_id:
+                title = (p.get("title") or p["text"]).strip().splitlines()[0][:60]
+                task_id = self.store.add_task(title)["id"]
+            elif self.store.task(task_id)["state"] == "done":
+                self.store.set_task(task_id, "open")   # azathoth reopened it with a follow-up
+            return task_id, None
+        if sender_role == Role.SHUB and receiver_role == Role.AZATHOTH:
+            status = p.get("status")
+            if not task_id or status not in TASK_STATUSES:
+                raise ValueError("reports to azathoth need task_id and status (progress | blocked | done)")
+            return task_id, status
+        return None, None
 
     async def deliver(self, msg: dict) -> None:
         conn = self.agents.get(msg["receiver"])
@@ -181,6 +201,9 @@ class Temple:
         sender = self.store.agent(msg["sender"])
         envelope = msg | {"sender_name": sender["name"] if sender else "主人",
                           "sender_role": sender["role"] if sender else OWNER}
+        if msg.get("task_id"):
+            task = self.store.task(msg["task_id"])
+            envelope["task_title"] = task and task["title"]
         if await conn.send({"type": "message", "message": envelope}):
             if msg["state"] == "queued":
                 self.store.mark(msg["id"], "delivered")
@@ -191,9 +214,13 @@ class Temple:
         me = self.store.agent(conn.id)
         role = me["role"]
         if method == "send":
+            task_id, status = self.task_fields(role, self.role_of(p["to"]), p)
             msg = await self.route(conn.id, p["to"], p["text"], kind=p.get("kind", "message"),
-                                   priority=int(p.get("priority", 0)), reply_to=p.get("reply_to"))
-            return {"id": msg["id"]}
+                                   priority=int(p.get("priority", 0)), reply_to=p.get("reply_to"),
+                                   task_id=task_id, status=status)
+            if status == "done":
+                self.store.set_task(task_id, "done")
+            return {"id": msg["id"], "task_id": task_id}
         if method == "handled":
             msg = self.store.message(p["id"])
             if msg and msg["receiver"] == conn.id:
@@ -259,6 +286,7 @@ class Temple:
             tid = new_id("note")
             self.store.add_turn(tid, conn.id, "")
             self.store.update_turn(tid, reply=p["text"], status="done", model=p.get("model"), origin=p.get("origin"),
+                                   task_id=p.get("task_id"), kind=p.get("kind"),
                                    **({"activity": p["activity"]} if p.get("activity") else {}))
             await self.broadcast({"type": "chat", "turn": self.store.turn(tid)})
             return True
@@ -268,7 +296,10 @@ class Temple:
             return await getattr(self, method)(p, conn.id)
         if role in roles.ADMIN_READ:
             if method == "messages":
-                return self.store.messages(p.get("agent_id"), limit=min(int(p.get("limit", 50)), 500))
+                return self.store.messages(p.get("agent_id"), limit=min(int(p.get("limit", 50)), 500),
+                                           search=p.get("search"), task_id=p.get("task_id"))
+            if method == "tasks":
+                return self.store.tasks(p.get("search"), limit=min(int(p.get("limit", 20)), 100))
             if method == "agent":
                 a = self.store.agent(p["agent_id"])
                 return a and (self.public_agent(a) | {"spec": a["spec"]})
@@ -545,7 +576,8 @@ class Temple:
             if path == "messages":
                 before = float(q["before"]) if q.get("before") else None
                 return JSONResponse(self.store.messages(q.get("agent_id") or None,
-                                                        limit=min(int(q.get("limit", 100)), 500), before=before))
+                                                        limit=min(int(q.get("limit", 100)), 500), before=before,
+                                                        task_id=q.get("task_id") or None))
             if path == "memory":
                 if request.method == "POST":
                     # The owner corrects or removes an entry by hand.

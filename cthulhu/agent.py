@@ -29,7 +29,6 @@ log = logging.getLogger(__name__)
 ROLES_DIR = Path(__file__).parent / "roles"
 # Rotate the temporary thread once the last request filled this much of the window.
 ROTATE_AT = 0.8
-# TODO: compact permanent memory once it grows past ~100k tokens.
 # How many turns from other backends' threads to replay when switching threads.
 HANDOFF_TURNS = 12
 
@@ -124,19 +123,23 @@ class Agent:
     async def extra_context(self) -> str:
         return ""
 
+    def send_tool(self, extra: dict | None = None) -> dict:
+        return tool("temple_send", "通过中心神殿给另一个 agent 发消息。接收方由程序校验权限；对方回复会作为新消息到达，不要等待或轮询。",
+                    {"to": {"type": "string", "description": "接收方 agent ID"},
+                     "text": {"type": "string"},
+                     "priority": {"type": "integer", "description": "0 普通，5 紧急"}, **(extra or {})},
+                    ["to", "text"])
+
     def tools(self) -> list[dict]:
         return [
-            tool("temple_send", "通过中心神殿给另一个 agent 发消息。接收方由程序校验权限；对方回复会作为新消息到达，不要等待或轮询。",
-                 {"to": {"type": "string", "description": "接收方 agent ID"},
-                  "text": {"type": "string"},
-                  "priority": {"type": "integer", "description": "0 普通，5 紧急"}},
-                 ["to", "text"]),
+            self.send_tool(),
             tool("temple_agents", "列出你可以联系的 agent 及其状态，以及所有星系（是否在线、能否创建旧日支配者）。"),
         ]
 
     async def call_tool(self, name: str, args: dict) -> Any:
         if name == "temple_send":
-            return await self.send(args["to"], args["text"], priority=int(args.get("priority", 0)))
+            return await self.send(args["to"], args["text"], priority=int(args.get("priority", 0)),
+                                   task_id=args.get("task_id"), status=args.get("status"), title=args.get("title"))
         if name == "temple_agents":
             d = await self.link.call("directory")
             return {"agents": [{k: a[k] for k in ("id", "name", "role", "state", "online", "task", "galaxy_id")}
@@ -146,10 +149,11 @@ class Agent:
 
     # public interface
 
-    async def send(self, to: str, text: str, priority: int = 0, kind: str = "message") -> dict:
-        r = await self.link.call("send", to=to, text=text, priority=priority, kind=kind)
+    async def send(self, to: str, text: str, priority: int = 0, kind: str = "message", **task) -> dict:
+        r = await self.link.call("send", to=to, text=text, priority=priority, kind=kind,
+                                 **{k: v for k, v in task.items() if v})
         await self.on_sent(to, text)
-        return {"sent": r["id"]}
+        return {"sent": r["id"], **({"task_id": r["task_id"]} if r.get("task_id") else {})}
 
     async def receive(self, batch: list[dict]) -> None:
         """Handle a batch of queued messages in one turn."""
@@ -180,7 +184,10 @@ class Agent:
         out = []
         for m in batch:
             who = "主人" if m["sender"] == OWNER else f"{m['sender_name']}（{m['sender_role']}，ID {m['sender']}）"
-            out.append(f"[消息 {m['id']} · 来自 {who} · {time.strftime('%m-%d %H:%M', time.localtime(m['created_at']))}]\n{m['text']}")
+            task = f" · 任务 {m['task_id']}「{m.get('task_title') or ''}」" if m.get("task_id") else ""
+            status = f" · 状态 {m['status']}" if m.get("status") else ""
+            out.append(f"[消息 {m['id']} · 来自 {who} · {time.strftime('%m-%d %H:%M', time.localtime(m['created_at']))}"
+                       f"{task}{status}]\n{m['text']}")
         return "\n\n".join(out)
 
     # threads

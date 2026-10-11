@@ -4,6 +4,7 @@ Mirrors fake_codex.py: echoes input, runs `CALL <tool> <json>` through the
 temple MCP server, and keeps per-session history so forks can be checked.
 """
 import json
+import re
 import uuid
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock, ToolUseBlock
@@ -47,6 +48,8 @@ class FakeClient:
             reply = json.dumps({"add": ["记住: " + (hist[-1] if hist else "")[-20:]], "update": [], "forget": []}, ensure_ascii=False)
         elif "CALL " in text.split("</handoff>")[-1]:
             name, args = text.split("</handoff>")[-1].split("CALL ", 1)[1].split(" ", 1)
+            m = re.search(r"任务 (task_\w+)", text)
+            args = args.replace("$TASK", m.group(1)) if m else args
             full = f"mcp__temple__{name}"
             yield AssistantMessage(content=[ToolUseBlock(id="t1", name=full, input=json.loads(args.splitlines()[0]))],
                                    model=self.o.model)

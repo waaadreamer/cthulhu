@@ -49,6 +49,10 @@ export interface Turn {
   status: 'queued' | 'running' | 'done' | 'interrupted' | 'failed'
   model?: string | null
   origin?: string | null
+  task_id?: string | null
+  task_title?: string | null
+  task_state?: string | null
+  kind?: 'progress' | 'blocked' | 'summary' | 'notice' | null
   created_at: number
   updated_at: number
 }
