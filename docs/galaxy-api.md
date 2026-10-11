@@ -135,12 +135,18 @@ echo仅在内存执行一次。生产provider的WS不做故障注入；断开pro
 3. Ali现场确认评测进程归属与安全任务边界，再更新galaxy/agent和Ali本机配置。
    不能杀生产WS来测试断连；不能复制个人OAuth或公司key。
 4. 注册后先跑隔离canary，再逐个升级消费者并读取运行进程报告的版本/能力，
-   最后才选galaxy_api。中心systemd和Ali/韩国nohup监督必须分别处理。
+   最后才选galaxy_api。分别处理中心systemd、Ali用户systemd和韩国nohup监督。
 5. 离线work_notebook标pending，重新上线后补部署/验证，不能宣称全星系完成。
 
 中心服务重启galaxy会终止其当前agent回合，因此只在排空且确认业务进程安全后执行。
-ghroth服务最后用延迟任务重启，避免中途杀维护回合。远端run.sh循环会重启galaxy，
-不能全局pkill；现场先备份并核实PID/父子关系、启动器和代码根，再针对该实例维护。
+ghroth服务最后用延迟任务重启，避免中途杀维护回合。
+Ali现场确认由用户systemd单元cthulhu-galaxy.service启动~/.cthulhu/run.sh，
+KillMode=control-group会终止其受管agent；必须等执行者自身回合及后台工作结束，
+并核验整个单元cgroup后，才可由独立于该单元的现场执行上下文重启用户单元。
+韩国现场为nohup/run.sh循环；保留经核验的wrapper，仅在排空放行后定向重启galaxy子进程，
+执行前重验PID/starttime/PPID/源码及配置，不匹配即停止。
+不能全局pkill；现场先备份并核实启动器和代码根，再针对该实例维护。
+保留既有未跟踪文件（如cthulhu.egg-info），不使用git clean。
 不能通过旧read_file RPC执行代码，也不能冒用现有galaxy凭证开第二条连接作为部署捷径。
 
 回滚先停止新API选择并排空，把角色显式恢复codex，再恢复配置/代码；
