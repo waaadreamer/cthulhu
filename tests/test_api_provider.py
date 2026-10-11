@@ -163,6 +163,10 @@ class RuntimeSafetyTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(pair.using_fallback)
             self.assertEqual(pair.active_cfg["backend"], "codex")
             pair.fallback.start.assert_awaited_once()
+            # A startup failure is retried after a short hold, not the 30-minute one.
+            self.assertEqual(pair.hold, backends.STARTUP_RETRY)
+            pair.failed_at -= backends.STARTUP_RETRY + 1
+            self.assertFalse(pair.using_fallback)
 
 
 class DrainTests(unittest.TestCase):

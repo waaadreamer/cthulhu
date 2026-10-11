@@ -389,8 +389,12 @@ class Agent:
 
     async def watchdog(self) -> None:
         # A crashed codex app-server takes its threads with it; let the galaxy restart the agent.
+        on_fallback = self.backends.using_fallback
         while True:
             await asyncio.sleep(5)
+            if on_fallback != self.backends.using_fallback:
+                on_fallback = self.backends.using_fallback
+                await self.report(self.state)       # the UI shows the primary again once the hold ends
             rt = self.backends.active
             # Fallback is started lazily. A failed primary with a fallback is
             # retried by ensure_thread at a turn boundary after the hold expires.

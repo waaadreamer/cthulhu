@@ -23,6 +23,9 @@ DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
 
 # After the primary fails, stay on the fallback this long before trying it again.
 FALLBACK_HOLD = 30 * 60
+# A primary that failed only to *start* (e.g. its Galaxy API provider was reconnecting during a deploy)
+# is retried much sooner; a failure during a turn keeps the full hold.
+STARTUP_RETRY = 60
 
 
 def build(cfg: dict, *, codex: str, cwd: str, log_dir, sub_agents: bool, api_link=None):
@@ -72,11 +75,12 @@ class Backends:
         fb = cfg.get("fallback")
         self.fallback = build(fb, **build_kw) if fb else None
         self.failed_at = 0.0
+        self.hold = FALLBACK_HOLD
         self.started = False
 
     @property
     def using_fallback(self) -> bool:
-        return self.fallback is not None and time.time() - self.failed_at < FALLBACK_HOLD
+        return self.fallback is not None and time.time() - self.failed_at < self.hold
 
     @property
     def active(self):
@@ -86,11 +90,11 @@ class Backends:
     def active_cfg(self) -> dict:
         return self.cfg["fallback"] if self.using_fallback else self.cfg
 
-    def trip(self) -> bool:
+    def trip(self, hold: float = FALLBACK_HOLD) -> bool:
         """Primary failed: switch to the fallback if there is one."""
         if self.fallback is None or self.using_fallback:
             return False
-        self.failed_at = time.time()
+        self.failed_at, self.hold = time.time(), hold
         return True
 
     async def start(self) -> None:
@@ -100,7 +104,7 @@ class Backends:
             await self.primary.start()
         except Exception:
             await self.primary.close()
-            if not self.trip():
+            if not self.trip(STARTUP_RETRY):
                 raise
             logging.getLogger(__name__).warning("primary startup failed; starting configured fallback")
             await self.fallback.start()
