@@ -87,6 +87,7 @@ class Agent:
         self.seen: set[str] = set()
         self.wake = asyncio.Event()
         self.draining = False
+        self.in_batch = False        # handling a batch right now (state alone can read "working" with work only queued)
         self.inflight_runs = 0
         self.state = "starting"
         self.current: str | None = None
@@ -409,18 +410,23 @@ class Agent:
             await self.wake.wait()
             self.wake.clear()
             if not self.queue or self.draining:
+                if self.state != "idle":
+                    await self.report("idle")    # queued work waits for the drain to end; we are not busy
                 continue
             await self.apply_runtime()
             batch = self.take_batch()
             self.current = clip(batch[0]["text"], 120)
             self.current_task = next((m["task_id"] for m in batch if m.get("task_id")), None)
             self.working_since = time.time()
+            self.in_batch = True
             await self.report("working")
             try:
                 await self.receive(batch)
             except Exception as e:
                 log.exception("%s failed to handle a batch", self.name)
                 self.latest = {"error": str(e), "at": time.time()}
+            finally:
+                self.in_batch = False
             for m in batch:
                 try:
                     await self.link.call("handled", id=m["id"])
@@ -429,7 +435,7 @@ class Agent:
             self.current = self.current_task = self.working_since = None
             await self.report("idle" if not self.queue else "working")
             if self.queue:
-                self.wake.set()
+                self.wake.set()      # next batch, or (while draining) back to idle
 
     async def report(self, state: str) -> None:
         self.state = state
@@ -464,7 +470,7 @@ class Agent:
         background_busy = memory_busy or getattr(self, "patrol_busy", False)
         return {"draining": self.draining, "active_runs": self.inflight_runs,
                 "state": self.state, "queued": len(self.queue), "background_busy": background_busy,
-                "safe": self.draining and self.inflight_runs == 0 and not background_busy and self.state == "idle"}
+                "safe": self.draining and self.inflight_runs == 0 and not background_busy and not getattr(self, "in_batch", False)}
 
     async def _on_frame(self, frame: dict) -> Any:
         t = frame.get("type")

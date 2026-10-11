@@ -217,6 +217,31 @@ class Universe(unittest.TestCase):
         self.assertEqual((r["last_reply"], r["last_status"]), ("部署完成", "completed"))
         self.assertTrue(r["finished_at"])
 
+    def test_drain_with_queued_work_is_safe(self):
+        # Regression: an agent that finished a batch with more work queued showed "working" forever while
+        # draining, so the deploy never got a safe drain and every message waited behind it.
+        async def go():
+            from cthulhu.protocol import maintenance_token
+            link = Link(f"ws://127.0.0.1:{self.port}/ws", {"kind": "maintenance", "id": "t",
+                        "token": maintenance_token(self.secret)}, lambda w: asyncio.sleep(0), lambda f: asyncio.sleep(0))
+            task = asyncio.create_task(link.run())
+            try:
+                await link.call("maintenance_drain", galaxy="g1", enabled=True, timeout=10)
+                self.api("send", {"to": "gh", "text": "排空时到达的消息"})
+                for _ in range(40):
+                    st = await link.call("maintenance_drain", galaxy="g1", timeout=10)
+                    if st["safe_to_restart"]:
+                        return st
+                    await asyncio.sleep(0.5)
+                return st
+            finally:
+                await link.call("maintenance_drain", galaxy="g1", enabled=False, timeout=10)
+                task.cancel()
+        st = asyncio.run(go())
+        self.assertTrue(st["safe_to_restart"], st)
+        # Undrained: the queued message is handled.
+        self.wait(lambda: any(t["user_text"] == "排空时到达的消息" and t["status"] == "done" for t in self.api("chat?agent_id=gh")))
+
     def test_impersonation_rejected(self):
         async def go():
             link = Link(f"ws://127.0.0.1:{self.port}/ws", {"kind": "agent", "id": "sh", "token": agent_token("wrong", "sh", 1)},
