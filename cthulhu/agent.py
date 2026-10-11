@@ -90,6 +90,8 @@ class Agent:
         self.inflight_runs = 0
         self.state = "starting"
         self.current: str | None = None
+        self.current_task: str | None = None      # task id of the batch being handled, if any
+        self.working_since: float | None = None
         self.active: tuple | None = None   # (runtime, thread, turn) of the running turn
         self.latest: dict = {}
         self.ready = asyncio.Event()
@@ -181,6 +183,7 @@ class Agent:
 
     def latest_result(self) -> dict:
         return {"role": self.role.value, "state": self.state, "current": self.current,
+                "current_task": self.current_task, "working_since": self.working_since,
                 "queued": len(self.queue), "context_fill": round(self.runtime.context_fill(self.thread_id or ""), 3),
                 "api_result": getattr(self.runtime, "api_result", None), **self.latest}
 
@@ -410,6 +413,8 @@ class Agent:
             await self.apply_runtime()
             batch = self.take_batch()
             self.current = clip(batch[0]["text"], 120)
+            self.current_task = next((m["task_id"] for m in batch if m.get("task_id")), None)
+            self.working_since = time.time()
             await self.report("working")
             try:
                 await self.receive(batch)
@@ -421,7 +426,7 @@ class Agent:
                     await self.link.call("handled", id=m["id"])
                 except Exception:
                     pass
-            self.current = None
+            self.current = self.current_task = self.working_since = None
             await self.report("idle" if not self.queue else "working")
             if self.queue:
                 self.wake.set()

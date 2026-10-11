@@ -203,6 +203,13 @@ class Universe(unittest.TestCase):
         # yog's patrol eventually logs a summary
         self.wait(lambda: self.api("patrols"), 30)
 
+    def test_yog_always_reports_working_ghroth(self):
+        # Ghroth answers no one; while it works, every patrol must reach azathoth (program-enforced).
+        self.api("send", {"to": "gh", "text": "SLEEP 8"})
+        msg = self.wait(lambda: next(m for m in self.api("messages?agent_id=az") if m["sender"] == "yo"
+                                     and "Ghroth is working" in m["text"]), 20)
+        self.assertIn("SLEEP 8", msg["text"])
+
     def test_impersonation_rejected(self):
         async def go():
             link = Link(f"ws://127.0.0.1:{self.port}/ws", {"kind": "agent", "id": "sh", "token": agent_token("wrong", "sh", 1)},

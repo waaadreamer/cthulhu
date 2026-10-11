@@ -229,7 +229,8 @@ class Azathoth(OwnerChat, MemoryAgent):
     def tools(self) -> list[dict]:
         return [
             self.send_tool({
-                "task_id": {"type": "string", "description": "发给黑山羊时：跟进已有任务就填它的任务 ID；不填则新建任务"},
+                "task_id": {"type": "string", "description": "发给黑山羊时：跟进已有任务就填它的任务 ID，不填则新建任务。"
+                            "发给格赫罗斯的工作属于某个已有任务时，也填它的任务 ID"},
                 "title": {"type": "string", "description": "发给黑山羊的新任务：十几个字的任务标题"}}),
             *super().tools()[1:],
             *HISTORY_TOOLS,
@@ -390,6 +391,9 @@ class Yog(MemoryAgent):
     def __init__(self, *a, patrol_interval: float = 300, **kw):
         super().__init__(*a, **kw)
         self.patrol_interval = patrol_interval
+        self.azathoth_id = Role.AZATHOTH.value
+        self.ghroth_task: str | None = None
+        self.reported = False
         self.last_fingerprint = None
         self.last_patrol = 0.0
         # agent id -> finished_at already shown in a patrol; persisted so restarts don't re-report.
@@ -404,11 +408,6 @@ class Yog(MemoryAgent):
             tool("temple_latest_result", "远程读取某个 agent 的最新工作状态与产出。", {"agent_id": STR}, ["agent_id"]),
         ]
 
-    async def call_tool(self, name: str, args: dict):
-        if name == "temple_latest_result":
-            return await self.link.call("latest_result", agent_id=args["agent_id"])
-        return await super().call_tool(name, args)
-
     async def background(self) -> None:
         while True:
             await asyncio.sleep(self.patrol_interval)
@@ -422,16 +421,28 @@ class Yog(MemoryAgent):
             except Exception:
                 log.exception("patrol failed")
 
+    async def on_sent(self, to: str, text: str) -> None:
+        if to == self.azathoth_id:
+            self.reported = True
+
+    async def call_tool(self, name: str, args: dict):
+        if name == "temple_latest_result":
+            return await self.link.call("latest_result", agent_id=args["agent_id"])
+        return await super().call_tool(name, args)
+
     async def patrol(self) -> None:
         snapshot = await self.link.call("patrol")
         if not snapshot:
             return
+        ghroth = next((s for s in snapshot if s.get("role") == Role.GHROTH), None)
+        ghroth_busy = bool(ghroth and ghroth.get("state") == "working")
         # Volatile fields excluded so an idle universe does not cost a model call.
         stable = [{k: s.get(k) for k in ("agent_id", "state", "online", "finished_at", "last_status", "queued")}
                   for s in snapshot]
         fingerprint = hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
         busy = any(s.get("state") == "working" for s in snapshot)
-        if fingerprint == self.last_fingerprint and not (busy and time.time() - self.last_patrol > 3 * self.patrol_interval):
+        if not ghroth_busy and fingerprint == self.last_fingerprint and \
+                not (busy and time.time() - self.last_patrol > 3 * self.patrol_interval):
             return
         self.last_fingerprint, self.last_patrol = fingerprint, time.time()
         # Mark turns that finished since the previous patrol, so new results are reported exactly once.
@@ -441,6 +452,16 @@ class Yog(MemoryAgent):
             if done:
                 self.seen_results[snap["agent_id"]] = done
         self.seen_path.write_text(json.dumps(self.seen_results))
+        # Ghroth answers no one, so while it works (or when it has just finished) azathoth must hear from yog
+        # on every patrol; the program enforces it.
+        must_report = bool(ghroth and (ghroth_busy or ghroth.get("new_result")))
+        d = await self.link.call("directory")
+        self.azathoth_id = next((a["id"] for a in d["agents"] if a["role"] == Role.AZATHOTH), self.azathoth_id)
+        self.ghroth_task = ghroth.get("current_task") if ghroth_busy else None
+        self.reported = False
+        rule = ("本次巡检中格赫罗斯" + ("正在工作" if ghroth_busy else "刚完成了新结果") +
+                "：无论是否正常，都必须给阿撒托斯发一条消息，用一两句话说明它在做什么、做到哪一步、是否正常"
+                "（已工作多久见 working_since）。" if must_report else "")
         rt = self.runtime
         thread = await rt.start_thread(await self.instructions(), self.tools(), self.call_tool, ephemeral=True)
         try:
@@ -448,17 +469,39 @@ class Yog(MemoryAgent):
                       f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=1)}\n```\n"
                       f"最近的巡检结论：\n{await self.recent_patrols()}\n\n"
                       "判断每个 agent 是否在正常推进。需要催办就直接 temple_send 给该旧日支配者；需要阿撒托斯决策或纠偏才发给阿撒托斯。"
-                      "一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
+                      f"{rule}除此之外一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
             r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
             if r.status == "failed" and getattr(rt, "retry_safe", True) and self.backends.trip():
                 await rt.drop_thread(thread)
                 rt = self.runtime
                 thread = await rt.start_thread(await self.instructions(), self.tools(), self.call_tool, ephemeral=True)
                 r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
+            if must_report and not self.reported and r.status == "completed":
+                r2 = await self.run(thread, "【程序提示】你还没有给阿撒托斯发格赫罗斯的情况。现在用 temple_send 发一条（英文，一两句话）。",
+                                    track=False, timeout=600, runtime=rt)
+                if r2.status != "completed":
+                    log.warning("yog follow-up report turn failed: %s", r2.error)
+            if must_report and not self.reported:
+                await self.send(self.azathoth_id, self.ghroth_fallback(ghroth))
             self.latest = {"last_patrol": clip(r.text, 1500), "finished_at": time.time()}
             await self.link.call("patrol_log", summary=r.text or r.error or "")
         finally:
+            self.ghroth_task = None
             await rt.drop_thread(thread)
+
+    async def send(self, to: str, text: str, priority: int = 0, kind: str = "message", **task) -> dict:
+        if to == self.azathoth_id and self.ghroth_task and not task.get("task_id"):
+            task["task_id"] = self.ghroth_task
+        return await super().send(to, text, priority, kind, **task)
+
+    @staticmethod
+    def ghroth_fallback(g: dict) -> str:
+        """Program-written report when the model did not send one."""
+        if g.get("state") == "working":
+            mins = int((time.time() - (g.get("working_since") or time.time())) / 60)
+            steps = "; ".join((g.get("live") or [])[-3:]) or "no tool activity yet"
+            return f"[auto] Ghroth is working ({mins} min) on: {g.get('current') or '?'} Recent activity: {steps}"
+        return f"[auto] Ghroth finished a turn ({g.get('last_status')}): {clip(g.get('last_reply') or '', 600)}"
 
     async def recent_patrols(self) -> str:
         rows = await self.link.call("patrol_log_recent")

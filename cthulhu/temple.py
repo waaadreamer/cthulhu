@@ -224,6 +224,11 @@ class Temple:
             elif self.store.task(task_id)["state"] == "done":
                 self.store.set_task(task_id, "open")   # azathoth reopened it with a follow-up
             return task_id, None
+        if sender_role == Role.AZATHOTH and receiver_role == Role.GHROTH:
+            return task_id, None                      # harness work for an existing task keeps its id
+        if sender_role == Role.YOG and receiver_role == Role.AZATHOTH:
+            # Yog's reports on ghroth's work for a task show up as steps of that task.
+            return (task_id, "progress") if task_id else (None, None)
         if sender_role == Role.SHUB and receiver_role == Role.AZATHOTH:
             status = p.get("status")
             if not task_id or status not in TASK_STATUSES:

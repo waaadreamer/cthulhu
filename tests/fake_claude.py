@@ -3,6 +3,7 @@
 Mirrors fake_codex.py: echoes input, runs `CALL <tool> <json>` through the
 temple MCP server, and keeps per-session history so forks can be checked.
 """
+import asyncio
 import json
 import re
 import uuid
@@ -59,6 +60,9 @@ class FakeClient:
             else:
                 out = await tool.handler(json.loads(args.splitlines()[0]))
                 reply = "tool: " + out["content"][0]["text"]
+        elif "SLEEP " in text and "定时巡检" not in text:
+            await asyncio.sleep(float(text.split("SLEEP ", 1)[1].split()[0]))
+            reply = "slept"
         elif "REPLY " in text.split("</handoff>")[-1]:
             reply = text.split("REPLY ", 1)[1].strip()
         else:

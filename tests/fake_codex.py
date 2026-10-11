@@ -8,6 +8,7 @@ Memory distillation turns (with outputSchema) return {"add": [...], "update": []
 """
 import itertools
 import json
+import time
 import re
 import sys
 
@@ -71,6 +72,9 @@ for line in sys.stdin:
             pending[cid] = (p["threadId"], turn)
             out({"id": cid, "method": "item/tool/call", "params": {"threadId": p["threadId"], "turnId": turn,
                  "callId": "c", "tool": name, "arguments": json.loads(args.strip().splitlines()[0])}})
+        elif "SLEEP " in body and "定时巡检" not in body:   # yog's patrol prompt quotes it; only the target sleeps
+            time.sleep(float(body.split("SLEEP ", 1)[1].split()[0]))
+            finish(p["threadId"], turn, "slept")
         elif "REPLY " in body:
             finish(p["threadId"], turn, body.split("REPLY ", 1)[1].strip())
         else:
