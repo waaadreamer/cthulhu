@@ -252,7 +252,10 @@ class Temple:
             if not task_id or status not in TASK_STATUSES:
                 raise ValueError("reports to azathoth need task_id and status (progress | blocked | done)")
             return task_id, status
-        return None, None
+        # Keep an explicitly validated task on delegated work and field replies.
+        # Message permission is checked separately; only designated reports may
+        # carry a task status or complete/reopen the task.
+        return task_id, None
 
     async def deliver(self, msg: dict) -> None:
         recipient = self.store.agent(msg["receiver"])
