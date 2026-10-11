@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import random
+import ssl
 from typing import Any, Awaitable, Callable
 
 import websockets
@@ -38,13 +39,34 @@ class CallFailed(Exception):
     pass
 
 
+def pinned_ssl(fingerprint: str | None) -> ssl.SSLContext | None:
+    """TLS context for a self-signed temple: accept exactly the certificate with this SHA-256."""
+    if not fingerprint:
+        return None
+    want = fingerprint.replace(":", "").lower()
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE   # verified below by fingerprint, before any data is sent
+    ctx.pinned = want                 # type: ignore[attr-defined]
+    return ctx
+
+
+def check_pin(ws, ctx: ssl.SSLContext | None) -> None:
+    if ctx is None or not getattr(ctx, "pinned", None):
+        return
+    der = ws.transport.get_extra_info("ssl_object").getpeercert(binary_form=True)
+    if hashlib.sha256(der).hexdigest() != ctx.pinned:  # type: ignore[attr-defined]
+        raise ssl.SSLError("temple certificate does not match the pinned fingerprint")
+
+
 class Link:
     """A persistent, self-reconnecting client connection to the temple."""
 
     def __init__(self, url: str, hello: dict,
                  on_welcome: Callable[[dict], Awaitable[None]],
-                 on_frame: Callable[[dict], Awaitable[Any]]):
+                 on_frame: Callable[[dict], Awaitable[Any]], tls_pin: str | None = None):
         self.url, self.hello = url, hello
+        self.ssl = pinned_ssl(tls_pin) if url.startswith("wss://") else None
         self.on_welcome, self.on_frame = on_welcome, on_frame
         self.ws = None
         self.connected = asyncio.Event()
@@ -57,7 +79,8 @@ class Link:
         while self.fatal is None:
             try:
                 async with websockets.connect(self.url, max_size=64 * 1024 * 1024, ping_interval=20,
-                                              ping_timeout=60, proxy=None) as ws:
+                                              ping_timeout=60, proxy=None, ssl=self.ssl) as ws:
+                    check_pin(ws, self.ssl)
                     await ws.send(dumps({"type": "hello", **self.hello}))
                     welcome = json.loads(await ws.recv())
                     if welcome.get("type") == "rejected":
@@ -76,7 +99,7 @@ class Link:
                                 fut.set_result(frame)
                         else:
                             asyncio.create_task(self._dispatch(frame))
-            except (OSError, websockets.WebSocketException, asyncio.TimeoutError) as e:
+            except (OSError, ssl.SSLError, websockets.WebSocketException, asyncio.TimeoutError) as e:
                 log.warning("temple link down: %s", e)
             finally:
                 self.ws = None

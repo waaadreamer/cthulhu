@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -25,13 +26,10 @@ def main() -> None:
     s = sub.add_parser("agent", help="run one agent (started by a galaxy)")
     s.add_argument("--galaxy-config", required=True)
     s.add_argument("--launch", required=True)
-    s = sub.add_parser("provision", help="register a new galaxy in the temple config and print its install command")
+    s = sub.add_parser("provision", help="register a new galaxy and print its one-line install command")
     s.add_argument("--config", required=True, help="temple config")
     s.add_argument("--id", required=True)
     s.add_argument("--name", required=True)
-    s.add_argument("--temple-ws", default="ws://127.0.0.1:7500/ws",
-                   help="websocket URL as seen from the galaxy (default assumes an SSH tunnel)")
-    s.add_argument("--repo", default="https://github.com/waaadreamer/cthulhu.git")
     s.add_argument("--no-spawn", action="store_true", help="galaxy refuses old_ones")
     s = sub.add_parser("passwd", help="set the owner web password")
     s.add_argument("--config", required=True)
@@ -63,25 +61,30 @@ def main() -> None:
         kw = {"patrol_interval": cfg.get("patrol_interval", 300)} if role == Role.YOG else {}
         agent = CLASSES[role](cfg["temple_ws"], launch, cfg["codex"], cfg.get("cwd") or str(Path.home()),
                               Path(cfg["state"]) / launch["id"], model=models.get(role.value, cfg.get("model")),
-                              effort=cfg.get("effort"), runtime=cfg.get("runtimes", {}).get(role.value), **kw)
+                              effort=cfg.get("effort"), runtime=cfg.get("runtimes", {}).get(role.value),
+                              tls_pin=cfg.get("tls_pin"), **kw)
         asyncio.run(agent.main())
     elif args.cmd == "provision":
         import base64
+        import ssl
         cfg = json.loads(Path(args.config).read_text())
         if any(g["id"] == args.id for g in cfg["galaxies"]):
             raise SystemExit(f"galaxy {args.id} already exists")
+        public = cfg.get("public")
+        if not public:
+            raise SystemExit('temple config needs "public": {"ws": "wss://host:port/ws", "cert": "/path/cert.pem", "repo": "owner/name"}')
         token = secrets.token_hex(32)
         g = {"id": args.id, "name": args.name, "token": token}
         if args.no_spawn:
             g["spawn"] = False
         cfg["galaxies"].append(g)
         Path(args.config).write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
-        galaxy = {"id": args.id, "token": token, "temple_ws": args.temple_ws, "model": "gpt-6.1-sol"}
-        blob = base64.b64encode(json.dumps(galaxy).encode()).decode()
-        print(f"galaxy {args.id} registered; restart the temple to accept it.\n")
-        print("Run on the target machine (as the user the agents should run as):\n")
-        print(f"  curl -fsSL https://raw.githubusercontent.com/{args.repo.split('github.com/')[1].removesuffix('.git')}"
-              f"/main/deploy/install-galaxy.sh | bash -s -- {blob}")
+        der = ssl.PEM_cert_to_DER_cert(Path(public["cert"]).read_text())
+        galaxy = {"id": args.id, "token": token, "temple_ws": public["ws"], "tls_pin": hashlib.sha256(der).hexdigest()}
+        blob = base64.urlsafe_b64encode(json.dumps(galaxy).encode()).decode()
+        print(f"galaxy {args.id} registered; restart the temple (systemctl restart cthulhu-v2-temple) to accept it.\n")
+        print("Run on the target machine, as the user the agents should run as (no root needed):\n")
+        print(f"curl -fsSL https://raw.githubusercontent.com/{public['repo']}/main/deploy/install-galaxy.sh | bash -s -- {blob}")
     elif args.cmd == "passwd":
         import getpass
         from .store import Store

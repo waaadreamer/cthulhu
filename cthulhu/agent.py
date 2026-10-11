@@ -48,7 +48,8 @@ class Agent:
     persistent_thread = True
 
     def __init__(self, temple_url: str, launch: dict, codex: str, cwd: str, state_dir: Path,
-                 model: str | None = None, effort: str | None = None, runtime: dict | None = None):
+                 model: str | None = None, effort: str | None = None, runtime: dict | None = None,
+                 tls_pin: str | None = None):
         self.id, self.name = launch["id"], launch["name"]
         self.spec: dict = launch.get("spec") or {}
         self.state_dir = state_dir
@@ -65,7 +66,7 @@ class Agent:
         self.loaded: set[str] = set()         # threads open in the current runtime instances
         self.last_turn: tuple | None = None   # (runtime, thread) of the last main-thread turn
         self.link = Link(temple_url, {"kind": "agent", "id": self.id, "token": launch["token"]},
-                         self._on_welcome, self._on_frame)
+                         self._on_welcome, self._on_frame, tls_pin=tls_pin)
         self.memory: list[dict] = []
         self._load_threads(launch.get("thread_id"))
         self.queue: list[dict] = []

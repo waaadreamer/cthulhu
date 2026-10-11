@@ -39,7 +39,7 @@ class Galaxy:
         self.state.mkdir(parents=True, exist_ok=True)
         self.procs: dict[str, Proc] = {}
         self.link = Link(config["temple_ws"], {"kind": "galaxy", "id": self.id, "token": config["token"]},
-                         self._welcome, self._frame)
+                         self._welcome, self._frame, tls_pin=config.get("tls_pin"))
 
     async def _welcome(self, w: dict) -> None:
         log.info("galaxy %s connected to temple", w.get("name"))

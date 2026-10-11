@@ -4,13 +4,12 @@
 #   curl -fsSL https://raw.githubusercontent.com/<owner>/cthulhu/main/deploy/install-galaxy.sh | bash -s -- <blob>
 #
 # <blob> comes from `python -m cthulhu provision` on the temple. It carries the
-# galaxy id, its secret token and the temple websocket URL.
+# galaxy id, its secret token, the temple's wss:// URL and its certificate pin.
+# The node only needs outbound access to the temple port; nothing is exposed on it.
 #
 # Environment overrides:
 #   CTHULHU_HOME   install directory            (default ~/.cthulhu)
 #   CTHULHU_REPO   git URL                      (default github.com/waaadreamer/cthulhu)
-#   CTHULHU_TUNNEL ssh target for the temple tunnel, e.g. cthulhu-tunnel@47.115.202.248
-#                  (a reconnecting `ssh -N -L 7500:127.0.0.1:7500`; the account may only forward that port)
 #   CODEX_BIN      existing codex binary         (default: download @openai/codex via npm, else skip)
 set -euo pipefail
 
@@ -69,7 +68,7 @@ umask 077
 "$HOME_DIR/venv/bin/python" - "$BLOB" "$HOME_DIR" "$CODEX" <<'PY'
 import base64, json, sys
 blob, home, codex = sys.argv[1:]
-g = json.loads(base64.b64decode(blob))
+g = json.loads(base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4)))
 g.update({"state": f"{home}/state", "codex": codex, "cwd": g.get("cwd") or f"{home}/work"})
 g.setdefault("runtimes", {})
 open(f"{home}/galaxy.json", "w").write(json.dumps(g, indent=2))
@@ -78,24 +77,12 @@ PY
 mkdir -p work
 umask 022
 
-# 5. tunnel key: a dedicated key the temple authorizes for forwarding only
-TUNNEL_KEY="$HOME_DIR/tunnel_ed25519"
-if [ -n "${CTHULHU_TUNNEL:-}" ] && [ ! -f "$TUNNEL_KEY" ]; then
-  ssh-keygen -q -t ed25519 -N '' -f "$TUNNEL_KEY" -C "cthulhu-galaxy@$(hostname)"
-fi
-
-# 6. launcher: tunnel (optional) + galaxy, restarted forever
+# 5. launcher: galaxy, restarted forever
 cat > run.sh <<EOF
 #!/usr/bin/env bash
 cd "$HOME_DIR"
 export PYTHONPATH="$HOME_DIR/src"
 [ -f "$HOME_DIR/env" ] && set -a && . "$HOME_DIR/env" && set +a
-if [ -n "${CTHULHU_TUNNEL:-}" ]; then
-  ( while true; do ssh -N -i "$TUNNEL_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \\
-      -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \\
-      -L 7500:127.0.0.1:7500 ${CTHULHU_TUNNEL:-} ; sleep 5; done ) &
-  sleep 3
-fi
 while true; do
   "$HOME_DIR/venv/bin/python" -m cthulhu galaxy --config "$HOME_DIR/galaxy.json" >> "$HOME_DIR/galaxy.log" 2>&1
   sleep 5
@@ -103,7 +90,7 @@ done
 EOF
 chmod +x run.sh
 
-# 7. keep it running: systemd --user if available, else nohup
+# 6. keep it running: systemd --user if available, else nohup
 if systemctl --user status >/dev/null 2>&1; then
   mkdir -p ~/.config/systemd/user
   cat > ~/.config/systemd/user/cthulhu-galaxy.service <<EOF
@@ -126,12 +113,7 @@ else
   say "running in background (no systemd --user); log: $HOME_DIR/galaxy.log"
 fi
 
-if [ -n "${CTHULHU_TUNNEL:-}" ]; then
-  say "authorize this node's tunnel key on the temple (it can only forward to the temple websocket):"
-  echo
-  echo "  sudo /opt/cthulhu/deploy/authorize-tunnel.sh '$(cat "$TUNNEL_KEY.pub")'"
-  echo
-  say "the tunnel retries every 5s, so the galaxy connects as soon as the key is authorized."
-fi
+sleep 4
+if grep -q "connected to temple" "$HOME_DIR/galaxy.log" 2>/dev/null; then say "galaxy connected to the temple"; else say "not connected yet; check $HOME_DIR/galaxy.log"; fi
 say "done. Put API credentials (e.g. ANTHROPIC_*) in $HOME_DIR/env if this galaxy runs Claude agents."
 say "Codex login: run '$CODEX login' once as this user if it is not logged in."
