@@ -241,6 +241,7 @@ class Azathoth(OwnerChat, MemoryAgent):
                  "也用于批准或拒绝格赫罗斯的部署请求（request_id）。",
                  {"galaxies": {"type": "array", "items": STR, "description": "星系 ID 列表；不填或 [\"all\"] 表示中心神殿和全部星系"},
                   "reason": STR, "task_id": STR,
+                  "recover_job_id": {"type": "string", "description": "重新确认失败部署的回滚，仅恢复，不重新发布目标版本"},
                   "request_id": {"type": "string", "description": "格赫罗斯部署请求的 ID"},
                   "reject": {"type": "boolean", "description": "拒绝该请求"},
                   "status_only": {"type": "boolean", "description": "只查看各星系当前版本和最近的部署记录"}}),
@@ -256,7 +257,7 @@ class Azathoth(OwnerChat, MemoryAgent):
             if args.get("status_only"):
                 return await self.link.call("deploy_status")
             return await self.link.call("deploy", timeout=120, **{k: args[k] for k in
-                                        ("galaxies", "reason", "task_id", "request_id", "reject") if k in args})
+                                        ("galaxies", "reason", "task_id", "request_id", "reject", "recover_job_id") if k in args})
         if name == "temple_agent":
             return await self.link.call("agent", agent_id=args["agent_id"])
         if name == "temple_owner_history":

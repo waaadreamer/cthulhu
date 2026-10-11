@@ -531,6 +531,8 @@ class Temple:
             return req
         if role not in roles.DEPLOY:
             raise Denied(f"{role} may not deploy")
+        if p.get("recover_job_id"):
+            return await d.recover(p["recover_job_id"], by=agent_id)
         if method == "deploy_requests":
             return [r for r in d.requests.values() if r["state"] == "pending"]
         if p.get("request_id"):
@@ -876,6 +878,8 @@ class Temple:
                 return Response(base64.b64decode(r["data"]), media_type=mime, headers=headers)
             if path == "deploy":
                 if request.method == "POST":
+                    if body.get("recover_job_id"):
+                        return JSONResponse(await self.deployer.recover(body["recover_job_id"], by="主人"))
                     return JSONResponse(await self.deployer.start(body.get("galaxies") or "all", by="主人",
                                                                   reason=body.get("reason", "")))
                 return JSONResponse(self.deployer.status())

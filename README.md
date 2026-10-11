@@ -99,6 +99,7 @@ sudo -u cthulhu /opt/cthulhu/venv/bin/python -m cthulhu passwd --config /etc/cth
 - 远程星系由启动保护（`deploy.guard_startup`）回滚：新版本连续 3 次没能连上神殿，就把代码退回旧版本。
 
 还没有 `deploy_v1` 能力的旧星系需要现场升级一次。
+异常重启接续、回滚重试入口及保留既有配置的首次升级步骤见 [部署恢复](docs/deploy-recovery.md)。
 
 ## 部署到其他星系
 

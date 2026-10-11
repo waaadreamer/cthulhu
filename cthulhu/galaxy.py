@@ -81,7 +81,7 @@ class Galaxy:
         self.procs: dict[str, Proc] = {}
         from .deploy import local_info
         self.link = Link(config["temple_ws"], {"kind": "galaxy", "id": self.id, "token": config["token"],
-                                                "capabilities": ["galaxy_api_v1", "deploy_v1"], "version": BUILD,
+                                                "capabilities": ["galaxy_api_v1", "deploy_v1", "deploy_recovery_v1"], "version": BUILD,
                                                 "deploy": local_info()},
                          self._welcome, self._frame, tls_pin=config.get("tls_pin"))
 
@@ -117,6 +117,14 @@ class Galaxy:
             # Only a revision on the repository's main branch, fast-forward, clean tree (see deploy.update_code).
             from .deploy import ROOT, update_code
             return await update_code(ROOT, str(frame["params"]["revision"]))
+        elif frame.get("type") == "rpc" and frame["method"] == "deploy_rollback":
+            from .deploy import ROOT, git, rollback
+            p = frame["params"]
+            current = await git(ROOT, "rev-parse", "HEAD")
+            if current not in (p["prev"], p["target"]):
+                raise RuntimeError("checkout changed since deployment; refusing rollback")
+            await rollback(ROOT, p["prev"])
+            return {"revision": p["prev"]}
         elif frame.get("type") == "rpc" and frame["method"] == "deploy_restart":
             p = frame.get("params", {})
             if p.get("guard"):

@@ -44,7 +44,7 @@ export interface Galaxy { id: string; name: string; online: boolean; created_at:
 export interface DeployJob {
   id: string; by: string; reason: string; revision: string; created_at: number; finished_at: number | null
   state: 'running' | 'restarting_temple' | 'done' | 'failed'
-  groups: { galaxies: string[]; temple: boolean; state: string; error?: string | null }[]
+  groups: { galaxies: string[]; temple: boolean; state: string; error?: string | null; recovery_required?: boolean }[]
   steps: { at: number; galaxy: string | null; text: string }[]
 }
 export interface DeployStatus { temple: { revision: string; host: string }; jobs: DeployJob[]; requests: { id: string; galaxies: unknown; reason: string; state: string }[] }

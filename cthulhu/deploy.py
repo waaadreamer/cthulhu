@@ -185,6 +185,8 @@ class Deployer:
         if any(not t.done() for t in self.running.values()) or \
                 any(j["state"] in ("running", "restarting_temple") for j in self.jobs()):
             raise ValueError("已有部署在进行中")
+        if any(g.get("recovery_required") for j in self.jobs() for g in j["groups"]):
+            raise ValueError("存在未确认的回滚，目标保持排空；需先恢复部署任务")
         everything = galaxies in ("all", ["all"])
         if everything:
             ids = [g["id"] for g in self.t.store.galaxies()] + ["__temple__"]
@@ -236,41 +238,101 @@ class Deployer:
     async def deploy_group(self, job: dict, g: dict) -> str:
         label = ",".join(g["galaxies"]) or "temple"
         gids = g["galaxies"]
-        await self.wait_online(gids)
-        for gid in gids:
-            await self.t.maintenance_state(gid, True)
+        release = False
         try:
-            if gids:
-                await self.step(job, "排空中：等待正在进行的回合、记忆整理和巡检结束", label)
-                await self.wait_drained(gids)
-                await self.step(job, "已排空", label)
+            await self.wait_online(gids)
+            for gid in gids:
+                await self.t.maintenance_state(gid, True)
+            await self.step(job, "排空中：等待正在进行的回合、记忆整理和巡检结束", label)
+            await self.wait_drained(gids)
             updater = None if g["temple"] else next(
                 (gid for gid in gids if self.t.galaxies[gid].deploy.get("writable")), None)
             if not g["temple"] and updater is None:
                 raise RuntimeError("这组星系都没有写代码目录的权限")
+            # Journal before mutation: a lost update RPC response must not lose the rollback target.
+            if "previous_revision" not in g:
+                g["previous_revision"] = (await git(self.root, "rev-parse", "HEAD") if g["temple"]
+                                          else self.t.galaxies[updater].deploy["revision"])
+            g["updater"] = updater
+            g["phase"] = "updating"
+            await self.save(job)
             if g["temple"]:
-                r = await update_code(self.root, job["revision"])
+                result = await update_code(self.root, job["revision"])
             else:
-                r = await self.t.galaxies[updater].rpc("deploy_update", timeout=1200, revision=job["revision"])
-            if r.get("unchanged"):
-                await self.step(job, "已经是目标版本，无需更新", label)
-                return "done"
-            await self.step(job, f"代码已更新 {r['prev'][:12]} → {r['revision'][:12]}" +
-                            ("，依赖已重装" if r.get("deps") else ""), label)
-            if gids and not await self.restart_galaxies(job, gids, r, owner_rolls_back=g["temple"], updater=updater):
-                if g["temple"]:
-                    await rollback(self.root, r["prev"])
-                    await self.step(job, f"已回滚到 {r['prev'][:12]}，星系会以旧版本自动重启", label)
-                return "failed"
+                result = await self.t.galaxies[updater].rpc("deploy_update", timeout=1200, revision=job["revision"])
+            r = {**result, "prev": g["previous_revision"]}
+            g["update"] = r
+            g["phase"] = "restarting"
+            await self.save(job)
+            # A checkout already at target does not prove its running processes loaded that target.
+            needs_restart = any(self.t.galaxies[gid].deploy.get("revision") != job["revision"] for gid in gids)
+            if not result.get("unchanged") or needs_restart:
+                await self.step(job, f"确认代码版本 {r['revision'][:12]}，等待运行版本一致", label)
+                if not await self.restart_galaxies(job, gids, r, owner_rolls_back=g["temple"], updater=updater):
+                    raise RuntimeError("星系未在期限内以目标版本重连")
+            g["phase"] = "confirmed"
+            g.pop("recovery_required", None)
+            await self.save(job)
+            release = True
+        except Exception:
+            if g.get("phase") in ("updating", "restarting", "confirmed"):
+                release = await self.recover_group(job, g)
+            else:
+                # No mutation was attempted: restoring delivery cannot expose partly updated code.
+                release = True
+            raise
         finally:
-            for gid in gids:
-                await self.t.maintenance_state(gid, False)
-        if g["temple"]:
+            if release:
+                for gid in gids:
+                    await self.t.maintenance_state(gid, False)
+        if g["temple"] and self.me["revision"] != job["revision"]:
             g["state"] = job["state"] = "restarting_temple"
             await self.step(job, "中心神殿即将重启以加载新版本（只断线重连，不中断回合）", "temple")
-            asyncio.get_running_loop().call_later(1, os.kill, os.getpid(), signal.SIGTERM)
+            self.restart_temple()
             return "restarting_temple"
         return "done"
+
+    def restart_temple(self) -> None:
+        asyncio.get_running_loop().call_later(1, os.kill, os.getpid(), signal.SIGTERM)
+
+    async def recover_group(self, job: dict, g: dict) -> bool:
+        """Rollback only while drained; never resume delivery on an unconfirmed rollback."""
+        gids = g["galaxies"]
+        label = ",".join(gids) or "temple"
+        g["recovery_required"] = True
+        await self.save(job)
+        try:
+            prev = g["previous_revision"]
+            await self.wait_online(gids)
+            for gid in gids:
+                await self.t.maintenance_state(gid, True)
+            await self.wait_drained(gids)
+            if g["temple"]:
+                current = await git(self.root, "rev-parse", "HEAD")
+                if current not in (prev, job["revision"]):
+                    raise RuntimeError("代码已被其他操作修改，拒绝覆盖回滚")
+                await rollback(self.root, prev)
+            else:
+                updater = self.t.galaxies[g["updater"]]
+                if "deploy_recovery_v1" not in updater.capabilities:
+                    raise RuntimeError("旧部署协议不支持远程确认回滚；等待现场恢复，保持排空")
+                await updater.rpc("deploy_rollback", timeout=1200, prev=prev, target=job["revision"])
+            rollback_result = {"prev": prev, "revision": prev}
+            if not await self.restart_galaxies(job, gids, rollback_result,
+                                               owner_rolls_back=True, updater=None):
+                raise RuntimeError("回滚后运行版本未确认")
+            g["phase"] = "rolled_back"
+            if g["temple"] and self.me["revision"] != prev:
+                job["recovery_only"] = True
+                await self.step(job, "星系已回滚；神殿将重启加载旧版本，再确认恢复投递", label)
+                self.restart_temple()
+                return False
+            g.pop("recovery_required", None)
+            await self.step(job, f"已回滚并确认运行版本 {prev[:12]}", label)
+            return True
+        except Exception as error:
+            await self.step(job, f"回滚待恢复，保持排空，禁止新部署：{error}", label)
+            return False
 
     async def wait_online(self, gids: list[str], timeout: float = 90) -> None:
         end = time.time() + timeout
@@ -297,9 +359,13 @@ class Deployer:
                                updater: str | None) -> bool:
         for gid in gids:
             conn = self.t.galaxies.get(gid)
-            if conn:
-                await conn.rpc("deploy_restart", timeout=30, prev=r["prev"], target=r["revision"],
-                               guard=not owner_rolls_back and gid == updater)
+            if conn and conn.deploy.get("revision") != r["revision"]:
+                try:
+                    await conn.rpc("deploy_restart", timeout=30, prev=r["prev"], target=r["revision"],
+                                   guard=not owner_rolls_back and gid == updater)
+                except Exception as error:
+                    # Lost ACK is ambiguous: observe authenticated reconnect before rollback.
+                    await self.step(job, f"重启应答未确认，等待实际版本：{error}", gid)
         await self.step(job, "已通知星系重启", ",".join(gids))
         end = time.time() + RESTART_TIMEOUT
         new = lambda gid: (c := self.t.galaxies.get(gid)) is not None and c.deploy.get("revision") == r["revision"]
@@ -323,6 +389,17 @@ class Deployer:
     async def resume(self) -> None:
         """In a freshly started temple: continue a job that restarted the previous temple process."""
         for job in self.jobs():
+            if job["id"] in self.running and not self.running[job["id"]].done():
+                continue
+            if job["state"] == "running":
+                await self.step(job, "神殿异常中断后接续部署：重新排空并核对代码与运行版本")
+                recovering = job.get("recovery_only") or any(g.get("recovery_required") for g in job["groups"])
+                worker = self.retry_recovery(job) if recovering else self.run(job)
+                self.running[job["id"]] = asyncio.create_task(worker)
+                continue
+            if job["state"] == "failed" and any(g.get("recovery_required") for g in job["groups"]):
+                self.running[job["id"]] = asyncio.create_task(self.retry_recovery(job))
+                continue
             if job["state"] != "restarting_temple":
                 continue
             ok = self.me["revision"] == job["revision"]
@@ -333,6 +410,30 @@ class Deployer:
             await self.step(job, "中心神殿已以新版本启动" if ok else
                             f"中心神殿重启后版本是 {self.me['revision'][:12]}，与目标不符", "temple")
             self.running[job["id"]] = asyncio.create_task(self.run(job))
+
+    async def recover(self, job_id: str, by: str) -> dict:
+        if any(not t.done() for t in self.running.values()):
+            raise ValueError("已有部署在进行中")
+        job = self.job(job_id)
+        if not job or job["state"] != "failed" or not any(g.get("recovery_required") for g in job["groups"]):
+            raise ValueError("该任务没有待确认的回滚")
+        job.update(state="running", recovery_only=True, finished_at=None)
+        await self.step(job, f"{by} 请求重新确认回滚；不会重新部署失败版本")
+        self.running[job_id] = asyncio.create_task(self.retry_recovery(job))
+        return job
+
+    async def retry_recovery(self, job: dict) -> None:
+        try:
+            for g in job["groups"]:
+                if g.get("recovery_required"):
+                    g["state"] = "failed"
+                    if await self.recover_group(job, g):
+                        for gid in g["galaxies"]:
+                            await self.t.maintenance_state(gid, False)
+        except Exception as error:
+            await self.step(job, f"恢复收尾失败：{error}")
+        finally:
+            await self.finish(job)
 
     # ghroth asks, azathoth decides
 

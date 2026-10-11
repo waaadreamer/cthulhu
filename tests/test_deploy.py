@@ -69,6 +69,22 @@ class UpdateCode(unittest.TestCase):
             self.update(bad)
         self.assertEqual(sh("git", "rev-parse", "HEAD", cwd=self.node), self.v1)
 
+    def test_remote_rollback_rpc_preserves_unrelated_checkout(self):
+        from cthulhu.galaxy import Galaxy
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        v2 = self.commit("cthulhu/NOTE.txt", "v2", "v2")
+        self.update(v2)
+        frame = {"type": "rpc", "method": "deploy_rollback", "params": {"prev": self.v1, "target": v2}}
+        with patch.object(deploy, "ROOT", self.node):
+            self.assertEqual(asyncio.run(Galaxy._frame(SimpleNamespace(), frame)), {"revision": self.v1})
+            asyncio.run(Galaxy._frame(SimpleNamespace(), frame))  # Lost response: safe to reconcile again.
+            v3 = self.commit("cthulhu/NOTE.txt", "v3", "v3")
+            self.update(v3)
+            with self.assertRaisesRegex(RuntimeError, "checkout changed"):
+                asyncio.run(Galaxy._frame(SimpleNamespace(), frame))
+            self.assertEqual(sh("git", "rev-parse", "HEAD", cwd=self.node), v3)
+
     def test_startup_guard_rolls_back_after_three_failed_starts(self):
         v2 = self.commit("cthulhu/NOTE.txt", "v2", "v2")
         self.update(v2)

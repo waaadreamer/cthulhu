@@ -68,6 +68,16 @@ export function Deploy({ dir, tick }: { dir: Directory; tick: number }) {
         </table>
       </div>
       {job && <JobView job={job} />}
+      {job?.state === 'failed' && job.groups.some((g) => g.recovery_required) && (
+        <div className="mt-3 text-sm text-amber-300">
+          <p>回滚尚未确认，相关星系保持排空。恢复不会重新发布失败版本。</p>
+          <button disabled={busy} className="mt-2 text-cyan-300 disabled:opacity-30" onClick={async () => {
+            setBusy(true); setError(null)
+            try { await api('deploy', { recover_job_id: job.id }); await load() }
+            catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+          }}>重新确认回滚</button>
+        </div>
+      )}
     </section>
   )
 }
