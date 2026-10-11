@@ -5,13 +5,15 @@ import { Avatar } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 
 type Models = Record<RuntimeCfg['backend'], string[]>
+type Provider = { id: string; models: string[] }
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max']
 
 export function Settings({ dir }: { dir: Directory }) {
   const [overrides, setOverrides] = useState<Record<string, RuntimeCfg> | null>(null)
-  const [models, setModels] = useState<Models>({ claude: [], codex: [], company_codex: [] })
-  const load = () => api<{ overrides: Record<string, RuntimeCfg>; models: Models }>('runtimes')
-    .then((r) => { setOverrides(r.overrides); setModels(r.models) })
+  const [providers, setProviders] = useState<Provider[]>([])
+  const [models, setModels] = useState<Models>({ claude: [], codex: [], galaxy_api: [] })
+  const load = () => api<{ overrides: Record<string, RuntimeCfg>; models: Models; providers?: Provider[] }>('runtimes')
+    .then((r) => { setOverrides(r.overrides); setModels(r.models); setProviders(r.providers ?? []) })
   useEffect(() => { load() }, [])
 
   const roles: Role[] = ['azathoth', 'shub', 'yog', 'ghroth']
@@ -25,17 +27,17 @@ export function Settings({ dir }: { dir: Directory }) {
           <h2 className="text-lg font-semibold text-white">模型与后端</h2>
           <p className="mt-1 text-sm text-slate-400">
             修改后在该 agent 当前回合结束时生效。不同后端使用独立会话，程序会把永久上下文和最近的交流记录带过去。
-            主后端出错（如被限流）时自动改用后备 30 分钟。
+            星系 API 在尚未执行工具时可自动回退 30 分钟；已执行工具的失败回合不会自动重放。
           </p>
         </div>
         {!overrides ? <div className="flex justify-center py-16"><Loader2 className="h-5 w-5 animate-spin text-slate-600" /></div> : (
           <>
             {gods.map((a) => (
-              <RuntimeEditor key={a.id} agent={a} keyName={a.role} override={overrides[a.role]} models={models} onSaved={load} />
+              <RuntimeEditor key={a.id} agent={a} keyName={a.role} override={overrides[a.role]} models={models} providers={providers} onSaved={load} />
             ))}
             {olds.length > 0 && <h3 className="pt-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">旧日支配者（逐个设置；未设置则用星系默认）</h3>}
             {olds.map((a) => (
-              <RuntimeEditor key={a.id} agent={a} keyName={a.id} override={overrides[a.id]} models={models} onSaved={load} />
+              <RuntimeEditor key={a.id} agent={a} keyName={a.id} override={overrides[a.id]} models={models} providers={providers} onSaved={load} />
             ))}
           </>
         )}
@@ -44,8 +46,8 @@ export function Settings({ dir }: { dir: Directory }) {
   )
 }
 
-function RuntimeEditor({ agent, keyName, override, models, onSaved }: {
-  agent: Agent; keyName: string; override?: RuntimeCfg; models: Models; onSaved: () => void
+function RuntimeEditor({ agent, keyName, override, models, providers, onSaved }: {
+  agent: Agent; keyName: string; override?: RuntimeCfg; models: Models; providers: Provider[]; onSaved: () => void
 }) {
   const base = override ?? agent.runtime?.default ?? { backend: 'codex', model: '' }
   const [cfg, setCfg] = useState<RuntimeCfg>(base)
@@ -84,11 +86,11 @@ function RuntimeEditor({ agent, keyName, override, models, onSaved }: {
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Group title="主后端">
-          <BackendFields cfg={cfg} models={models} onChange={setCfg} />
+          <BackendFields cfg={cfg} models={models} providers={providers} onChange={setCfg} />
         </Group>
         <Group title={<label className="flex cursor-pointer items-center gap-2"><input type="checkbox" checked={fb} onChange={(e) => setFb(e.target.checked)} className="accent-violet-500" />后备（主后端出错时）</label>}>
           {fb ? (
-            <BackendFields cfg={cfg.fallback ?? { backend: cfg.backend === 'claude' ? 'codex' : 'claude', model: '' }} models={models}
+            <BackendFields cfg={cfg.fallback ?? { backend: cfg.backend === 'claude' ? 'codex' : 'claude', model: '' }} models={models} providers={providers}
               onChange={(f) => setCfg({ ...cfg, fallback: f })} />
           ) : <p className="text-sm text-slate-500">未启用。主后端出错时该回合直接失败。</p>}
         </Group>
@@ -124,27 +126,33 @@ function RuntimeEditor({ agent, keyName, override, models, onSaved }: {
   )
 }
 
-function BackendFields({ cfg, models, onChange }: { cfg: RuntimeCfg; models: Models; onChange: (c: RuntimeCfg) => void }) {
+function BackendFields({ cfg, models, providers, onChange }: { cfg: RuntimeCfg; models: Models; providers: Provider[]; onChange: (c: RuntimeCfg) => void }) {
   return (
     <div className="space-y-3">
       <div className="flex gap-1 rounded-xl bg-black/30 p-1">
-        {(['claude', 'codex', 'company_codex'] as const).filter((b) => models[b]).map((b) => (
-          <button key={b} onClick={() => b !== cfg.backend && onChange({ ...cfg, backend: b, model: models[b]?.[0] ?? '', service_tier: undefined })}
+        {(['claude', 'codex', 'galaxy_api'] as const).filter((b) => models[b]).map((b) => (
+          <button key={b} onClick={() => b !== cfg.backend && onChange({ ...cfg, backend: b, model: models[b]?.[0] ?? '', service_tier: undefined, provider: b === 'galaxy_api' ? providers[0]?.id : undefined })}
             className={`flex-1 rounded-lg py-1.5 text-sm transition ${cfg.backend === b
               ? b === 'claude' ? 'bg-orange-400/20 text-orange-100' : 'bg-sky-400/20 text-sky-100'
               : 'text-slate-500 hover:text-slate-300'}`}>
-            {b === 'claude' ? 'Claude Code' : b === 'company_codex' ? '公司 Codex' : '个人 Codex'}
+            {b === 'claude' ? 'Claude Code' : b === 'galaxy_api' ? '星系 API' : '个人 Codex'}
           </button>
         ))}
       </div>
+      {cfg.backend === 'galaxy_api' && (
+        <Field label="在线 API 星系">
+          <Select value={cfg.provider ?? ''} options={providers.map(p => p.id)}
+            onChange={(v) => onChange({ ...cfg, provider: v, model: providers.find(p => p.id === v)?.models[0] ?? '' })} />
+        </Field>
+      )}
       <Field label="模型">
-        <ModelInput value={cfg.model} options={models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />
+        <ModelInput value={cfg.model} options={cfg.backend === 'galaxy_api' ? providers.find(p => p.id === cfg.provider)?.models ?? [] : models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />
       </Field>
       <Field label="effort">
         <Select value={cfg.effort ?? ''} options={EFFORTS} onChange={(v) => onChange({ ...cfg, effort: v || undefined })} />
       </Field>
-      {cfg.backend !== 'claude' && models.company_codex && (
-        <Field label="服务档位（fast 需网关或账户支持）">
+      {cfg.backend !== 'claude' && models.galaxy_api && (
+        <Field label="请求档位（fast 不保证实际兑现）">
           <Select value={cfg.service_tier ?? 'default'} options={['default', 'fast']}
             onChange={(v) => onChange({ ...cfg, service_tier: v })} />
         </Field>

@@ -9,8 +9,6 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
-from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -46,10 +44,10 @@ def _child_env() -> dict:
 class CodexRuntime:
     def __init__(self, codex: str, cwd: str, *, model: str | None = None, effort: str | None = None,
                  sub_agents: bool = False, log_path: str | None = None,
-                 company: dict | None = None, service_tier: str | None = None):
+                 api_transport: dict | None = None, service_tier: str | None = None):
         self.codex, self.cwd, self.model, self.effort = codex, cwd, model, effort
         self.sub_agents = sub_agents
-        self.company = company
+        self.api_transport = api_transport
         self.service_tier = service_tier
         self.log_path = log_path
         self.proc: asyncio.subprocess.Process | None = None
@@ -64,54 +62,23 @@ class CodexRuntime:
     def launch_config(self) -> tuple[list[str], dict]:
         env = _child_env()
         overrides = []
-        if self.company is not None:
-            cfg = self.company
-            if not all(cfg.get(k) for k in ("codex_home", "base_url", "api_key_file")):
-                raise RuntimeError_("company_codex requires local codex_home, base_url and api_key_file")
-            home = Path(cfg["codex_home"])
-            personal = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-            if not home.is_absolute() or home.resolve() == personal.resolve():
-                raise RuntimeError_("company_codex requires a separate absolute CODEX_HOME")
-            url = urlsplit(cfg["base_url"])
-            if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
-                raise RuntimeError_("company_codex base_url must be an HTTPS URL without credentials or query")
-            if not home.is_dir() or (home / "auth.json").exists():
-                raise RuntimeError_("company_codex home must exist and must not contain personal auth.json")
-            key_path = Path(cfg["api_key_file"])
-            if not key_path.is_absolute() or key_path.stat().st_mode & 0o077:
-                raise RuntimeError_("company_codex key file must be absolute and private (0600)")
-            key = key_path.read_text().strip()
-            if not key or "\n" in key or "\r" in key:
-                raise RuntimeError_("company_codex key file must contain one nonempty token")
+        if self.api_transport is not None:
+            cfg = self.api_transport
             for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID"):
                 env.pop(name, None)
-            # Network overrides are local-only and apply solely to this child.
-            # Replace both casings so inherited lower-case proxy variables cannot win.
-            network = cfg.get("network_env", {})
-            allowed = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
-            if not isinstance(network, dict) or any(k not in allowed for k in network):
-                raise RuntimeError_("company_codex network_env only accepts proxy environment names")
-            for name, value in network.items():
-                if value is not None and (not isinstance(value, str) or "\n" in value or "\r" in value):
-                    raise RuntimeError_("company_codex network_env values must be strings or null")
-                if name != "NO_PROXY" and value:
-                    proxy = urlsplit(value)
-                    if (proxy.scheme not in ("http", "https", "socks5", "socks5h") or
-                            not proxy.hostname or proxy.username or proxy.password or proxy.query or proxy.fragment):
-                        raise RuntimeError_("company_codex proxy URL must not contain credentials or query")
-                env.pop(name, None)
-                env.pop(name.lower(), None)
-                if value:
-                    env[name] = env[name.lower()] = value
-            env.update(CODEX_HOME=str(home), COMPANY_CODEX_API_KEY=key)
+            env.update(CODEX_HOME=cfg["home"], GALAXY_API_LOCAL_TOKEN=cfg["token"])
+            bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
+            env["no_proxy"] = env["NO_PROXY"] = bypass + ",127.0.0.1,localhost,::1"
             values = {
-                "model_provider": "company_codex",
-                "model_providers.company_codex.name": "Company Codex",
-                "model_providers.company_codex.base_url": cfg["base_url"],
-                "model_providers.company_codex.wire_api": "responses",
-                "model_providers.company_codex.env_key": "COMPANY_CODEX_API_KEY",
-                "model_providers.company_codex.requires_openai_auth": False,
-                "model_providers.company_codex.supports_websockets": False,
+                "model_provider": "galaxy_api",
+                "model_providers.galaxy_api.name": "Galaxy API",
+                "model_providers.galaxy_api.base_url": cfg["base_url"],
+                "model_providers.galaxy_api.wire_api": "responses",
+                "model_providers.galaxy_api.env_key": "GALAXY_API_LOCAL_TOKEN",
+                "model_providers.galaxy_api.requires_openai_auth": False,
+                "model_providers.galaxy_api.supports_websockets": False,
+                "model_providers.galaxy_api.request_max_retries": 0,
+                "model_providers.galaxy_api.stream_max_retries": 0,
             }
             for name, value in values.items():
                 overrides.extend(["-c", f"{name}={json.dumps(value)}"])
@@ -244,8 +211,8 @@ class CodexRuntime:
             p["developerInstructions"] = instructions
         if self.model:
             p["model"] = self.model
-        if self.company is not None:
-            p["modelProvider"] = "company_codex"
+        if self.api_transport is not None:
+            p["modelProvider"] = "galaxy_api"
         return p
 
     async def start_thread(self, instructions: str, tools: list[dict], handler: ToolHandler | None,

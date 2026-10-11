@@ -74,6 +74,8 @@ class MemoryAgent(Agent):
 
     async def distill(self, rt, thread: str, correct_only: bool = False) -> None:
         async with self.memory_lock:
+            if self.draining:
+                return
             fork = None
             try:
                 current = await self.link.call("memory")
@@ -411,7 +413,12 @@ class Yog(MemoryAgent):
         while True:
             await asyncio.sleep(self.patrol_interval)
             try:
-                await self.patrol()
+                if not self.draining:
+                    self.patrol_busy = True
+                    try:
+                        await self.patrol()
+                    finally:
+                        self.patrol_busy = False
             except Exception:
                 log.exception("patrol failed")
 
@@ -443,7 +450,7 @@ class Yog(MemoryAgent):
                       "判断每个 agent 是否在正常推进。需要催办就直接 temple_send 给该旧日支配者；需要阿撒托斯决策或纠偏才发给阿撒托斯。"
                       "一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
             r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
-            if r.status == "failed" and self.backends.trip():
+            if r.status == "failed" and getattr(rt, "retry_safe", True) and self.backends.trip():
                 await rt.drop_thread(thread)
                 rt = self.runtime
                 thread = await rt.start_thread(await self.instructions(), self.tools(), self.call_tool, ephemeral=True)

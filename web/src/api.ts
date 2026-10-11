@@ -20,8 +20,9 @@ export interface Agent {
 }
 
 export interface RuntimeCfg {
-  backend: 'claude' | 'codex' | 'company_codex'
+  backend: 'claude' | 'codex' | 'galaxy_api'
   model: string
+  provider?: string
   service_tier?: string
   effort?: string
   memory_model?: string
@@ -30,6 +31,7 @@ export interface RuntimeCfg {
 }
 
 export interface RuntimeStatus {
+  api_result?: { provider?: string; requested_model?: string; requested_tier?: string; returned_model?: string; returned_tier?: string }
   backend: string
   model: string | null
   fallback_active: boolean

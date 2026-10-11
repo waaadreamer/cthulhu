@@ -16,7 +16,9 @@ import sys
 import time
 from pathlib import Path
 
+from . import BUILD
 from .protocol import Link
+from .api_provider import ProviderWorker
 
 log = logging.getLogger(__name__)
 
@@ -77,15 +79,35 @@ class Galaxy:
         self.state = Path(config["state"])
         self.state.mkdir(parents=True, exist_ok=True)
         self.procs: dict[str, Proc] = {}
-        self.link = Link(config["temple_ws"], {"kind": "galaxy", "id": self.id, "token": config["token"]},
+        self.link = Link(config["temple_ws"], {"kind": "galaxy", "id": self.id, "token": config["token"], "capabilities": ["galaxy_api_v1"], "version": BUILD},
                          self._welcome, self._frame, tls_pin=config.get("tls_pin"))
+
+        self.provider = ProviderWorker(self.link, config["api_provider"]) if config.get("api_provider") else None
+        if self.provider:
+            self.link.on_disconnect = self.provider.disconnect
 
     async def _welcome(self, w: dict) -> None:
         log.info("galaxy %s connected to temple", w.get("name"))
+        if self.provider and w.get("api_version") == 1:
+            asyncio.create_task(self._register_provider())
+
+    async def _register_provider(self):
+        try:
+            from . import BUILD
+            await self.provider.register(BUILD)
+        except Exception:
+            log.warning("API provider registration unavailable")
 
     async def _frame(self, frame: dict):
+        if frame.get("type") in ("api_request", "api_cancel"):
+            if self.provider:
+                await self.provider.frame(frame)
+            return
         if frame.get("type") == "desired":
             await self.reconcile(frame["agents"])
+        elif frame.get("type") == "rpc" and frame["method"] == "api_canary":
+            from .api_canary import run
+            return await run(self.link, frame.get("params", {}).get("provider", "ali"), mode="text")
         elif frame.get("type") == "rpc" and frame["method"] == "read_file":
             # The owner previews a file an agent produced; read as this galaxy's OS user.
             return await asyncio.to_thread(read_file, **frame.get("params", {}))

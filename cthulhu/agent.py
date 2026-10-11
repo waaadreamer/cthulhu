@@ -21,6 +21,7 @@ from typing import Any
 
 from . import backends
 from .backends import Backends
+from . import BUILD
 from .protocol import Link
 from .roles import DISPLAY, OWNER, Role
 from .runtime import TurnResult, tool
@@ -54,7 +55,7 @@ class Agent:
 
     def __init__(self, temple_url: str, launch: dict, codex: str, cwd: str, state_dir: Path,
                  model: str | None = None, effort: str | None = None, runtime: dict | None = None,
-                 tls_pin: str | None = None, company_codex: dict | None = None):
+                 tls_pin: str | None = None):
         self.id, self.name = launch["id"], launch["name"]
         self.spec: dict = launch.get("spec") or {}
         self.state_dir = state_dir
@@ -64,14 +65,15 @@ class Agent:
         if self.spec.get("model"):
             self.default_runtime["model"] = self.spec["model"]
         self.build_kw = {"codex": codex, "cwd": self.spec.get("cwd") or cwd, "log_dir": state_dir,
-                         "sub_agents": self.role == Role.OLD_ONE, "company_codex": company_codex}
-        self.backends = Backends(self.default_runtime, **self.build_kw)
+                         "sub_agents": self.role == Role.OLD_ONE}
         self.pending_runtime: dict | None = None
         self.threads: dict[str, str] = {}     # backend label -> thread id
         self.loaded: set[str] = set()         # threads open in the current runtime instances
         self.last_turn: tuple | None = None   # (runtime, thread) of the last main-thread turn
-        self.link = Link(temple_url, {"kind": "agent", "id": self.id, "token": launch["token"]},
+        self.link = Link(temple_url, {"kind": "agent", "id": self.id, "token": launch["token"], "capabilities": ["galaxy_api_v1", "drain_v1"], "version": BUILD},
                          self._on_welcome, self._on_frame, tls_pin=tls_pin)
+        self.build_kw["api_link"] = self.link
+        self.backends = Backends(self.default_runtime, **self.build_kw)
         self.memory: list[dict] = []
         self.memory_seen: dict[str, dict[int, str]] = {}  # thread -> permanent memory that thread already holds
         self._load_threads(launch.get("thread_id"))
@@ -84,6 +86,8 @@ class Agent:
         self.queue: list[dict] = []
         self.seen: set[str] = set()
         self.wake = asyncio.Event()
+        self.draining = False
+        self.inflight_runs = 0
         self.state = "starting"
         self.current: str | None = None
         self.active: tuple | None = None   # (runtime, thread, turn) of the running turn
@@ -104,13 +108,14 @@ class Agent:
         except ValueError:
             # Pre-fallback format: a bare thread id of the default backend.
             legacy = self.default_runtime
-            if legacy.get("backend") == "company_codex":
+            if legacy.get("backend") in ("company_codex", "galaxy_api"):
                 legacy = legacy | {"backend": "codex"}
             self.threads = {backends.label(legacy): stored}
 
     def runtime_status(self) -> dict:
         return {"backend": self.backends.active_cfg.get("backend", "codex"), "model": self.backends.active_cfg.get("model"),
                 "fallback_active": self.backends.using_fallback, "config": self.backends.cfg,
+                "api_result": getattr(self.runtime, "api_result", None),
                 "default": self.default_runtime}
 
     # system prompt and tools
@@ -177,7 +182,7 @@ class Agent:
     def latest_result(self) -> dict:
         return {"role": self.role.value, "state": self.state, "current": self.current,
                 "queued": len(self.queue), "context_fill": round(self.runtime.context_fill(self.thread_id or ""), 3),
-                **self.latest}
+                "api_result": getattr(self.runtime, "api_result", None), **self.latest}
 
     # hooks for subclasses
 
@@ -286,7 +291,7 @@ class Agent:
             except Exception as e:
                 log.exception("%s turn failed on %s", self.name, backends.label(self.backends.active_cfg))
                 result = TurnResult("failed", error=str(e))
-            if result.status == "failed" and attempt == 0 and self.backends.trip():
+            if result.status == "failed" and attempt == 0 and getattr(self.runtime, "retry_safe", True) and self.backends.trip():
                 log.warning("%s switching to fallback %s: %s", self.name,
                             backends.label(self.backends.active_cfg), result.error)
                 await self.report(self.state)
@@ -316,9 +321,11 @@ class Agent:
         def started(turn_id: str) -> None:
             if track:
                 self.active = (rt, thread, turn_id)
+        self.inflight_runs += 1
         try:
             result = await rt.run_turn(thread, text, on_start=started, on_event=events, **kw)
         finally:
+            self.inflight_runs -= 1
             if track:
                 self.active = None
         if track:
@@ -398,7 +405,7 @@ class Agent:
         while True:
             await self.wake.wait()
             self.wake.clear()
-            if not self.queue:
+            if not self.queue or self.draining:
                 continue
             await self.apply_runtime()
             batch = self.take_batch()
@@ -426,6 +433,7 @@ class Agent:
             "context_fill": round(self.runtime.context_fill(self.thread_id or ""), 3)}})
 
     async def _on_welcome(self, w: dict) -> None:
+        self.draining = bool(w.get("draining"))
         self.memory = w.get("memory", [])
         if not self.ready.is_set():
             if w.get("thread_id"):
@@ -446,6 +454,13 @@ class Agent:
         self.queue.append(m)
         self.wake.set()
 
+    def drain_status(self):
+        memory_busy = hasattr(self, "memory_lock") and self.memory_lock.locked()
+        background_busy = memory_busy or getattr(self, "patrol_busy", False)
+        return {"draining": self.draining, "active_runs": self.inflight_runs,
+                "state": self.state, "queued": len(self.queue), "background_busy": background_busy,
+                "safe": self.draining and self.inflight_runs == 0 and not background_busy and self.state == "idle"}
+
     async def _on_frame(self, frame: dict) -> Any:
         t = frame.get("type")
         if t == "message":
@@ -455,6 +470,13 @@ class Agent:
             self.pending_runtime = frame["config"] or self.default_runtime
             self.wake.set()
         elif t == "rpc":
+            if frame["method"] == "drain":
+                self.draining = bool(frame.get("params", {}).get("enabled", True))
+                if not self.draining:
+                    self.wake.set()
+                return self.drain_status()
+            if frame["method"] == "drain_status":
+                return self.drain_status()
             if frame["method"] == "latest_result":
                 return self.latest_result()
             if frame["method"] == "interrupt":

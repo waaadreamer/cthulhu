@@ -23,6 +23,10 @@ import websockets
 log = logging.getLogger(__name__)
 
 
+def maintenance_token(secret: str) -> str:
+    return hmac.new(secret.encode(), b"local-maintenance:v1", hashlib.sha256).hexdigest()
+
+
 def agent_token(secret: str, agent_id: str, epoch: int) -> str:
     return hmac.new(secret.encode(), f"agent:{agent_id}:{epoch}".encode(), hashlib.sha256).hexdigest()
 
@@ -73,6 +77,8 @@ class Link:
         self.pending: dict[int, asyncio.Future] = {}
         self.next_id = 0
         self.fatal: str | None = None
+        self.on_disconnect = None
+        self.dispatch_tasks: set[asyncio.Task] = set()
 
     async def run(self) -> None:
         delay = 0.5
@@ -98,7 +104,9 @@ class Link:
                             if fut and not fut.done():
                                 fut.set_result(frame)
                         else:
-                            asyncio.create_task(self._dispatch(frame))
+                            task = asyncio.create_task(self._dispatch(frame))
+                            self.dispatch_tasks.add(task)
+                            task.add_done_callback(self.dispatch_tasks.discard)
             except (OSError, ssl.SSLError, websockets.WebSocketException, asyncio.TimeoutError) as e:
                 log.warning("temple link down: %s", e)
             finally:
@@ -108,6 +116,13 @@ class Link:
                     if not fut.done():
                         fut.set_exception(CallFailed("temple connection lost"))
                 self.pending.clear()
+                if self.on_disconnect:
+                    await self.on_disconnect()
+                for task in list(self.dispatch_tasks):
+                    task.cancel()
+                if self.dispatch_tasks:
+                    await asyncio.gather(*self.dispatch_tasks, return_exceptions=True)
+                self.dispatch_tasks.clear()
             await asyncio.sleep(delay * (1 + random.random()))
             delay = min(delay * 2, 30)
 
@@ -140,7 +155,10 @@ class Link:
         if not await self.emit({"type": "call", "id": cid, "method": method, "params": params}):
             self.pending.pop(cid, None)
             raise CallFailed("temple connection lost")
-        frame = await asyncio.wait_for(fut, timeout)
+        try:
+            frame = await asyncio.wait_for(fut, timeout)
+        finally:
+            self.pending.pop(cid, None)
         if not frame.get("ok"):
             raise CallFailed(frame.get("error", "call failed"))
         return frame.get("result")

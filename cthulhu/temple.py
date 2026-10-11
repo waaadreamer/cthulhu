@@ -28,8 +28,10 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from .api_provider import ProviderBroker, API_VERSION
+from . import BUILD
 from . import roles
-from .protocol import agent_token, dumps, sha256
+from .protocol import agent_token, dumps, sha256, maintenance_token
 from .roles import OWNER, Denied, Role
 from .store import Store, new_id
 
@@ -61,10 +63,13 @@ class Conn:
     id: str
     pending: dict[int, asyncio.Future] = field(default_factory=dict)
     next_id: int = 0
+    capabilities: list[str] = field(default_factory=list)
+    version: str = ""
+    tasks: set = field(default_factory=set)
 
     async def send(self, frame: dict) -> bool:
         try:
-            await self.ws.send_text(dumps(frame))
+            await asyncio.wait_for(self.ws.send_text(dumps(frame)), 10)
             return True
         except Exception:
             return False
@@ -89,7 +94,7 @@ MODEL_CHOICES = {
     "claude": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
     "codex": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"],
 }
-MODEL_CHOICES["company_codex"] = list(MODEL_CHOICES["codex"])
+MODEL_CHOICES["galaxy_api"] = []
 # Effort used when a runtime names one of these models without an explicit effort.
 DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
 EFFORTS = {None, "low", "medium", "high", "xhigh", "max"}
@@ -108,7 +113,9 @@ def validate_runtime(cfg: dict, nested: bool = False) -> dict:
         raise ValueError("bad service_tier")
     if tier is not None and backend == "claude":
         raise ValueError("service_tier requires a Codex backend")
-    out = {k: cfg[k] for k in ("backend", "model", "effort", "service_tier") if cfg.get(k)}
+    out = {k: cfg[k] for k in ("backend", "model", "effort", "service_tier", "provider") if cfg.get(k)}
+    if backend == "galaxy_api" and not isinstance(cfg.get("provider"), str):
+        raise ValueError("galaxy_api requires a provider galaxy ID")
     if "effort" not in out and out["model"] in DEFAULT_EFFORT:
         out["effort"] = DEFAULT_EFFORT[out["model"]]
     if not nested:
@@ -117,7 +124,7 @@ def validate_runtime(cfg: dict, nested: bool = False) -> dict:
                 out[k] = cfg[k]
         if cfg.get("fallback"):
             fb = validate_runtime(cfg["fallback"], nested=True)
-            if fb["backend"] == out["backend"] and fb["model"] == out["model"]:
+            if fb["backend"] == out["backend"] and fb["model"] == out["model"] and fb.get("provider") == out.get("provider"):
                 raise ValueError("fallback must differ from the primary")
             out["fallback"] = fb
     return out
@@ -136,9 +143,12 @@ class Temple:
         self.store = Store(Path(config["db"]))
         self.agents: dict[str, Conn] = {}
         self.galaxies: dict[str, Conn] = {}
+        self.maintainers: set[Conn] = set()
         self.watchers: set[Conn] = set()     # owner browsers
         self.status: dict[str, dict] = {}    # live agent status reported by agents
         self.login_failures: dict[str, list[float]] = {}
+        self.api_broker = ProviderBroker(self)
+        self.maintenance = set(self.store.setting("maintenance") or [])
         self._seed()
 
     def _seed(self) -> None:
@@ -175,7 +185,7 @@ class Temple:
         agents = [self.public_agent(a) | {"queued": pending.get(a["id"], 0),
                                           "memory": memory.get(a["id"], {"entries": 0, "tokens": 0})}
                   for a in self.store.agents()]
-        galaxies = [g | {"online": g["id"] in self.galaxies, "spawn": g["id"] not in self.closed_galaxies}
+        galaxies = [g | {"online": g["id"] in self.galaxies, "version": getattr(self.galaxies.get(g["id"]), "version", ""), "draining": g["id"] in self.maintenance, "spawn": g["id"] not in self.closed_galaxies}
                     for g in self.store.galaxies()]
         return {"agents": agents, "galaxies": galaxies}
 
@@ -222,6 +232,9 @@ class Temple:
         return None, None
 
     async def deliver(self, msg: dict) -> None:
+        recipient = self.store.agent(msg["receiver"])
+        if recipient and recipient["galaxy_id"] in self.maintenance:
+            return
         conn = self.agents.get(msg["receiver"])
         if conn is None:
             return
@@ -238,6 +251,8 @@ class Temple:
     # agent calls: (conn, params) -> result
 
     async def handle_agent_call(self, conn: Conn, method: str, p: dict) -> Any:
+        if method.startswith("api_"):
+            return await self.handle_api_call(conn, method, p)
         me = self.store.agent(conn.id)
         role = me["role"]
         if method == "send":
@@ -295,7 +310,7 @@ class Temple:
         if method == "patrol":
             if role != Role.YOG:
                 raise Denied("only yog patrols")
-            return await self.patrol()
+            return [] if me["galaxy_id"] in self.maintenance else await self.patrol()
         if method == "patrol_log":
             if role != Role.YOG:
                 raise Denied("only yog patrols")
@@ -439,6 +454,17 @@ class Temple:
     async def set_runtime(self, key: str, cfg: dict | None) -> None:
         if cfg is not None:
             cfg = validate_runtime(cfg)
+            for choice in (cfg, cfg.get("fallback") or {}):
+                if choice.get("backend") == "galaxy_api":
+                    targets = [a for a in self.store.agents(include_stopped=False)
+                               if a["id"] == key or a["role"] == key]
+                    for a in targets:
+                        conn = self.agents.get(a["id"])
+                        if not conn or "galaxy_api_v1" not in conn.capabilities:
+                            raise ValueError("target agent requires the Galaxy API protocol upgrade")
+                        offered = self.api_broker.catalog(a["galaxy_id"])
+                        if not any(x["id"] == choice["provider"] and choice["model"] in x["models"] for x in offered):
+                            raise ValueError("no eligible online provider for target")
         overrides = self.store.setting("runtimes") or {}
         if cfg is None:
             overrides.pop(key, None)
@@ -485,7 +511,12 @@ class Temple:
         try:
             async for raw in ws.iter_text():
                 frame = json.loads(raw)
-                asyncio.create_task(self._on_frame(conn, frame))
+                if len(conn.tasks) >= 128:
+                    await ws.close(4008, "too many concurrent calls")
+                    break
+                task = asyncio.create_task(self._on_frame(conn, frame))
+                conn.tasks.add(task)
+                task.add_done_callback(conn.tasks.discard)
         except WebSocketDisconnect:
             pass
         finally:
@@ -493,32 +524,39 @@ class Temple:
 
     async def _authenticate(self, ws: WebSocket, hello: dict) -> Conn:
         kind, cid, token = hello.get("kind"), hello.get("id"), hello.get("token", "")
-        if kind == "galaxy":
+        if kind == "maintenance":
+            if (not ws.client or ws.client.host not in ("127.0.0.1", "::1") or
+                    not hmac.compare_digest(token, maintenance_token(self.secret))):
+                raise Denied("local maintenance authentication required")
+            conn = Conn(ws, "maintenance", secrets.token_hex(8), capabilities=["galaxy_api_v1"], version=BUILD)
+            self.maintainers.add(conn)
+            await conn.send({"type": "welcome", "api_version": API_VERSION, "version": BUILD})
+        elif kind == "galaxy":
             g = self.store.galaxy(cid)
             if not g or not hmac.compare_digest(g["token_hash"], sha256(token)):
                 raise Denied("bad galaxy credential")
-            conn = Conn(ws, "galaxy", cid)
+            conn = Conn(ws, "galaxy", cid, capabilities=hello.get("capabilities", []), version=str(hello.get("version", ""))[:64])
             old = self.galaxies.get(cid)
             self.galaxies[cid] = conn
             if old:
                 await old.ws.close(4002, "replaced")
-            await conn.send({"type": "welcome", "id": cid, "name": g["name"]})
+            await conn.send({"type": "welcome", "id": cid, "name": g["name"], "api_version": API_VERSION, "version": BUILD})
             await self.sync_galaxy(cid)
         elif kind == "agent":
             a = self.store.agent(cid)
             if not a or a["desired"] != "running" or not hmac.compare_digest(
                     agent_token(self.secret, cid, a["epoch"]), token):
                 raise Denied("bad or revoked agent credential")
-            conn = Conn(ws, "agent", cid)
+            conn = Conn(ws, "agent", cid, capabilities=hello.get("capabilities", []), version=str(hello.get("version", ""))[:64])
             old = self.agents.get(cid)
             self.agents[cid] = conn
             if old:
                 await old.ws.close(4002, "replaced")
             await conn.send({"type": "welcome", "agent": self.public_agent(a) | {"spec": a["spec"]},
                              "memory": self.store.memory(cid), "thread_id": a["thread_id"],
-                             "runtime": self.runtime_for(a),
-                             "pending": self._envelopes(self.store.pending_for(cid))})
-            for m in self.store.pending_for(cid):
+                             "runtime": self.runtime_for(a), "draining": a["galaxy_id"] in self.maintenance,
+                             "pending": [] if a["galaxy_id"] in self.maintenance else self._envelopes(self.store.pending_for(cid))})
+            for m in ([] if a["galaxy_id"] in self.maintenance else self.store.pending_for(cid)):
                 if m["state"] == "queued":
                     self.store.mark(m["id"], "delivered")
         else:
@@ -545,6 +583,8 @@ class Temple:
                     if self.agents.get(conn.id) is not conn:
                         raise Denied("stale connection")
                     result = await self.handle_agent_call(conn, frame["method"], frame.get("params") or {})
+                elif conn.kind == "maintenance":
+                    result = await self.handle_maintenance_call(conn, frame["method"], frame.get("params") or {})
                 elif conn.kind == "galaxy":
                     result = await self.handle_galaxy_call(conn, frame["method"], frame.get("params") or {})
                 else:
@@ -558,7 +598,46 @@ class Temple:
             # Live reply deltas for owner chat; forwarded only to browsers.
             await self.broadcast({"type": "stream", "agent_id": conn.id, **{k: frame.get(k) for k in ("turn_id", "delta", "activity")}})
 
+    async def handle_maintenance_call(self, conn, method, p):
+        if conn not in self.maintainers:
+            raise Denied("stale maintenance connection")
+        if method == "maintenance_snapshot":
+            return {"version": BUILD, **self.directory(), "providers": self.api_broker.catalog(),
+                    "active_streams": len(self.api_broker.streams)}
+        if method == "maintenance_canary":
+            galaxy = self.galaxies.get(p["galaxy"])
+            if not galaxy or "galaxy_api_v1" not in galaxy.capabilities:
+                raise ValueError("galaxy protocol upgrade required")
+            return await galaxy.rpc("api_canary", timeout=1200, provider=p.get("provider", "ali"))
+        if method == "maintenance_drain":
+            return await self.maintenance_state(p["galaxy"], p.get("enabled"))
+        if method in ("api_catalog", "api_open", "api_next", "api_cancel"):
+            return await self.handle_api_call(conn, method, p)
+        raise Denied("maintenance scope does not permit this operation")
+
+    async def handle_api_call(self, conn: Conn, method: str, p: dict):
+        broker = self.api_broker
+        if method == "api_catalog":
+            return broker.catalog(broker.consumer(conn))
+        if method == "api_open":
+            return await broker.open(conn, p)
+        if method == "api_next":
+            return await broker.next(conn, p)
+        if method == "api_cancel":
+            return await broker.cancel(conn, p)
+        if method == "api_register":
+            return broker.register(conn, p)
+        if method == "api_cancel_ack":
+            return broker.cancelled(conn, p)
+        if method == "api_push":
+            return await broker.push(conn, p)
+        raise Denied("unknown API operation")
+
     async def handle_galaxy_call(self, conn: Conn, method: str, p: dict) -> Any:
+        if self.galaxies.get(conn.id) is not conn:
+            raise Denied("stale galaxy connection")
+        if method.startswith("api_"):
+            return await self.handle_api_call(conn, method, p)
         if method == "agent_exited":
             a = self.store.agent(p["agent_id"])
             if a and a["galaxy_id"] == conn.id:
@@ -568,6 +647,12 @@ class Temple:
         raise Denied(f"unknown galaxy call {method}")
 
     async def _disconnect(self, conn: Conn) -> None:
+        await self.api_broker.disconnect(conn)
+        self.maintainers.discard(conn)
+        for task in list(conn.tasks):
+            task.cancel()
+        if conn.tasks:
+            await asyncio.gather(*conn.tasks, return_exceptions=True)
         if conn.kind == "agent" and self.agents.get(conn.id) is conn:
             del self.agents[conn.id]
             self.status.pop(conn.id, None)
@@ -580,6 +665,36 @@ class Temple:
             if not fut.done():
                 fut.set_exception(ConnectionError("disconnected"))
         await self.broadcast({"type": "directory", **self.directory()})
+
+    async def maintenance_state(self, gid, enabled=None):
+        if not self.store.galaxy(gid):
+            raise ValueError("unknown galaxy")
+        if enabled is not None:
+            if enabled:
+                self.maintenance.add(gid)
+            else:
+                self.maintenance.discard(gid)
+            self.store.set_setting("maintenance", sorted(self.maintenance))
+        results = []
+        for a in self.store.agents(gid, include_stopped=False):
+            conn = self.agents.get(a["id"])
+            result = {"id": a["id"], "safe": False, "reason": "offline or legacy agent; operator verification required"}
+            if conn and "drain_v1" in conn.capabilities:
+                try:
+                    state = await conn.rpc("drain" if enabled is not None else "drain_status",
+                                           timeout=10, **({"enabled": enabled} if enabled is not None else {}))
+                    result = {"id": a["id"], **state}
+                except Exception:
+                    result["reason"] = "drain status unavailable"
+            results.append(result)
+            if enabled is False and conn:
+                for message in self.store.pending_for(a["id"]):
+                    await self.deliver(message)
+        return {"galaxy": gid, "draining": gid in self.maintenance, "agents": results,
+                "safe_to_restart": gid in self.maintenance and all(a["safe"] for a in results)}
+
+    async def health(self, request):
+        return JSONResponse({"ok": True, "version": BUILD, "api_version": API_VERSION})
 
     # HTTP API for the owner
 
@@ -612,6 +727,12 @@ class Temple:
                 resp = JSONResponse({"ok": True})
                 resp.delete_cookie("cthulhu_session")
                 return resp
+            if path == "maintenance":
+                return JSONResponse(await self.maintenance_state(
+                    body["galaxy"] if request.method == "POST" else q["galaxy"],
+                    bool(body["enabled"]) if request.method == "POST" else None))
+            if path == "providers":
+                return JSONResponse({"providers": self.api_broker.catalog(), "active_streams": len(self.api_broker.streams)})
             if path == "directory":
                 return JSONResponse(self.directory() | {"gods": {r: (self.god(r) or {}).get("id") for r in roles.GODS}})
             if path == "chat":
@@ -642,7 +763,12 @@ class Temple:
             if path == "runtimes":
                 if request.method == "POST":
                     await self.set_runtime(body["key"], body.get("config"))
-                return JSONResponse({"overrides": self.store.setting("runtimes") or {}, "models": MODEL_CHOICES})
+                providers = self.api_broker.catalog()
+                choices = {k: v for k, v in MODEL_CHOICES.items() if k != "galaxy_api"}
+                if providers:
+                    choices["galaxy_api"] = sorted({m for p in providers for m in p["models"]})
+                return JSONResponse({"overrides": self.store.setting("runtimes") or {},
+                                     "models": choices, "providers": providers})
             if path == "file":
                 # Text preview: up to 2 MB inline. Media and downloads go through /api/raw.
                 r = await self.read_file(q["path"], q.get("galaxy") or None, FILE_PREVIEW_BYTES)
@@ -728,6 +854,7 @@ class Temple:
 
         routes = [
             WebSocketRoute("/ws", self.ws_endpoint),
+            Route("/health", self.health),
             WebSocketRoute("/api/events", self.owner_ws),
             Route("/api/{path:path}", self.api, methods=["GET", "POST"]),
         ]
