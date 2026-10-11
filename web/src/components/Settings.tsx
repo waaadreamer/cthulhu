@@ -138,7 +138,7 @@ function BackendFields({ cfg, models, onChange }: { cfg: RuntimeCfg; models: Mod
         ))}
       </div>
       <Field label="模型">
-        <ModelInput value={cfg.model} options={models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v })} />
+        <ModelInput value={cfg.model} options={models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />
       </Field>
       <Field label="effort">
         <Select value={cfg.effort ?? ''} options={EFFORTS} onChange={(v) => onChange({ ...cfg, effort: v || undefined })} />

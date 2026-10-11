@@ -17,6 +17,9 @@ import time
 
 from .runtime import CodexRuntime
 
+# Codex models whose default reasoning effort the harness pins explicitly.
+DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
+
 # After the primary fails, stay on the fallback this long before trying it again.
 FALLBACK_HOLD = 30 * 60
 
@@ -26,7 +29,8 @@ def build(cfg: dict, *, codex: str, cwd: str, log_dir, sub_agents: bool):
         from .claude_runtime import ClaudeRuntime
         return ClaudeRuntime(cwd, model=cfg.get("model") or "claude-opus-5-5", effort=cfg.get("effort"),
                              log_path=str(log_dir / "claude.log"), cli_path=cfg.get("cli_path"))
-    return CodexRuntime(codex, cwd, model=cfg.get("model"), effort=cfg.get("effort"), sub_agents=sub_agents,
+    return CodexRuntime(codex, cwd, model=cfg.get("model"), effort=cfg.get("effort") or DEFAULT_EFFORT.get(cfg.get("model")),
+                        sub_agents=sub_agents,
                         log_path=str(log_dir / "codex.log"))
 
 

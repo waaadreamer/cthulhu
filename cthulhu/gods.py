@@ -35,7 +35,7 @@ MEMORY_RULES = ("永久上下文只记录高层次、长期有效的内容，只
                 "世界的稳定事实（例如某个集群是什么、用来做什么）。"
                 "一律不记：进度、指标、数值、路径、ID、任务名、调查结论、操作步骤、建议、待办和待确认的问题。"
                 "这些细节都保存在中心神殿的消息历史里，需要时可以查阅。判断标准：能重新查到的、只对某一次任务有用的、"
-                "过几天就会过时的，都不记。每条只写一件事，一句话，不超过 60 字。")
+                "过几天就会过时的，都不记。每条只写一件事，用中文写一句话，不超过 60 字。")
 MAX_ENTRY_CHARS = 120
 # Past this size the whole permanent context is consolidated in one pass.
 COMPACT_AT_TOKENS = 50_000
@@ -440,7 +440,7 @@ class Yog(MemoryAgent):
                       f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=1)}\n```\n"
                       f"最近的巡检结论：\n{await self.recent_patrols()}\n\n"
                       "判断每个 agent 是否在正常推进。需要催办就直接 temple_send 给该旧日支配者；需要阿撒托斯决策或纠偏才发给阿撒托斯。"
-                      "一切正常就什么都不发。最后用一两句话写下本次巡检结论。")
+                      "一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
             r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
             if r.status == "failed" and self.backends.trip():
                 await rt.drop_thread(thread)

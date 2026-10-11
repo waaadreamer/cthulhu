@@ -70,8 +70,10 @@ class Conn:
 
 MODEL_CHOICES = {
     "claude": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
-    "codex": ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna", "gpt-5.6-sol"],
+    "codex": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"],
 }
+# Effort used when a runtime names one of these models without an explicit effort.
+DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
 EFFORTS = {None, "low", "medium", "high", "xhigh", "max"}
 
 
@@ -84,6 +86,8 @@ def validate_runtime(cfg: dict, nested: bool = False) -> dict:
     if cfg.get("effort") not in EFFORTS:
         raise ValueError(f"bad effort {cfg.get('effort')}")
     out = {k: cfg[k] for k in ("backend", "model", "effort") if cfg.get(k)}
+    if "effort" not in out and out["model"] in DEFAULT_EFFORT:
+        out["effort"] = DEFAULT_EFFORT[out["model"]]
     if not nested:
         for k in ("memory_model", "memory_effort"):
             if cfg.get(k):
