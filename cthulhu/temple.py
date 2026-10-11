@@ -218,6 +218,8 @@ class Temple:
             return self.store.turn_log(conn.id, limit=min(int(p.get("limit", 20)), 100))
         if method == "remember":
             return self.store.remember(conn.id, p["text"], p.get("source"))
+        if method == "revise":
+            return self.store.revise(conn.id, int(p["memory_id"]), p["text"], p.get("source"))
         if method == "forget":
             return self.store.forget(conn.id, int(p["memory_id"]))
         if method == "memory":
@@ -253,10 +255,11 @@ class Temple:
         if method == "notify_owner":
             if role != Role.AZATHOTH:
                 raise Denied("only azathoth speaks to the owner unprompted")
-            # A proactive turn: no owner text, just azathoth's words.
+            # A proactive turn: no owner text, just azathoth's words (and what prompted them).
             tid = new_id("note")
             self.store.add_turn(tid, conn.id, "")
-            self.store.update_turn(tid, reply=p["text"], status="done")
+            self.store.update_turn(tid, reply=p["text"], status="done", model=p.get("model"), origin=p.get("origin"),
+                                   **({"activity": p["activity"]} if p.get("activity") else {}))
             await self.broadcast({"type": "chat", "turn": self.store.turn(tid)})
             return True
         if method in ("spawn", "stop", "restart"):
@@ -544,6 +547,13 @@ class Temple:
                 return JSONResponse(self.store.messages(q.get("agent_id") or None,
                                                         limit=min(int(q.get("limit", 100)), 500), before=before))
             if path == "memory":
+                if request.method == "POST":
+                    # The owner corrects or removes an entry by hand.
+                    if body.get("delete"):
+                        self.store.forget(body["agent_id"], int(body["id"]))
+                    else:
+                        self.store.revise(body["agent_id"], int(body["id"]), body["text"].strip(), "owner")
+                    return JSONResponse(self.store.memory(body["agent_id"]))
                 return JSONResponse(self.store.memory(q["agent_id"]))
             if path == "runtimes":
                 if request.method == "POST":

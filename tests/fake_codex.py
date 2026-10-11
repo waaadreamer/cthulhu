@@ -3,7 +3,8 @@
 
 Replies to each turn with "echo: <input>". If the input contains
 `CALL <tool> <json>`, it first invokes that dynamic tool and echoes the result.
-Memory distillation turns (with outputSchema) return {"remember": [...], "forget": []}.
+`REPLY <text>` answers exactly <text>.
+Memory distillation turns (with outputSchema) return {"add": [...], "update": [], "forget": []}.
 """
 import itertools
 import json
@@ -54,7 +55,7 @@ for line in sys.stdin:
         text = p["input"][0]["text"]
         body = text.split("</handoff>")[-1]
         if p.get("outputSchema"):
-            finish(p["threadId"], turn, json.dumps({"remember": ["记住: " + text[-20:]], "forget": []}))
+            finish(p["threadId"], turn, json.dumps({"add": ["记住: " + text[-20:]], "update": [], "forget": []}))
         elif "CALL " in body:
             _, rest = body.split("CALL ", 1)
             name, args = rest.split(" ", 1)
@@ -62,6 +63,8 @@ for line in sys.stdin:
             pending[cid] = (p["threadId"], turn)
             out({"id": cid, "method": "item/tool/call", "params": {"threadId": p["threadId"], "turnId": turn,
                  "callId": "c", "tool": name, "arguments": json.loads(args.strip().splitlines()[0])}})
+        elif "REPLY " in body:
+            finish(p["threadId"], turn, body.split("REPLY ", 1)[1].strip())
         else:
             finish(p["threadId"], turn, "echo[codex]: " + text)
     else:

@@ -117,11 +117,13 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
-        for ddl in ("ALTER TABLE chat_turns ADD COLUMN model TEXT",):
+        for ddl in ("ALTER TABLE chat_turns ADD COLUMN model TEXT", "ALTER TABLE chat_turns ADD COLUMN origin TEXT",
+                    "ALTER TABLE memory ADD COLUMN updated_at REAL"):
             try:
                 self.db.execute(ddl)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        self.db.execute("UPDATE memory SET updated_at=created_at WHERE updated_at IS NULL")
         self.lock = threading.Lock()
         path.chmod(0o600)
 
@@ -222,9 +224,15 @@ class Store:
 
     def remember(self, agent_id: str, text: str, source: str | None = None) -> int:
         with self.lock:
-            cur = self.db.execute("INSERT INTO memory (agent_id, text, source, created_at) VALUES (?,?,?,?)",
-                                  (agent_id, text, source, time.time()))
+            now = time.time()
+            cur = self.db.execute("INSERT INTO memory (agent_id, text, source, created_at, updated_at) VALUES (?,?,?,?,?)",
+                                  (agent_id, text, source, now, now))
             return cur.lastrowid
+
+    def revise(self, agent_id: str, memory_id: int, text: str, source: str | None = None) -> bool:
+        """Rewrite an entry in place; its id stays, updated_at moves."""
+        return self.x("UPDATE memory SET text=?, source=COALESCE(?, source), updated_at=? WHERE agent_id=? AND id=?",
+                      (text, source, time.time(), agent_id, memory_id)) > 0
 
     def memory(self, agent_id: str) -> list[dict]:
         return self.q("SELECT * FROM memory WHERE agent_id=? ORDER BY id", (agent_id,))

@@ -48,6 +48,7 @@ export interface Turn {
   activity: string[]
   status: 'queued' | 'running' | 'done' | 'interrupted' | 'failed'
   model?: string | null
+  origin?: string | null
   created_at: number
   updated_at: number
 }
@@ -63,7 +64,7 @@ export interface Message {
   created_at: number
 }
 
-export interface Memory { id: number; text: string; created_at: number }
+export interface Memory { id: number; text: string; source?: string | null; created_at: number; updated_at?: number | null }
 export interface Patrol { id: number; summary: string; created_at: number }
 
 export class Unauthorized extends Error {}

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
-import { Activity, Brain, Cpu, Globe2, Loader2, Radio, X } from 'lucide-react'
+import { Activity, Brain, Check, Cpu, Globe2, Loader2, Pencil, Radio, Trash2, X } from 'lucide-react'
 import { Agent, ago, api, Directory, Memory, Message, Patrol, ROLE_META, timeLabel, tokens } from '../api'
 import { Avatar, stateOf } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
@@ -177,12 +177,7 @@ function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; on
               <>
               <p className="mb-3 text-xs text-slate-500">{memory.length} 条 · 约 {tokens(agent.memory?.tokens ?? 0)} tokens（上限规划 100k）</p>
               <ul className="space-y-2">
-                {memory.map((x) => (
-                  <li key={x.id} className="flex gap-3 rounded-xl bg-white/[0.03] p-3 text-sm text-slate-300">
-                    <Brain className={`mt-0.5 h-4 w-4 shrink-0 ${m.text}`} />
-                    <span className="flex-1">{x.text}</span>
-                  </li>
-                ))}
+                {memory.map((x) => <MemoryRow key={x.id} agentId={agent.id} item={x} tone={m.text} onChange={setMemory} />)}
               </ul>
               </>
             ) : <p className="text-sm text-slate-500">永久上下文为空。</p>
@@ -199,6 +194,47 @@ function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; on
 
 const STATE_LABEL: Record<string, string> = {
   idle: '空闲', working: '工作中', starting: '启动中', completed: '完成', interrupted: '已中断', failed: '失败',
+}
+
+function MemoryRow({ agentId, item, tone, onChange }: { agentId: string; item: Memory; tone: string; onChange: (m: Memory[]) => void }) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const updated = item.updated_at ?? item.created_at
+  const save = async (body: Record<string, unknown>) => {
+    setBusy(true)
+    try { onChange(await api<Memory[]>('memory', { agent_id: agentId, id: item.id, ...body })); setDraft(null) } finally { setBusy(false) }
+  }
+  return (
+    <li className="group flex gap-3 rounded-xl bg-white/[0.03] p-3 text-sm text-slate-300">
+      <Brain className={`mt-0.5 h-4 w-4 shrink-0 ${tone}`} />
+      <div className="min-w-0 flex-1">
+        {draft === null ? <p className="whitespace-pre-wrap break-words">{item.text}</p> : (
+          <textarea autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} rows={3}
+            className="w-full resize-y rounded-lg border border-white/10 bg-black/30 p-2 text-sm text-slate-200 outline-none focus:border-violet-400/50" />
+        )}
+        <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
+          <span className="font-mono">#{item.id}</span>
+          <span>更新于 {timeLabel(updated)}</span>
+          {updated - item.created_at > 1 && <span>· 创建于 {timeLabel(item.created_at)}</span>}
+          {item.source === 'owner' && <span className="chip bg-violet-500/15 text-violet-300">主人修改</span>}
+          <span className="ml-auto flex gap-1 opacity-0 transition group-hover:opacity-100 max-sm:opacity-100">
+            {draft === null ? (
+              <>
+                <button className="btn-icon h-6 w-6" title="编辑" onClick={() => setDraft(item.text)}><Pencil className="h-3.5 w-3.5" /></button>
+                <button className="btn-icon h-6 w-6 hover:text-rose-300" title="删除" disabled={busy}
+                  onClick={() => confirm(`删除 #${item.id}？`) && save({ delete: true })}><Trash2 className="h-3.5 w-3.5" /></button>
+              </>
+            ) : (
+              <>
+                <button className="btn-icon h-6 w-6 hover:text-emerald-300" title="保存" disabled={busy || !draft.trim()} onClick={() => save({ text: draft })}><Check className="h-3.5 w-3.5" /></button>
+                <button className="btn-icon h-6 w-6" title="取消" onClick={() => setDraft(null)}><X className="h-3.5 w-3.5" /></button>
+              </>
+            )}
+          </span>
+        </div>
+      </div>
+    </li>
+  )
 }
 
 function Latest({ data }: { data: Record<string, unknown> }) {

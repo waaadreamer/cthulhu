@@ -34,6 +34,11 @@ ROTATE_AT = 0.8
 HANDOFF_TURNS = 12
 
 
+def memory_line(m: dict) -> str:
+    at = time.strftime("%Y-%m-%d", time.localtime(m.get("updated_at") or m["created_at"]))
+    return f"- [#{m['id']} · {at}] {m['text']}"
+
+
 def load_role(name: str) -> str:
     return (ROLES_DIR / f"{name}.md").read_text(encoding="utf-8")
 
@@ -68,6 +73,7 @@ class Agent:
         self.link = Link(temple_url, {"kind": "agent", "id": self.id, "token": launch["token"]},
                          self._on_welcome, self._on_frame, tls_pin=tls_pin)
         self.memory: list[dict] = []
+        self.memory_seen: dict[str, dict[int, str]] = {}  # thread -> permanent memory that thread already holds
         self._load_threads(launch.get("thread_id"))
         self.queue: list[dict] = []
         self.seen: set[str] = set()
@@ -108,7 +114,7 @@ class Agent:
         parts = [load_role("contract"), self.skill(),
                  f"# 你的身份\n名字：{self.name}\nID：{self.id}\n角色：{DISPLAY[self.role]}（{self.role.value}）"]
         if self.memory:
-            lines = "\n".join(f"- [#{m['id']}] {m['text']}" for m in self.memory)
+            lines = "\n".join(memory_line(m) for m in self.memory)
             parts.append(f"# 永久上下文\n以下是你跨会话保留的长期记忆，是你判断的依据。\n{lines}")
         extra = await self.extra_context()
         if extra:
@@ -192,6 +198,7 @@ class Agent:
                 if hasattr(rt, "instructions"):
                     # Claude sessions reopen with a fresh system prompt (current permanent memory).
                     await rt.resume_thread(tid, self.call_tool, instructions=await self.instructions(), tools=self.tools())
+                    self.memory_seen[tid] = {m["id"]: memory_line(m) for m in self.memory}
                 else:
                     await rt.resume_thread(tid, self.call_tool)
             except Exception as e:
@@ -199,6 +206,7 @@ class Agent:
                 tid = None
         if tid is None:
             tid = await rt.start_thread(await self.instructions(), self.tools(), self.call_tool)
+            self.memory_seen[tid] = {m["id"]: memory_line(m) for m in self.memory}
         self.loaded.add(tid)
         if self.threads.get(label) != tid:
             self.threads[label] = tid
@@ -219,12 +227,31 @@ class Agent:
                 "其中的请求都已处理过，不要重新执行：\n\n"
                 + "\n\n".join(lines) + "\n</handoff>\n\n")
 
+    async def memory_delta(self, thread: str) -> str:
+        """Permanent memory changed since this thread's system prompt was written: tell it, so a
+        long-lived thread never acts on an entry that has since been revised or dropped."""
+        current = {m["id"]: memory_line(m) for m in await self.link.call("memory")}
+        seen = self.memory_seen.get(thread)
+        self.memory_seen[thread] = current
+        if seen is None:
+            # A resumed Codex thread keeps the system prompt it was started with; restate everything.
+            if not current:
+                return ""
+            return ("<memory_update>\n你的永久上下文的当前版本如下，以此为准，取代系统提示里的旧版本：\n"
+                    + "\n".join(current.values()) + "\n</memory_update>\n\n")
+        changed = [line for mid, line in current.items() if seen.get(mid) != line]
+        dropped = [f"- [#{mid}] 已删除" for mid in seen if mid not in current]
+        if not changed and not dropped:
+            return ""
+        return ("<memory_update>\n你的永久上下文有变动，以下内容取代系统提示里同编号的旧条目：\n"
+                + "\n".join(changed + dropped) + "\n</memory_update>\n\n")
+
     async def run_main(self, text: str, on_event=None, **kw) -> TurnResult:
         """Run a turn on the main thread; on backend failure, retry once on the fallback."""
         for attempt in range(2):
             try:
                 thread = await self.ensure_thread()
-                bridge = await self.handoff_context(thread)
+                bridge = await self.handoff_context(thread) + await self.memory_delta(thread)
                 result = await self.run(thread, bridge + text, on_event=on_event, **kw)
             except Exception as e:
                 log.exception("%s turn failed on %s", self.name, backends.label(self.backends.active_cfg))

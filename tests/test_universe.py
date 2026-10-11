@@ -106,7 +106,7 @@ class Universe(unittest.TestCase):
         turn = self.chat("az", "你好阿撒托斯")
         self.assertIn("你好阿撒托斯", turn["reply"])
         mem = self.wait(lambda: self.api("memory?agent_id=az"))
-        self.assertTrue(mem[0]["text"].startswith("记住"))
+        self.assertTrue(any(m["text"].startswith("记住") for m in mem))
 
     def test_owner_cannot_reach_shub(self):
         r = self.api("send", {"to": "sh", "text": "hi"})
@@ -117,6 +117,35 @@ class Universe(unittest.TestCase):
         msgs = self.wait(lambda: [m for m in self.api("messages?agent_id=sh") if m["sender"] == "az" and m["state"] == "handled"])
         self.assertEqual(msgs[0]["receiver"], "sh")
         self.wait(lambda: self.api("memory?agent_id=sh"))
+
+    def test_subordinate_report_reaches_owner_unless_silent(self):
+        # shub reports back; azathoth's reply to that internal message lands in the owner's chat by itself.
+        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_send {\\"to\\": \\"az\\", \\"text\\": \\"巡检完成\\"}"}')
+        note = self.wait(lambda: next(t for t in self.api("chat?agent_id=az") if not t["user_text"] and "巡检完成" in t["reply"]))
+        self.assertTrue(note["origin"])
+        self.assertEqual(note["status"], "done")
+        # A reply of exactly [静默] stays internal.
+        before = len(self.api("chat?agent_id=az&limit=200"))
+        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_send {\\"to\\": \\"az\\", \\"text\\": \\"REPLY [静默]\\"}"}')
+        self.wait(lambda: [m for m in self.api("messages?agent_id=az") if m["text"] == "REPLY [静默]" and m["state"] == "handled"])
+        time.sleep(1)
+        self.assertEqual(len(self.api("chat?agent_id=az&limit=200")), before + 1)  # only the owner's own turn
+
+    def test_memory_revised_in_place_and_pushed_to_live_thread(self):
+        self.chat("az", "记一下这个")
+        mem = self.wait(lambda: self.api("memory?agent_id=az"))
+        first = mem[0]
+        time.sleep(1.1)
+        mem = self.api("memory", {"agent_id": "az", "id": first["id"], "text": "S 集群已连接（截至今天）"})
+        edited = next(m for m in mem if m["id"] == first["id"])
+        self.assertEqual(edited["text"], "S 集群已连接（截至今天）")
+        self.assertGreater(edited["updated_at"], edited["created_at"])
+        turn = self.chat("az", "现在呢")
+        self.assertIn("<memory_update>", turn["reply"])
+        self.assertIn("S 集群已连接", turn["reply"])
+        # Already delivered: the next turn carries no delta for it.
+        turn = self.chat("az", "再问一次")
+        self.assertNotIn("S 集群已连接", turn["reply"])
 
     def test_matrix_denies_via_tool(self):
         # ghroth holds no tools; azathoth may not reach old_ones directly

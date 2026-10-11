@@ -17,12 +17,18 @@ from .runtime import TurnResult, tool
 log = logging.getLogger(__name__)
 
 MEMORY_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["remember", "forget"],
+    "type": "object", "additionalProperties": False, "required": ["add", "update", "forget"],
     "properties": {
-        "remember": {"type": "array", "items": {"type": "string"}},
+        "add": {"type": "array", "items": {"type": "string"}},
+        "update": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["id", "text"],
+            "properties": {"id": {"type": "integer"}, "text": {"type": "string"}}}},
         "forget": {"type": "array", "items": {"type": "integer"}},
     },
 }
+
+# Azathoth's final reply to an internal message is shown to the owner unless it is exactly this.
+SILENT = "[静默]"
 
 STR = {"type": "string"}
 
@@ -35,6 +41,8 @@ class MemoryAgent(Agent):
     temporary context (the native thread) only.
     """
     memory_sources: set[str] = set()
+    # Senders whose messages may only correct or drop existing entries (verified results), never add.
+    correction_sources: set[str] = set()
     memory_brief = ""
 
     def __init__(self, *a, **kw):
@@ -42,9 +50,12 @@ class MemoryAgent(Agent):
         self.memory_lock = asyncio.Lock()
 
     async def after_turn(self, batch: list[dict], result: TurnResult) -> None:
-        if result.status == "completed" and self.last_turn and \
-                any(m["sender_role"] in self.memory_sources for m in batch):
+        if result.status != "completed" or not self.last_turn:
+            return
+        if any(m["sender_role"] in self.memory_sources for m in batch):
             asyncio.create_task(self.distill(*self.last_turn))
+        elif self.correction_sources and any(m["sender_role"] in self.correction_sources for m in batch):
+            asyncio.create_task(self.distill(*self.last_turn, correct_only=True))
 
     async def fork_for_memory(self, rt, thread: str) -> str:
         # Claude forks can run on a cheaper model / effort; Codex forks inherit the thread's.
@@ -53,22 +64,37 @@ class MemoryAgent(Agent):
             return await rt.fork_thread(thread, model=cfg.get("memory_model"), effort=cfg.get("memory_effort"))
         return await rt.fork_thread(thread)
 
-    async def distill(self, rt, thread: str) -> None:
+    async def distill(self, rt, thread: str, correct_only: bool = False) -> None:
         async with self.memory_lock:
             fork = None
             try:
                 current = await self.link.call("memory")
-                listing = "\n".join(f"#{m['id']} {m['text']}" for m in current) or "（空）"
+                if correct_only and not current:
+                    return
+                listing = "\n".join(f"#{m['id']}（{stamp(m)}）{m['text']}" for m in current) or "（空）"
                 fork = await self.fork_for_memory(rt, thread)
-                prompt = (f"【程序层记忆整理，不是新消息，不要调用任何工具】\n{self.memory_brief}\n\n"
-                          f"当前永久上下文：\n{listing}\n\n"
-                          "只看最近这轮交流。remember：需要新增的条目，每条一句话、自包含、忠实原意，已存在的不要重复；"
-                          "forget：被这轮交流推翻或过时的条目编号。没有就返回空数组。")
+                prompt = (f"【程序层记忆整理，不是新消息，不要调用任何工具】现在是 {time.strftime('%Y-%m-%d %H:%M')}。\n"
+                          f"{self.memory_brief}\n\n当前永久上下文（括号里是最后更新时间）：\n{listing}\n\n"
+                          "只看最近这轮交流，维护上面的永久上下文：\n"
+                          "- update：已有条目被这轮交流补充、修正或推翻时，给出该编号的新全文（改写原条目，不要另起一条）。\n"
+                          "- forget：彻底失效、不再有任何参考价值的条目编号。\n"
+                          + ("- add：必须返回空数组。这轮是下属的执行结果，只能用经过核实的结果修正或删除已有条目。\n"
+                             if correct_only else
+                             "- add：确实是新的长期信息才新增。\n")
+                          + "每条只写一件事，一两句话，自包含、忠实原意；不要把多件事塞进一条，不要记待办、待确认的问题和操作步骤。"
+                          "会随时间变化的状态（集群、星系、资源类事实）要写明截至的日期。没有变化就全部返回空数组。")
                 r = await self.run(fork, prompt, output_schema=MEMORY_SCHEMA, track=False, timeout=600, runtime=rt)
                 data = json.loads(r.text or "{}")
+                log.info("%s memory%s: add %s update %s forget %s", self.name, " (correct only)" if correct_only else "",
+                         len(data.get("add", [])), [u.get("id") for u in data.get("update", [])], data.get("forget", []))
+                known = {m["id"] for m in current}
                 for mid in data.get("forget", []):
-                    await self.link.call("forget", memory_id=mid)
-                for text in data.get("remember", []):
+                    if mid in known:
+                        await self.link.call("forget", memory_id=mid)
+                for u in data.get("update", []):
+                    if u.get("id") in known and u.get("text", "").strip():
+                        await self.link.call("revise", memory_id=u["id"], text=u["text"].strip(), source=thread)
+                for text in [] if correct_only else data.get("add", []):
                     if text.strip():
                         await self.link.call("remember", text=text.strip(), source=thread)
             except Exception:
@@ -76,6 +102,10 @@ class MemoryAgent(Agent):
             finally:
                 if fork:
                     await rt.drop_thread(fork)
+
+
+def stamp(m: dict) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(m.get("updated_at") or m["created_at"]))
 
 
 class OwnerChat:
@@ -122,16 +152,15 @@ class OwnerChat:
 class Azathoth(OwnerChat, MemoryAgent):
     role = Role.AZATHOTH
     memory_sources = {OWNER}
-    memory_brief = ("刚才是你和主人的对话。提取主人话语与你回答中值得长期保留的内容：目标、意志、偏好、决定、约束、洞见、"
-                    "达成的结论。不要记录寒暄、执行进度、其他 agent 的消息或你的后台操作。")
+    memory_brief = ("刚才是你和主人之间的交流（可能是主人发起的对话，也可能是你把下属的汇报转告给主人）。"
+                    "提取值得长期保留的内容：主人的目标、意志、偏好、决定、约束、洞见，以及经过核实的、对以后判断有用的客观事实"
+                    "（例如集群和星系是什么、在哪里）。不要记录寒暄、执行流水和一次性的进度细节。")
 
     def tools(self) -> list[dict]:
         return super().tools() + [
             tool("temple_messages", "读取中心神殿的消息记录（可按 agent 过滤）。", {"agent_id": STR, "limit": {"type": "integer"}}),
             tool("temple_agent", "读取某个 agent 的完整注册信息（含初始化参数）。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_owner_history", "检索你和主人的历史聊天。", {"search": STR, "limit": {"type": "integer"}}),
-            tool("tell_owner", "主动在主人的聊天窗口里说一句话（交付结果、需要主人决定、重大风险）。不要用于普通进度。",
-                 {"text": STR}, ["text"]),
         ]
 
     async def call_tool(self, name: str, args: dict):
@@ -143,18 +172,51 @@ class Azathoth(OwnerChat, MemoryAgent):
         if name == "temple_owner_history":
             turns = await self.link.call("owner_chat", search=args.get("search"), limit=args.get("limit", 10))
             return [{"at": time.strftime("%Y-%m-%d %H:%M", time.localtime(t["created_at"])),
-                     "owner": t["user_text"], "you": clip(t["reply"], 2000)} for t in turns]
-        if name == "tell_owner":
-            await self.link.call("notify_owner", text=args["text"])
-            return "已送达主人聊天窗口"
+                     "owner": t["user_text"] or f"（你主动告知，起因：{t.get('origin') or '内部消息'}）",
+                     "you": clip(t["reply"], 2000)} for t in turns]
         return await super().call_tool(name, args)
+
+    async def receive(self, batch: list[dict]) -> None:
+        owner = [m for m in batch if m["sender"] == OWNER]
+        rest = [m for m in batch if m["sender"] != OWNER]
+        for m in owner:
+            await self.chat(m)
+        if rest:
+            await self.internal(rest)
+
+    async def internal(self, batch: list[dict]) -> None:
+        """Messages from shub/yog. The program, not the model, decides where the reply goes:
+        the final reply is shown in the owner's chat unless it is exactly SILENT."""
+        text = (f"【以下是宇宙内部的消息，不是主人说的。你这轮的最终回复会由程序作为主动消息直接显示在主人的聊天窗口。"
+                f"交付的结果、需要主人决定的事、重大风险、纠正你之前告诉主人的错误信息，就写给主人；"
+                f"纯过程性进展、主人不需要知道的，最终回复只写 {SILENT}。】\n\n" + self.render(batch))
+        activity: list[str] = []
+
+        def on_event(method: str, p: dict) -> None:
+            if method == "item/completed":
+                activity.extend(summarize_items([p.get("item") or {}]))
+
+        result = await self.run_main(text, on_event=on_event)
+        reply = (result.text or "").strip()
+        if result.status != "completed":
+            reply = f"（处理{', '.join(sorted({m['sender_name'] for m in batch}))}的消息时出错：{result.error or result.status}）"
+        if reply and reply != SILENT and not reply.endswith(SILENT):
+            origin = "、".join(sorted({m["sender_name"] for m in batch})) + "的消息"
+            await self.link.call("notify_owner", text=reply, origin=origin, model=self.latest.get("model"),
+                                 activity=activity[-40:])
+            # What reached the owner is part of the owner conversation: distill it.
+            if result.status == "completed" and self.last_turn:
+                asyncio.create_task(self.distill(*self.last_turn))
 
 
 class Shub(MemoryAgent):
     role = Role.SHUB
     memory_sources = {Role.AZATHOTH}
-    memory_brief = ("刚才是你和阿撒托斯的交流。提取其中值得长期保留的内容：阿撒托斯交代的目标、要求、约定、决定和结论。"
-                    "不要记录 old_one 的汇报或执行流水；old_one 的初始化参数由程序单独保存。")
+    correction_sources = {Role.OLD_ONE}
+    memory_brief = ("刚才是你和阿撒托斯的交流。只提取阿撒托斯给出的、以后组织任务时仍然有用的客观信息和长期约定："
+                    "例如某个集群/星系是什么、有什么资源，阿撒托斯定下的长期规则和偏好。"
+                    "不要记录具体某次任务的请求、要求、进度或结果（任务本身留在消息记录里，记下来会干扰以后的任务），"
+                    "也不要记录 old_one 的汇报；old_one 的初始化参数由程序单独保存。")
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -218,7 +280,9 @@ class Shub(MemoryAgent):
 class Yog(MemoryAgent):
     role = Role.YOG
     memory_sources = {Role.AZATHOTH}
-    memory_brief = "刚才是你和阿撒托斯的交流。提取阿撒托斯对监督工作的要求、关注点和结论。不要记录巡检流水。"
+    correction_sources = {Role.OLD_ONE}
+    memory_brief = ("刚才是你和阿撒托斯的交流。只提取阿撒托斯对监督工作给出的长期要求、关注点，以及以后巡检仍然有用的客观信息。"
+                    "不要记录具体某次的请求、巡检流水或一次性结论。")
 
     def __init__(self, *a, patrol_interval: float = 300, **kw):
         super().__init__(*a, **kw)

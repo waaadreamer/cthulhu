@@ -44,7 +44,7 @@ class FakeClient:
             return
         yield StreamEvent(uuid="u", session_id=self.sid, event={"type": "message_start"})
         if "只输出一个 JSON" in text:
-            reply = json.dumps({"remember": ["记住: " + (hist[-1] if hist else "")[-20:]], "forget": []}, ensure_ascii=False)
+            reply = json.dumps({"add": ["记住: " + (hist[-1] if hist else "")[-20:]], "update": [], "forget": []}, ensure_ascii=False)
         elif "CALL " in text.split("</handoff>")[-1]:
             name, args = text.split("</handoff>")[-1].split("CALL ", 1)[1].split(" ", 1)
             full = f"mcp__temple__{name}"
@@ -56,6 +56,8 @@ class FakeClient:
             else:
                 out = await tool.handler(json.loads(args.splitlines()[0]))
                 reply = "tool: " + out["content"][0]["text"]
+        elif "REPLY " in text.split("</handoff>")[-1]:
+            reply = text.split("REPLY ", 1)[1].strip()
         else:
             reply = f"echo[{self.o.model}]: " + text
         hist.append(text)

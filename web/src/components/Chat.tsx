@@ -194,7 +194,7 @@ function TurnView({ turn, agent, stream, highlight }: { turn: Turn; agent: Agent
       <div className="flex gap-3">
         <Avatar role={agent.role} size="sm" />
         <div className="min-w-0 flex-1 pt-0.5">
-          {!turn.user_text && <div className="mb-1 flex items-center gap-1.5 text-xs text-violet-300"><Sparkles className="h-3 w-3" />主动消息 · {timeLabel(turn.created_at)}</div>}
+          {!turn.user_text && <div className="mb-1 flex items-center gap-1.5 text-xs text-violet-300"><Sparkles className="h-3 w-3" />主动消息{turn.origin ? ` · 起因：${turn.origin}` : ''} · {timeLabel(turn.created_at)}</div>}
           {activity.length > 0 && <Activity items={activity} live={live} />}
           {reply ? (
             <Markdown text={reply} streaming={live} />
