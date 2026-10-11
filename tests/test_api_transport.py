@@ -123,6 +123,8 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
         async def stream():
             for event in events:
+                if event["type"] == "response.completed" and hasattr(self, "terminal_gate"):
+                    await self.terminal_gate.wait()
                 if getattr(self, "hold_stream", False):
                     await asyncio.sleep(30)
                 wire = ("data: " + json.dumps(event) + "\n\n").encode()
@@ -248,3 +250,20 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.temple.galaxies["central"].capabilities = []
         with self.assertRaises(CallFailed):
             await self.caller.call("api_open", provider="ali", body={"model": "gpt-6-astra", "input": "must not send"})
+
+
+    async def test_first_sse_reaches_caller_before_upstream_completion(self):
+        import base64
+        self.terminal_gate = asyncio.Event()
+        opened = await self.caller.call("api_open", provider="ali", body={"model": "gpt-6-astra", "input": "stream"})
+        try:
+            part = await asyncio.wait_for(self.caller.call("api_next", id=opened["id"]), 2)
+            self.assertIn(b"response.created", base64.b64decode(part["data"]))
+            self.assertFalse(part.get("done"))
+            self.assertIn(opened["id"], self.worker.tasks)
+        finally:
+            self.terminal_gate.set()
+        while True:
+            part = await self.caller.call("api_next", id=opened["id"])
+            if part.get("done"):
+                break

@@ -101,7 +101,7 @@ api_open开始后即视为可能已发送，即使响应尚未出现也不自动
 ## 验证入口
 
 `venv/bin/python -m unittest discover -s tests -v` 包含：
-真实认证WS+本地模拟HTTPS客户端链路、真实打包Codex动态工具和第二轮对话、
+真实认证WS+本地模拟HTTP上游链路、真实打包Codex动态工具和第二轮对话、
 多请求相关性、终端实际tier、错误脱敏、取消确认、断连重连、排空、授权与限额。
 这些测试不是Ali公司模型的现场验收。
 

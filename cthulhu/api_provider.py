@@ -374,7 +374,7 @@ class ProviderWorker:
                         return
                     pending = b""
                     complete = False
-                    async for chunk in response.aiter_bytes(chunk_size=16384):
+                    async for chunk in response.aiter_bytes():
                         pending += chunk
                         if len(pending) > MAX_EVENT:
                             await push(error="too_large")
