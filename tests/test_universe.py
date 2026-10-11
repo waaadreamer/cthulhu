@@ -31,8 +31,9 @@ def free_port():
     return port
 
 
-class Universe(unittest.TestCase):
+class HarnessServer(unittest.TestCase):
     runtimes: dict = {}
+    patrol_interval = 2
 
     @classmethod
     def setUpClass(cls):
@@ -46,7 +47,7 @@ class Universe(unittest.TestCase):
                   "galaxies": [{"id": "g1", "name": "test", "token": gtoken}],
                   "gods": [{"id": v, "role": k, "galaxy": "g1"} for k, v in cls.ids.items()]}
         galaxy = {"id": "g1", "token": gtoken, "temple_ws": f"ws://127.0.0.1:{cls.port}/ws",
-                  "state": str(cls.dir / "galaxy"), "codex": FAKE, "cwd": str(cls.dir), "patrol_interval": 2, "runtimes": cls.runtimes}
+                  "state": str(cls.dir / "galaxy"), "codex": FAKE, "cwd": str(cls.dir), "patrol_interval": cls.patrol_interval, "runtimes": cls.runtimes}
         (cls.dir / "temple.json").write_text(json.dumps(temple))
         (cls.dir / "galaxy.json").write_text(json.dumps(galaxy))
         salt = secrets.token_hex(16)
@@ -103,6 +104,7 @@ class Universe(unittest.TestCase):
         msg = self.api("send", {"to": to, "text": text})
         return self.wait(lambda: next(t for t in self.api(f"chat?agent_id={to}") if t["id"] == msg["id"] and t["status"] == "done"))
 
+class Universe(HarnessServer):
     def test_owner_chat_and_memory(self):
         turn = self.chat("az", "你好阿撒托斯")
         self.assertIn("你好阿撒托斯", turn["reply"])

@@ -412,6 +412,8 @@ class Yog(MemoryAgent):
     def __init__(self, *a, patrol_interval: float = 300, **kw):
         super().__init__(*a, **kw)
         self.patrol_interval = patrol_interval
+        self.patrol_wake = asyncio.Event()
+        self.patrol_pending = False
         self.azathoth_id = Role.AZATHOTH.value
         self.ghroth_task: str | None = None
         self.reported = False
@@ -429,11 +431,37 @@ class Yog(MemoryAgent):
             tool("temple_latest_result", "远程读取某个 agent 的最新工作状态与产出。", {"agent_id": STR}, ["agent_id"]),
         ]
 
+    async def _on_frame(self, frame: dict):
+        if frame.get("type") == "patrol_requested":
+            self.patrol_pending = True
+            self.patrol_wake.set()
+            return
+        result = await super()._on_frame(frame)
+        if not self.draining and self.patrol_pending:
+            self.patrol_wake.set()
+        return result
+
+    async def _on_welcome(self, w: dict) -> None:
+        await super()._on_welcome(w)
+        if not self.draining and self.patrol_pending:
+            self.patrol_wake.set()
+
     async def background(self) -> None:
         while True:
-            await asyncio.sleep(self.patrol_interval)
+            try:
+                await asyncio.wait_for(self.patrol_wake.wait(), self.patrol_interval)
+            except asyncio.TimeoutError:
+                pass
+            self.patrol_wake.clear()
             try:
                 if not self.draining:
+                    if self.patrol_pending:
+                        # Coalesce bursts and let the finishing agent publish its idle state.
+                        await asyncio.sleep(1)
+                    if self.draining:
+                        continue
+                    self.patrol_pending = False
+                    self.patrol_wake.clear()
                     self.patrol_busy = True
                     try:
                         await self.patrol()

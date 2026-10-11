@@ -309,7 +309,15 @@ class Temple:
             self.store.set_agent(conn.id, thread_id=p["thread_id"])
             return True
         if method == "log_turn":
-            return self.store.log_turn(conn.id, p["backend"], p.get("model"), p["thread"], p["input"], p["reply"], p["status"])
+            result = self.store.log_turn(conn.id, p["backend"], p.get("model"), p["thread"], p["input"], p["reply"], p["status"])
+            # Completion is authenticated and persisted before waking supervision. This is
+            # a scheduling hint, not a new agent message or a grant of messaging authority.
+            if role == Role.GHROTH:
+                yog = self.god(Role.YOG)
+                target = self.agents.get(yog["id"]) if yog else None
+                if target:
+                    await target.send({"type": "patrol_requested"})
+            return result
         if method == "turn_log":
             return self.store.turn_log(conn.id, limit=min(int(p.get("limit", 20)), 100))
         if method == "remember":
