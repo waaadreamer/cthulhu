@@ -413,6 +413,8 @@ class Agent:
             # While draining only the owner's messages are taken; everything else waits for the drain to end.
             ready = [m for m in self.queue if m.get("sender") == OWNER] if self.draining else self.queue
             if not ready:
+                if self.pending_runtime is not None and not self.draining:
+                    await self.apply_runtime()   # a settings change takes effect now, not at the next message
                 if self.state != "idle":
                     await self.report("idle")    # queued work waits for the drain to end; we are not busy
                 continue

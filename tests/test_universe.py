@@ -297,6 +297,13 @@ class RuntimeSwitching(Universe):
     def runtime_of(self, aid):
         return next(a for a in self.api("directory")["agents"] if a["id"] == aid)["runtime"]
 
+    def test_runtime_change_applies_while_idle(self):
+        # Shub is idle; a settings change shows up without waiting for its next message.
+        self.api("runtimes", {"key": "shub", "config": {"backend": "codex", "model": "gpt-6-luna"}})
+        self.wait(lambda: self.runtime_of("sh")["model"] == "gpt-6-luna", 20)
+        self.api("runtimes", {"key": "shub", "config": None})
+        self.wait(lambda: self.runtime_of("sh")["model"] != "gpt-6-luna", 20)
+
     def test_fallback_then_switch_then_handoff(self):
         # Primary is broken: the turn is answered by the codex fallback, and the UI sees it.
         turn = self.chat("az", "第一句：我的代号是青蛙")
