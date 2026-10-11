@@ -54,7 +54,7 @@ class Agent:
 
     def __init__(self, temple_url: str, launch: dict, codex: str, cwd: str, state_dir: Path,
                  model: str | None = None, effort: str | None = None, runtime: dict | None = None,
-                 tls_pin: str | None = None):
+                 tls_pin: str | None = None, company_codex: dict | None = None):
         self.id, self.name = launch["id"], launch["name"]
         self.spec: dict = launch.get("spec") or {}
         self.state_dir = state_dir
@@ -64,7 +64,7 @@ class Agent:
         if self.spec.get("model"):
             self.default_runtime["model"] = self.spec["model"]
         self.build_kw = {"codex": codex, "cwd": self.spec.get("cwd") or cwd, "log_dir": state_dir,
-                         "sub_agents": self.role == Role.OLD_ONE}
+                         "sub_agents": self.role == Role.OLD_ONE, "company_codex": company_codex}
         self.backends = Backends(self.default_runtime, **self.build_kw)
         self.pending_runtime: dict | None = None
         self.threads: dict[str, str] = {}     # backend label -> thread id
@@ -103,7 +103,10 @@ class Agent:
             self.threads = json.loads(stored) if stored else {}
         except ValueError:
             # Pre-fallback format: a bare thread id of the default backend.
-            self.threads = {backends.label(self.default_runtime): stored}
+            legacy = self.default_runtime
+            if legacy.get("backend") == "company_codex":
+                legacy = legacy | {"backend": "codex"}
+            self.threads = {backends.label(legacy): stored}
 
     def runtime_status(self) -> dict:
         return {"backend": self.backends.active_cfg.get("backend", "codex"), "model": self.backends.active_cfg.get("model"),
@@ -206,6 +209,9 @@ class Agent:
     async def ensure_thread(self) -> str:
         """The main thread on the active backend, opened or resumed as needed."""
         rt, label = self.runtime, backends.label(self.backends.active_cfg)
+        if not rt.alive:
+            self.loaded.clear()
+            await rt.start()
         tid = self.threads.get(label)
         if tid and tid in self.loaded and rt.context_fill(tid) > ROTATE_AT:
             log.info("%s rotating temporary thread", self.name)
@@ -334,8 +340,14 @@ class Agent:
             return
         log.info("%s switching runtime to %s", self.name, backends.label(cfg))
         old = self.backends
-        self.backends = Backends(cfg, **self.build_kw)
-        await self.backends.start()
+        replacement = Backends(cfg, **self.build_kw)
+        try:
+            await replacement.start()
+        except Exception:
+            await replacement.close()
+            log.exception("%s could not start requested runtime; retaining current runtime", self.name)
+            return
+        self.backends = replacement
         self.loaded.clear()
         await old.close()
         await self.report(self.state)
@@ -367,9 +379,13 @@ class Agent:
         # A crashed codex app-server takes its threads with it; let the galaxy restart the agent.
         while True:
             await asyncio.sleep(5)
-            for rt in (self.backends.primary, self.backends.fallback):
-                if rt is not None and not rt.alive:
-                    return
+            rt = self.backends.active
+            # Fallback is started lazily. A failed primary with a fallback is
+            # retried by ensure_thread at a turn boundary after the hold expires.
+            if rt is self.backends.primary and self.backends.fallback is not None:
+                continue
+            if rt.proc is not None and not rt.alive:
+                return
 
     async def on_ready(self) -> None:
         pass

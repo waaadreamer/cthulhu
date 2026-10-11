@@ -62,7 +62,7 @@ def main() -> None:
         agent = CLASSES[role](cfg["temple_ws"], launch, cfg["codex"], cfg.get("cwd") or str(Path.home()),
                               Path(cfg["state"]) / launch["id"], model=models.get(role.value, cfg.get("model")),
                               effort=cfg.get("effort"), runtime=cfg.get("runtimes", {}).get(role.value),
-                              tls_pin=cfg.get("tls_pin"), **kw)
+                              tls_pin=cfg.get("tls_pin"), company_codex=cfg.get("company_codex"), **kw)
         asyncio.run(agent.main())
     elif args.cmd == "provision":
         import base64

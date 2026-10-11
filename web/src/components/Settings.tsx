@@ -4,12 +4,12 @@ import { Agent, api, Directory, Role, ROLE_META, RuntimeCfg } from '../api'
 import { Avatar } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 
-type Models = Record<'claude' | 'codex', string[]>
+type Models = Record<RuntimeCfg['backend'], string[]>
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max']
 
 export function Settings({ dir }: { dir: Directory }) {
   const [overrides, setOverrides] = useState<Record<string, RuntimeCfg> | null>(null)
-  const [models, setModels] = useState<Models>({ claude: [], codex: [] })
+  const [models, setModels] = useState<Models>({ claude: [], codex: [], company_codex: [] })
   const load = () => api<{ overrides: Record<string, RuntimeCfg>; models: Models }>('runtimes')
     .then((r) => { setOverrides(r.overrides); setModels(r.models) })
   useEffect(() => { load() }, [])
@@ -24,7 +24,7 @@ export function Settings({ dir }: { dir: Directory }) {
         <div>
           <h2 className="text-lg font-semibold text-white">模型与后端</h2>
           <p className="mt-1 text-sm text-slate-400">
-            修改后在该 agent 当前回合结束时生效。切换 Codex / Claude 会开启新会话，程序会把永久上下文和最近的交流记录带过去。
+            修改后在该 agent 当前回合结束时生效。不同后端使用独立会话，程序会把永久上下文和最近的交流记录带过去。
             主后端出错（如被限流）时自动改用后备 30 分钟。
           </p>
         </div>
@@ -128,12 +128,12 @@ function BackendFields({ cfg, models, onChange }: { cfg: RuntimeCfg; models: Mod
   return (
     <div className="space-y-3">
       <div className="flex gap-1 rounded-xl bg-black/30 p-1">
-        {(['claude', 'codex'] as const).map((b) => (
-          <button key={b} onClick={() => b !== cfg.backend && onChange({ ...cfg, backend: b, model: models[b][0] ?? '' })}
+        {(['claude', 'codex', 'company_codex'] as const).filter((b) => models[b]).map((b) => (
+          <button key={b} onClick={() => b !== cfg.backend && onChange({ ...cfg, backend: b, model: models[b]?.[0] ?? '', service_tier: undefined })}
             className={`flex-1 rounded-lg py-1.5 text-sm transition ${cfg.backend === b
               ? b === 'claude' ? 'bg-orange-400/20 text-orange-100' : 'bg-sky-400/20 text-sky-100'
               : 'text-slate-500 hover:text-slate-300'}`}>
-            {b === 'claude' ? 'Claude Code' : 'Codex'}
+            {b === 'claude' ? 'Claude Code' : b === 'company_codex' ? '公司 Codex' : '个人 Codex'}
           </button>
         ))}
       </div>
@@ -143,6 +143,12 @@ function BackendFields({ cfg, models, onChange }: { cfg: RuntimeCfg; models: Mod
       <Field label="effort">
         <Select value={cfg.effort ?? ''} options={EFFORTS} onChange={(v) => onChange({ ...cfg, effort: v || undefined })} />
       </Field>
+      {cfg.backend !== 'claude' && models.company_codex && (
+        <Field label="服务档位（fast 需网关或账户支持）">
+          <Select value={cfg.service_tier ?? 'default'} options={['default', 'fast']}
+            onChange={(v) => onChange({ ...cfg, service_tier: v })} />
+        </Field>
+      )}
     </div>
   )
 }

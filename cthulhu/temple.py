@@ -72,6 +72,7 @@ MODEL_CHOICES = {
     "claude": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
     "codex": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"],
 }
+MODEL_CHOICES["company_codex"] = list(MODEL_CHOICES["codex"])
 # Effort used when a runtime names one of these models without an explicit effort.
 DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
 EFFORTS = {None, "low", "medium", "high", "xhigh", "max"}
@@ -85,7 +86,12 @@ def validate_runtime(cfg: dict, nested: bool = False) -> dict:
         raise ValueError("model is required")
     if cfg.get("effort") not in EFFORTS:
         raise ValueError(f"bad effort {cfg.get('effort')}")
-    out = {k: cfg[k] for k in ("backend", "model", "effort") if cfg.get(k)}
+    tier = cfg.get("service_tier")
+    if tier not in (None, "default", "fast", "priority"):
+        raise ValueError("bad service_tier")
+    if tier is not None and backend == "claude":
+        raise ValueError("service_tier requires a Codex backend")
+    out = {k: cfg[k] for k in ("backend", "model", "effort", "service_tier") if cfg.get(k)}
     if "effort" not in out and out["model"] in DEFAULT_EFFORT:
         out["effort"] = DEFAULT_EFFORT[out["model"]]
     if not nested:

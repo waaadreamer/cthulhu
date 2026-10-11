@@ -16,7 +16,7 @@ export function RuntimeBadge({ runtime, compact }: { runtime?: RuntimeStatus | n
       className={`chip ring-1 ${fb ? 'bg-amber-400/15 text-amber-200 ring-amber-400/40' : STYLE[runtime.backend] ?? STYLE.codex}`}
     >
       {fb && <AlertTriangle className="h-3 w-3" />}
-      {!compact && <span className="opacity-70">{runtime.backend === 'claude' ? 'Claude' : 'Codex'}</span>}
+      {!compact && <span className="opacity-70">{runtime.backend === 'claude' ? 'Claude' : runtime.backend === 'company_codex' ? '公司 Codex' : '个人 Codex'}</span>}
       {modelLabel(runtime.model)}
       {fb && !compact && <span className="opacity-70">· 后备</span>}
     </span>

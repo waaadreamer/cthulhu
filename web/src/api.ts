@@ -20,8 +20,9 @@ export interface Agent {
 }
 
 export interface RuntimeCfg {
-  backend: 'claude' | 'codex'
+  backend: 'claude' | 'codex' | 'company_codex'
   model: string
+  service_tier?: string
   effort?: string
   memory_model?: string
   memory_effort?: string

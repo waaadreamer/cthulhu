@@ -9,6 +9,8 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -38,14 +40,17 @@ def tool(name: str, description: str, properties: dict | None = None, required: 
 
 def _child_env() -> dict:
     # The agent's temple credential must never reach the model's shell.
-    return {k: v for k, v in os.environ.items() if not k.startswith("CTHULHU_")}
+    return {k: v for k, v in os.environ.items() if not k.startswith("CTHULHU_") and k != "COMPANY_CODEX_API_KEY"}
 
 
 class CodexRuntime:
     def __init__(self, codex: str, cwd: str, *, model: str | None = None, effort: str | None = None,
-                 sub_agents: bool = False, log_path: str | None = None):
+                 sub_agents: bool = False, log_path: str | None = None,
+                 company: dict | None = None, service_tier: str | None = None):
         self.codex, self.cwd, self.model, self.effort = codex, cwd, model, effort
         self.sub_agents = sub_agents
+        self.company = company
+        self.service_tier = service_tier
         self.log_path = log_path
         self.proc: asyncio.subprocess.Process | None = None
         self.pending: dict[int, asyncio.Future] = {}
@@ -56,16 +61,59 @@ class CodexRuntime:
         self.tool_handlers: dict[str, ToolHandler] = {}
         self.usage: dict[str, dict] = {}             # thread id -> last token usage
 
+    def launch_config(self) -> tuple[list[str], dict]:
+        env = _child_env()
+        overrides = []
+        if self.company is not None:
+            cfg = self.company
+            if not all(cfg.get(k) for k in ("codex_home", "base_url", "api_key_file")):
+                raise RuntimeError_("company_codex requires local codex_home, base_url and api_key_file")
+            home = Path(cfg["codex_home"])
+            personal = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+            if not home.is_absolute() or home.resolve() == personal.resolve():
+                raise RuntimeError_("company_codex requires a separate absolute CODEX_HOME")
+            url = urlsplit(cfg["base_url"])
+            if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
+                raise RuntimeError_("company_codex base_url must be an HTTPS URL without credentials or query")
+            if not home.is_dir() or (home / "auth.json").exists():
+                raise RuntimeError_("company_codex home must exist and must not contain personal auth.json")
+            key_path = Path(cfg["api_key_file"])
+            if not key_path.is_absolute() or key_path.stat().st_mode & 0o077:
+                raise RuntimeError_("company_codex key file must be absolute and private (0600)")
+            key = key_path.read_text().strip()
+            if not key or "\n" in key or "\r" in key:
+                raise RuntimeError_("company_codex key file must contain one nonempty token")
+            for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID"):
+                env.pop(name, None)
+            env.update(CODEX_HOME=str(home), COMPANY_CODEX_API_KEY=key)
+            values = {
+                "model_provider": "company_codex",
+                "model_providers.company_codex.name": "Company Codex",
+                "model_providers.company_codex.base_url": cfg["base_url"],
+                "model_providers.company_codex.wire_api": "responses",
+                "model_providers.company_codex.env_key": "COMPANY_CODEX_API_KEY",
+                "model_providers.company_codex.requires_openai_auth": False,
+                "model_providers.company_codex.supports_websockets": False,
+            }
+            for name, value in values.items():
+                overrides.extend(["-c", f"{name}={json.dumps(value)}"])
+        return overrides, env
+
     async def start(self) -> None:
-        argv = [self.codex,
+        if self.alive:
+            return
+        overrides, env = self.launch_config()
+        argv = [self.codex, *overrides,
                 "-c", f"features.multi_agent={'true' if self.sub_agents else 'false'}",
                 "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.memories=false",
                 "-c", "approval_policy=never", "-c", "sandbox_mode=danger-full-access",
                 "app-server", "--listen", "stdio://"]
         stderr = open(self.log_path, "ab") if self.log_path else asyncio.subprocess.DEVNULL
         self.proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=self.cwd, env=_child_env(), stdin=asyncio.subprocess.PIPE,
+            *argv, cwd=self.cwd, env=env, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=stderr, limit=64 * 1024 * 1024, start_new_session=True)
+        if self.log_path:
+            stderr.close()
         self.reader = asyncio.create_task(self._read())
         await self.request("initialize", {"clientInfo": {"name": "cthulhu", "title": "Cthulhu", "version": "2.0"},
                                           "capabilities": {"experimentalApi": True}})
@@ -178,6 +226,8 @@ class CodexRuntime:
             p["developerInstructions"] = instructions
         if self.model:
             p["model"] = self.model
+        if self.company is not None:
+            p["modelProvider"] = "company_codex"
         return p
 
     async def start_thread(self, instructions: str, tools: list[dict], handler: ToolHandler | None,
@@ -218,6 +268,8 @@ class CodexRuntime:
                   "approvalPolicy": "never", "sandboxPolicy": {"type": "dangerFullAccess"}}
         if self.effort:
             params["effort"] = self.effort
+        if self.service_tier is not None:
+            params["serviceTier"] = self.service_tier
         if output_schema:
             params["outputSchema"] = output_schema
         if on_event:
