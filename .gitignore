@@ -1,0 +1,9 @@
+venv/
+codex-native/
+web/node_modules/
+__pycache__/
+*.pyc
+*.db
+*.db-*
+.env
+*.private.*

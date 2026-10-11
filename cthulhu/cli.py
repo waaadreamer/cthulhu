@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import secrets
+from pathlib import Path
+
+
+def load(path: str) -> dict:
+    cfg = json.loads(Path(path).read_text())
+    cfg["_path"] = str(Path(path).resolve())
+    return cfg
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="cthulhu")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("temple", help="run the central temple server")
+    s.add_argument("--config", required=True)
+    s = sub.add_parser("galaxy", help="run a galaxy server")
+    s.add_argument("--config", required=True)
+    s = sub.add_parser("agent", help="run one agent (started by a galaxy)")
+    s.add_argument("--galaxy-config", required=True)
+    s.add_argument("--launch", required=True)
+    s = sub.add_parser("provision", help="register a new galaxy in the temple config and print its install command")
+    s.add_argument("--config", required=True, help="temple config")
+    s.add_argument("--id", required=True)
+    s.add_argument("--name", required=True)
+    s.add_argument("--temple-ws", default="ws://127.0.0.1:7500/ws",
+                   help="websocket URL as seen from the galaxy (default assumes an SSH tunnel)")
+    s.add_argument("--repo", default="https://github.com/waaadreamer/cthulhu.git")
+    s.add_argument("--no-spawn", action="store_true", help="galaxy refuses old_ones")
+    s = sub.add_parser("passwd", help="set the owner web password")
+    s.add_argument("--config", required=True)
+    s.add_argument("username")
+    args = ap.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+
+    if args.cmd == "temple":
+        import uvicorn
+        from .temple import Temple
+        cfg = load(args.config)
+        temple = Temple(cfg)
+        host, port = cfg.get("listen", ["127.0.0.1", 7500])
+        uvicorn.run(temple.app(), host=host, port=port, log_level="warning", ws_max_size=64 * 1024 * 1024,
+                    proxy_headers=True, ws_ping_interval=20, ws_ping_timeout=60)
+    elif args.cmd == "galaxy":
+        from .galaxy import Galaxy
+        asyncio.run(Galaxy(load(args.config)).main())
+    elif args.cmd == "agent":
+        from .gods import CLASSES
+        from .roles import Role
+        cfg = load(args.galaxy_config)
+        launch = json.loads(args.launch)
+        launch["token"] = os.environ.pop("CTHULHU_AGENT_TOKEN")
+        role = Role(launch["role"])
+        models = cfg.get("models", {})
+        kw = {"patrol_interval": cfg.get("patrol_interval", 300)} if role == Role.YOG else {}
+        agent = CLASSES[role](cfg["temple_ws"], launch, cfg["codex"], cfg.get("cwd") or str(Path.home()),
+                              Path(cfg["state"]) / launch["id"], model=models.get(role.value, cfg.get("model")),
+                              effort=cfg.get("effort"), runtime=cfg.get("runtimes", {}).get(role.value), **kw)
+        asyncio.run(agent.main())
+    elif args.cmd == "provision":
+        import base64
+        cfg = json.loads(Path(args.config).read_text())
+        if any(g["id"] == args.id for g in cfg["galaxies"]):
+            raise SystemExit(f"galaxy {args.id} already exists")
+        token = secrets.token_hex(32)
+        g = {"id": args.id, "name": args.name, "token": token}
+        if args.no_spawn:
+            g["spawn"] = False
+        cfg["galaxies"].append(g)
+        Path(args.config).write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+        galaxy = {"id": args.id, "token": token, "temple_ws": args.temple_ws, "model": "gpt-6.1-sol"}
+        blob = base64.b64encode(json.dumps(galaxy).encode()).decode()
+        print(f"galaxy {args.id} registered; restart the temple to accept it.\n")
+        print("Run on the target machine (as the user the agents should run as):\n")
+        print(f"  curl -fsSL https://raw.githubusercontent.com/{args.repo.split('github.com/')[1].removesuffix('.git')}"
+              f"/main/deploy/install-galaxy.sh | bash -s -- {blob}")
+    elif args.cmd == "passwd":
+        import getpass
+        from .store import Store
+        from .temple import password_hash
+        cfg = load(args.config)
+        pw = getpass.getpass("password: ")
+        salt = secrets.token_hex(16)
+        Store(Path(cfg["db"])).set_account(args.username, salt, password_hash(pw, salt))
+        print("ok")

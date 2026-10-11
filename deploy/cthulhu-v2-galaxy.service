@@ -1,0 +1,27 @@
+[Unit]
+Description=Cthulhu galaxy: central temple (azathoth, shub, yog, old_ones)
+After=cthulhu-v2-temple.service cthulhu-proxy.service
+Wants=cthulhu-v2-temple.service
+
+[Service]
+User=cthulhu
+Group=cthulhu
+WorkingDirectory=/opt/cthulhu
+Environment=PYTHONPATH=/opt/cthulhu
+Environment=HOME=/var/lib/cthulhu-harness
+Environment=CODEX_HOME=/var/lib/cthulhu-harness/.codex
+Environment=HTTP_PROXY=http://127.0.0.1:7897
+Environment=HTTPS_PROXY=http://127.0.0.1:7897
+Environment=ALL_PROXY=http://127.0.0.1:7897
+Environment=http_proxy=http://127.0.0.1:7897
+Environment=https_proxy=http://127.0.0.1:7897
+Environment=NO_PROXY=localhost,127.0.0.1,::1
+Environment=no_proxy=localhost,127.0.0.1,::1
+ExecStart=/opt/cthulhu/venv/bin/python -m cthulhu galaxy --config /etc/cthulhu/galaxy-temple.json
+KillMode=mixed
+TimeoutStopSec=30
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

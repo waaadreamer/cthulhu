@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+html, body, #root { height: 100%; }
+body {
+  @apply bg-abyss-950 text-slate-200 font-sans antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+::selection { background: rgba(167, 139, 250, .35); }
+* { scrollbar-width: thin; scrollbar-color: rgba(148,163,184,.18) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: rgba(148,163,184,.18); border-radius: 8px; }
+
+@layer components {
+  .glass { @apply bg-white/[0.035] backdrop-blur-xl border border-white/[0.07]; }
+  .chip { @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium; }
+  .btn-icon { @apply grid place-items-center h-9 w-9 rounded-xl text-slate-400 hover:text-white hover:bg-white/[0.07] transition; }
+}
+
+.prose pre { @apply bg-black/40 border border-white/[0.06] rounded-xl; padding: 0 !important; }
+.prose pre code.hljs { @apply block p-4 bg-transparent text-[13px] leading-relaxed; }
+.prose :not(pre) > code { @apply bg-white/[0.08] text-violet-200 rounded-md px-1.5 py-0.5 font-normal before:content-none after:content-none; }
+.prose table { @apply text-sm; }
+.prose a { @apply text-cyan-300 no-underline hover:underline; }
+.caret::after { content: '▍'; @apply text-violet-300 animate-pulseDot ml-0.5; }

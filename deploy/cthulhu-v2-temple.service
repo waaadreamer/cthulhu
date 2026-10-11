@@ -1,0 +1,15 @@
+[Unit]
+Description=Cthulhu central temple
+After=network-online.target
+
+[Service]
+User=ghroth
+Group=ghroth
+WorkingDirectory=/opt/cthulhu
+Environment=PYTHONPATH=/opt/cthulhu
+ExecStart=/opt/cthulhu/venv/bin/python -m cthulhu temple --config /etc/cthulhu/temple.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
