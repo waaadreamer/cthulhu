@@ -9,8 +9,8 @@
 # Environment overrides:
 #   CTHULHU_HOME   install directory            (default ~/.cthulhu)
 #   CTHULHU_REPO   git URL                      (default github.com/waaadreamer/cthulhu)
-#   CTHULHU_TUNNEL ssh target for a tunnel to the temple, e.g. root@47.115.202.248
-#                  (sets up autossh-style reconnecting `ssh -N -L 7500:127.0.0.1:7500`)
+#   CTHULHU_TUNNEL ssh target for the temple tunnel, e.g. cthulhu-tunnel@47.115.202.248
+#                  (a reconnecting `ssh -N -L 7500:127.0.0.1:7500`; the account may only forward that port)
 #   CODEX_BIN      existing codex binary         (default: download @openai/codex via npm, else skip)
 set -euo pipefail
 
@@ -78,14 +78,21 @@ PY
 mkdir -p work
 umask 022
 
-# 5. launcher: tunnel (optional) + galaxy, restarted forever
+# 5. tunnel key: a dedicated key the temple authorizes for forwarding only
+TUNNEL_KEY="$HOME_DIR/tunnel_ed25519"
+if [ -n "${CTHULHU_TUNNEL:-}" ] && [ ! -f "$TUNNEL_KEY" ]; then
+  ssh-keygen -q -t ed25519 -N '' -f "$TUNNEL_KEY" -C "cthulhu-galaxy@$(hostname)"
+fi
+
+# 6. launcher: tunnel (optional) + galaxy, restarted forever
 cat > run.sh <<EOF
 #!/usr/bin/env bash
 cd "$HOME_DIR"
 export PYTHONPATH="$HOME_DIR/src"
 [ -f "$HOME_DIR/env" ] && set -a && . "$HOME_DIR/env" && set +a
 if [ -n "${CTHULHU_TUNNEL:-}" ]; then
-  ( while true; do ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \\
+  ( while true; do ssh -N -i "$TUNNEL_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \\
+      -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \\
       -L 7500:127.0.0.1:7500 ${CTHULHU_TUNNEL:-} ; sleep 5; done ) &
   sleep 3
 fi
@@ -96,7 +103,7 @@ done
 EOF
 chmod +x run.sh
 
-# 6. keep it running: systemd --user if available, else nohup
+# 7. keep it running: systemd --user if available, else nohup
 if systemctl --user status >/dev/null 2>&1; then
   mkdir -p ~/.config/systemd/user
   cat > ~/.config/systemd/user/cthulhu-galaxy.service <<EOF
@@ -119,5 +126,12 @@ else
   say "running in background (no systemd --user); log: $HOME_DIR/galaxy.log"
 fi
 
+if [ -n "${CTHULHU_TUNNEL:-}" ]; then
+  say "authorize this node's tunnel key on the temple (it can only forward to the temple websocket):"
+  echo
+  echo "  sudo /opt/cthulhu/deploy/authorize-tunnel.sh '$(cat "$TUNNEL_KEY.pub")'"
+  echo
+  say "the tunnel retries every 5s, so the galaxy connects as soon as the key is authorized."
+fi
 say "done. Put API credentials (e.g. ANTHROPIC_*) in $HOME_DIR/env if this galaxy runs Claude agents."
 say "Codex login: run '$CODEX login' once as this user if it is not logged in."

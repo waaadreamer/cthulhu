@@ -83,11 +83,16 @@ sudo -u cthulhu /opt/cthulhu/venv/bin/python -m cthulhu passwd --config /etc/cth
    命令会输出一行安装命令，里面带着这个星系的 token，按密码对待。
 2. 在集群节点上，用 agent 要用的那个用户执行：
    ```bash
-   export CTHULHU_TUNNEL=root@<神殿IP>      # 节点能 SSH 到神殿（需要免密 key）
+   export CTHULHU_TUNNEL=cthulhu-tunnel@<神殿IP>
    curl -fsSL https://raw.githubusercontent.com/waaadreamer/cthulhu/main/deploy/install-galaxy.sh | bash -s -- <blob>
    ```
    脚本会做这些事：克隆代码，建 venv（Python ≥3.11，也可以用 uv），找到或安装 codex，写入 `~/.cthulhu/galaxy.json`，起隧道和守护进程。有 `systemd --user` 时注册为 user service，没有就用 nohup。
-3. 首次部署需要登录：codex 要以这个用户执行一次 `codex login`；如果这个星系要跑 Claude agent，在 `~/.cthulhu/env` 里写上 `ANTHROPIC_*`。
+3. 脚本结束时会打印一条命令，里面是这个节点专用的隧道公钥。到神殿上执行它：
+   ```bash
+   sudo /opt/cthulhu/deploy/authorize-tunnel.sh 'ssh-ed25519 AAAA... cthulhu-galaxy@node'
+   ```
+   `cthulhu-tunnel` 账号没有 shell，只允许转发到 `127.0.0.1:7500`（sshd 的 Match 规则和每把 key 的 `permitopen` 双重限制）。授权后隧道会在 5 秒内自动连上。撤销授权就是删掉 `/var/lib/cthulhu-tunnel/.ssh/authorized_keys` 里对应的那一行。
+4. 首次部署需要登录：codex 要以这个用户执行一次 `codex login`；如果这个星系要跑 Claude agent，在 `~/.cthulhu/env` 里写上 `ANTHROPIC_*`。
 
 重新执行同一条命令即可升级代码（已有 clone 时会 `git pull`）。日志在 `~/.cthulhu/galaxy.log`，agent 日志在 `~/.cthulhu/state/<agent-id>/`。
 
