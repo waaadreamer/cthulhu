@@ -35,6 +35,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
   const [more, setMore] = useState<Record<string, boolean>>({})
   const [liveMsgs, setLiveMsgs] = useState<Message[]>([])
   const [patrolTick, setPatrolTick] = useState(0)
+  const [deployTick, setDeployTick] = useState(0)
   const [preview, setPreview] = useState<FileRef | null>(null)
   const closePreview = useCallback(() => setPreview(null), [])
 
@@ -52,6 +53,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
     onChat: upsertTurn,
     onMessage: (m) => setLiveMsgs((l) => [...l.slice(-200), m]),
     onPatrol: () => setPatrolTick((x) => x + 1),
+    onDeploy: () => setDeployTick((x) => x + 1),
   })
 
   const chatAgents = ['azathoth', 'ghroth'].map((r) => dir.agents.find((a) => a.role === r)).filter(Boolean) as Agent[]
@@ -143,7 +145,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
           {view.kind === 'chat' && !active && (
             <div className="grid h-full place-items-center text-slate-500"><MessagesSquare className="h-8 w-8 animate-pulseDot" /></div>
           )}
-          {view.kind === 'universe' && <Universe dir={dir} patrolTick={patrolTick} />}
+          {view.kind === 'universe' && <Universe dir={dir} patrolTick={patrolTick} deployTick={deployTick} />}
           {view.kind === 'messages' && <Messages dir={dir} live={liveMsgs} />}
           {view.kind === 'settings' && <Settings dir={dir} />}
         </div>

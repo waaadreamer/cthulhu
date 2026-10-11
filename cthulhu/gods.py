@@ -236,6 +236,14 @@ class Azathoth(OwnerChat, MemoryAgent):
             *HISTORY_TOOLS,
             tool("temple_agent", "读取某个 agent 的完整注册信息（含初始化参数）。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_owner_history", "检索你和主人的历史聊天。", {"search": STR, "limit": {"type": "integer"}}),
+            tool("temple_deploy", "一键部署：把仓库 main 分支的最新版本部署到中心神殿和各星系。程序会先排空（等正在进行的回合结束）、"
+                 "更新代码、重启、确认上线，失败自动回滚；结果会作为消息发回给你。"
+                 "也用于批准或拒绝格赫罗斯的部署请求（request_id）。",
+                 {"galaxies": {"type": "array", "items": STR, "description": "星系 ID 列表；不填或 [\"all\"] 表示中心神殿和全部星系"},
+                  "reason": STR, "task_id": STR,
+                  "request_id": {"type": "string", "description": "格赫罗斯部署请求的 ID"},
+                  "reject": {"type": "boolean", "description": "拒绝该请求"},
+                  "status_only": {"type": "boolean", "description": "只查看各星系当前版本和最近的部署记录"}}),
             tool("tell_owner", "只在处理黑山羊/尤格的消息时使用：在主人的聊天窗口里告诉主人当前情况，每次都必须调用；"
                  "进展只写一两句话，任务完成时写完整总结。", {"text": STR}, ["text"]),
         ]
@@ -244,6 +252,11 @@ class Azathoth(OwnerChat, MemoryAgent):
         found = await history_call(self.link, name, args)
         if found is not None:
             return found
+        if name == "temple_deploy":
+            if args.get("status_only"):
+                return await self.link.call("deploy_status")
+            return await self.link.call("deploy", timeout=120, **{k: args[k] for k in
+                                        ("galaxies", "reason", "task_id", "request_id", "reject") if k in args})
         if name == "temple_agent":
             return await self.link.call("agent", agent_id=args["agent_id"])
         if name == "temple_owner_history":
@@ -515,8 +528,22 @@ class Ghroth(OwnerChat, MemoryAgent):
     memory_brief = "刚才是你和主人的对话。提取主人对 harness 维护的要求、决定、约束和偏好，以及你们达成的结论。"
 
     def tools(self) -> list[dict]:
-        # Ghroth talks to no one; it only works.
-        return []
+        # Ghroth talks to no one; its only channel is asking azathoth to approve a deploy.
+        return [
+            tool("temple_deploy_request", "请求阿撒托斯批准一键部署：把仓库 main 分支最新版本部署到中心神殿和各星系。"
+                 "先把修改提交并 push 到 GitHub。阿撒托斯批准后由神殿执行（排空、更新、重启、确认、失败回滚）。",
+                 {"galaxies": {"type": "array", "items": STR, "description": "星系 ID；不填表示全部"},
+                  "reason": {"type": "string", "description": "这次部署包含什么改动、为什么需要部署"},
+                  "task_id": STR}, ["reason"]),
+            tool("temple_deploy_status", "查看各星系当前代码版本、是否支持远程部署，以及最近的部署记录和进度。"),
+        ]
+
+    async def call_tool(self, name: str, args: dict):
+        if name == "temple_deploy_request":
+            return await self.link.call("deploy_request", **{k: args[k] for k in ("galaxies", "reason", "task_id") if k in args})
+        if name == "temple_deploy_status":
+            return await self.link.call("deploy_status")
+        return await super().call_tool(name, args)
 
 
 class OldOne(Agent):

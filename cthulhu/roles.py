@@ -44,6 +44,8 @@ SEND = {
 SPAWN = {Role.SHUB}                       # create / stop old_ones
 LATEST_RESULT = {Role.YOG}                # remote latest_result calls
 ADMIN_READ = {Role.AZATHOTH, Role.SHUB}   # full read access to the temple
+DEPLOY = {Role.AZATHOTH}                  # start deploys (the owner can too, from the web UI)
+DEPLOY_REQUEST = {Role.GHROTH}            # ask azathoth to deploy
 # Agents whose latest_result yog inspects on each patrol.
 SUPERVISED = {Role.OLD_ONE, Role.GHROTH}
 

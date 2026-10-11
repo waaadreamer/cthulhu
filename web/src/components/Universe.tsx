@@ -4,10 +4,11 @@ import { Agent, ago, api, Directory, Memory, Message, Patrol, ROLE_META, timeLab
 import { Avatar, stateOf } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 import { MessageRow } from './Messages'
+import { Deploy } from './Deploy'
 
 const ROLE_TITLE: Record<string, string> = { azathoth: '意志的化身', shub: '万物之母 · 组织落地', yog: '门与钥匙 · 监督', ghroth: '维护者 · sudo' }
 
-export function Universe({ dir, patrolTick }: { dir: Directory; patrolTick: number }) {
+export function Universe({ dir, patrolTick, deployTick }: { dir: Directory; patrolTick: number; deployTick: number }) {
   const [selected, setSelected] = useState<Agent | null>(null)
   const [patrols, setPatrols] = useState<Patrol[]>([])
   const gods = dir.agents.filter((a) => a.role !== 'old_one')
@@ -48,6 +49,8 @@ export function Universe({ dir, patrolTick }: { dir: Directory; patrolTick: numb
             </details>
           )}
         </Section>
+
+        <Deploy dir={dir} tick={deployTick} />
 
         <Section title="尤格的巡检">
           {patrols.length === 0 ? (

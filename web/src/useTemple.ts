@@ -7,6 +7,7 @@ type Handlers = {
   onChat?: (t: Turn) => void
   onMessage?: (m: Message) => void
   onPatrol?: () => void
+  onDeploy?: () => void
 }
 
 /** Live temple state over the owner websocket, with reconnect. */
@@ -66,6 +67,9 @@ export function useTemple(handlers: Handlers) {
             break
           case 'patrol':
             h.current.onPatrol?.()
+            break
+          case 'deploy':
+            h.current.onDeploy?.()
             break
         }
       }

@@ -48,6 +48,8 @@ def main() -> None:
         uvicorn.run(temple.app(), host=host, port=port, log_level="warning", ws_max_size=64 * 1024 * 1024,
                     proxy_headers=True, ws_ping_interval=20, ws_ping_timeout=60)
     elif args.cmd == "galaxy":
+        from .deploy import guard_startup
+        guard_startup(args.config)
         from .galaxy import Galaxy
         asyncio.run(Galaxy(load(args.config)).main())
     elif args.cmd == "agent":

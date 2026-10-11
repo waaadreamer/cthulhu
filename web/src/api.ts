@@ -39,7 +39,15 @@ export interface RuntimeStatus {
   default: RuntimeCfg
 }
 
-export interface Galaxy { id: string; name: string; online: boolean; created_at: number }
+export interface Galaxy { id: string; name: string; online: boolean; created_at: number; revision?: string; deployable?: boolean; draining?: boolean }
+
+export interface DeployJob {
+  id: string; by: string; reason: string; revision: string; created_at: number; finished_at: number | null
+  state: 'running' | 'restarting_temple' | 'done' | 'failed'
+  groups: { galaxies: string[]; temple: boolean; state: string; error?: string | null }[]
+  steps: { at: number; galaxy: string | null; text: string }[]
+}
+export interface DeployStatus { temple: { revision: string; host: string }; jobs: DeployJob[]; requests: { id: string; galaxies: unknown; reason: string; state: string }[] }
 
 export interface Directory { agents: Agent[]; galaxies: Galaxy[]; gods?: Record<string, string | null> }
 

@@ -79,7 +79,10 @@ class Galaxy:
         self.state = Path(config["state"])
         self.state.mkdir(parents=True, exist_ok=True)
         self.procs: dict[str, Proc] = {}
-        self.link = Link(config["temple_ws"], {"kind": "galaxy", "id": self.id, "token": config["token"], "capabilities": ["galaxy_api_v1"], "version": BUILD},
+        from .deploy import local_info
+        self.link = Link(config["temple_ws"], {"kind": "galaxy", "id": self.id, "token": config["token"],
+                                                "capabilities": ["galaxy_api_v1", "deploy_v1"], "version": BUILD,
+                                                "deploy": local_info()},
                          self._welcome, self._frame, tls_pin=config.get("tls_pin"))
 
         self.provider = ProviderWorker(self.link, config["api_provider"]) if config.get("api_provider") else None
@@ -88,6 +91,8 @@ class Galaxy:
 
     async def _welcome(self, w: dict) -> None:
         log.info("galaxy %s connected to temple", w.get("name"))
+        # Connected on the deployed revision: the start-up guard can stand down.
+        (self.state / "deploy_pending.json").unlink(missing_ok=True)
         if self.provider and w.get("api_version") == 1:
             asyncio.create_task(self._register_provider())
 
@@ -108,6 +113,17 @@ class Galaxy:
         elif frame.get("type") == "rpc" and frame["method"] == "api_canary":
             from .api_canary import run
             return await run(self.link, frame.get("params", {}).get("provider", "ali"), mode="text")
+        elif frame.get("type") == "rpc" and frame["method"] == "deploy_update":
+            # Only a revision on the repository's main branch, fast-forward, clean tree (see deploy.update_code).
+            from .deploy import ROOT, update_code
+            return await update_code(ROOT, str(frame["params"]["revision"]))
+        elif frame.get("type") == "rpc" and frame["method"] == "deploy_restart":
+            p = frame.get("params", {})
+            if p.get("guard"):
+                (self.state / "deploy_pending.json").write_text(json.dumps({"prev": p["prev"], "target": p["target"]}))
+            # Exit; systemd (Restart=always) or run.sh brings the galaxy back on the new code.
+            asyncio.get_running_loop().call_later(0.5, os.kill, os.getpid(), signal.SIGTERM)
+            return {"restarting": True}
         elif frame.get("type") == "rpc" and frame["method"] == "read_file":
             # The owner previews a file an agent produced; read as this galaxy's OS user.
             return await asyncio.to_thread(read_file, **frame.get("params", {}))

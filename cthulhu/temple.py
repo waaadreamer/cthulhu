@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -45,6 +46,7 @@ log = logging.getLogger(__name__)
 SESSION_TTL = 30 * 86400
 OWNER_PRIORITY = 10
 TASK_STATUSES = ("progress", "blocked", "done")
+SYSTEM = "temple"   # sender id of the temple's own notices
 FILE_PREVIEW_BYTES = 2 * 1024 * 1024
 FILE_RAW_BYTES = 40 * 1024 * 1024    # base64 over the galaxy websocket stays under its 64 MB frame limit
 MEDIA_EXT = {
@@ -70,6 +72,7 @@ class Conn:
     next_id: int = 0
     capabilities: list[str] = field(default_factory=list)
     version: str = ""
+    deploy: dict = field(default_factory=dict)   # galaxies: {host, root, revision, writable} for deploy
     tasks: set = field(default_factory=set)
 
     async def send(self, frame: dict) -> bool:
@@ -155,6 +158,8 @@ class Temple:
         self.api_broker = ProviderBroker(self)
         self.maintenance = set(self.store.setting("maintenance") or [])
         self._seed()
+        from .deploy import Deployer
+        self.deployer = Deployer(self)
 
     def _seed(self) -> None:
         for g in self.config.get("galaxies", []):
@@ -190,7 +195,10 @@ class Temple:
         agents = [self.public_agent(a) | {"queued": pending.get(a["id"], 0),
                                           "memory": memory.get(a["id"], {"entries": 0, "tokens": 0})}
                   for a in self.store.agents()]
-        galaxies = [g | {"online": g["id"] in self.galaxies, "version": getattr(self.galaxies.get(g["id"]), "version", ""), "draining": g["id"] in self.maintenance, "spawn": g["id"] not in self.closed_galaxies}
+        galaxies = [g | {"online": g["id"] in self.galaxies, "version": getattr(self.galaxies.get(g["id"]), "version", ""),
+                         "revision": (getattr(self.galaxies.get(g["id"]), "deploy", None) or {}).get("revision", ""),
+                         "deployable": bool(getattr(self.galaxies.get(g["id"]), "deploy", None)),
+                         "draining": g["id"] in self.maintenance, "spawn": g["id"] not in self.closed_galaxies}
                     for g in self.store.galaxies()]
         return {"agents": agents, "galaxies": galaxies}
 
@@ -209,7 +217,12 @@ class Temple:
         target = self.store.agent(receiver)
         if target["desired"] != "running":
             raise Denied(f"{target['name']} is stopped")
-        roles.require_send(sender_role, receiver_role)
+        if sender == SYSTEM:
+            pass                                 # the temple's own notices (deploy results)
+        elif sender_role == Role.GHROTH and receiver_role == Role.AZATHOTH and kind == "deploy_request":
+            pass                                 # ghroth's only channel: asking azathoth to approve a deploy
+        else:
+            roles.require_send(sender_role, receiver_role)
         if not text.strip():
             raise ValueError("empty message")
         msg = self.store.add_message(sender, receiver, text, kind, priority, reply_to, message_id, task_id, status)
@@ -249,8 +262,8 @@ class Temple:
         if conn is None:
             return
         sender = self.store.agent(msg["sender"])
-        envelope = msg | {"sender_name": sender["name"] if sender else "主人",
-                          "sender_role": sender["role"] if sender else OWNER}
+        envelope = msg | {"sender_name": sender["name"] if sender else ("中心神殿" if msg["sender"] == SYSTEM else "主人"),
+                          "sender_role": sender["role"] if sender else (SYSTEM if msg["sender"] == SYSTEM else OWNER)}
         if msg.get("task_id"):
             task = self.store.task(msg["task_id"])
             envelope["task_title"] = task and task["title"]
@@ -331,6 +344,8 @@ class Temple:
             if role != Role.YOG:
                 raise Denied("only yog patrols")
             return self.store.patrols(3)
+        if method in ("deploy", "deploy_request", "deploy_requests", "deploy_status"):
+            return await self.deploy_call(role, conn.id, method, p)
         if method == "notify_owner":
             if role != Role.AZATHOTH:
                 raise Denied("only azathoth speaks to the owner unprompted")
@@ -496,6 +511,53 @@ class Temple:
 
     # owner
 
+    # deployment: the owner and azathoth deploy; ghroth asks and azathoth decides
+
+    async def deploy_call(self, role: str, agent_id: str, method: str, p: dict):
+        d = self.deployer
+        if method == "deploy_status":
+            if role not in roles.DEPLOY | roles.DEPLOY_REQUEST:
+                raise Denied(f"{role} may not deploy")
+            return d.status()
+        if method == "deploy_request":
+            if role not in roles.DEPLOY_REQUEST:
+                raise Denied(f"{role} may not request deploys")
+            req = d.request(p.get("galaxies") or "all", str(p.get("reason", "")))
+            az = self.god(Role.AZATHOTH)
+            await self.route(agent_id, az["id"], kind="deploy_request", text=f"[deploy request {req['id']}] Ghroth asks to deploy the latest main "
+                             f"to {req['galaxies']}. Reason: {req['reason']}\nApprove with temple_deploy(request_id="
+                             f"\"{req['id']}\"), or reject with temple_deploy(request_id=..., reject=true).",
+                             task_id=p.get("task_id"))
+            return req
+        if role not in roles.DEPLOY:
+            raise Denied(f"{role} may not deploy")
+        if method == "deploy_requests":
+            return [r for r in d.requests.values() if r["state"] == "pending"]
+        if p.get("request_id"):
+            req = d.requests.get(p["request_id"])
+            if not req or req["state"] != "pending":
+                raise ValueError(f"no pending deploy request {p['request_id']}")
+            if p.get("reject"):
+                req["state"] = "rejected"
+                return req
+            req["state"] = "approved"
+            return await d.start(req["galaxies"], by=f"{agent_id}（批准格赫罗斯的请求）", reason=req["reason"],
+                                 task_id=p.get("task_id"))
+        return await d.start(p.get("galaxies") or "all", by=agent_id, reason=str(p.get("reason", "")),
+                             task_id=p.get("task_id"))
+
+    async def notify_deploy(self, job: dict) -> None:
+        """Tell azathoth how a deploy ended (it relays to the owner like any report)."""
+        az = self.god(Role.AZATHOTH)
+        lines = [f"- {','.join(g['galaxies']) or 'temple'}{' (+temple)' if g['temple'] else ''}: {g['state']}"
+                 + (f" — {g['error']}" if g.get("error") else "") for g in job["groups"]]
+        text = (f"[deploy {job['id']} {job['state']}] revision {job['revision'][:12]}, started by {job['by']}"
+                + (f", reason: {job['reason']}" if job["reason"] else "") + "\n" + "\n".join(lines))
+        try:
+            await self.route(SYSTEM, az["id"], text, task_id=job.get("task_id"))
+        except Exception:
+            log.exception("could not report deploy result")
+
     async def owner_send(self, to: str, text: str) -> dict:
         mid = new_id("msg")
         self.store.add_turn(mid, to, text)
@@ -552,7 +614,8 @@ class Temple:
             g = self.store.galaxy(cid)
             if not g or not hmac.compare_digest(g["token_hash"], sha256(token)):
                 raise Denied("bad galaxy credential")
-            conn = Conn(ws, "galaxy", cid, capabilities=hello.get("capabilities", []), version=str(hello.get("version", ""))[:64])
+            conn = Conn(ws, "galaxy", cid, capabilities=hello.get("capabilities", []), version=str(hello.get("version", ""))[:64],
+                        deploy=hello.get("deploy") or {} if "deploy_v1" in hello.get("capabilities", []) else {})
             old = self.galaxies.get(cid)
             self.galaxies[cid] = conn
             if old:
@@ -585,7 +648,9 @@ class Temple:
         out = []
         for m in msgs:
             s = self.store.agent(m["sender"])
-            out.append(m | {"sender_name": s["name"] if s else "主人", "sender_role": s["role"] if s else OWNER})
+            system = m["sender"] == SYSTEM
+            out.append(m | {"sender_name": s["name"] if s else ("中心神殿" if system else "主人"),
+                            "sender_role": s["role"] if s else (SYSTEM if system else OWNER)})
         return out
 
     async def _on_frame(self, conn: Conn, frame: dict) -> None:
@@ -809,6 +874,13 @@ class Temple:
                 if q.get("download"):
                     headers["content-disposition"] = f"attachment; filename*=UTF-8''{quote(Path(r['path']).name)}"
                 return Response(base64.b64decode(r["data"]), media_type=mime, headers=headers)
+            if path == "deploy":
+                if request.method == "POST":
+                    return JSONResponse(await self.deployer.start(body.get("galaxies") or "all", by="主人",
+                                                                  reason=body.get("reason", "")))
+                return JSONResponse(self.deployer.status())
+            if path == "deploy_latest":
+                return JSONResponse({"revision": await self.deployer.latest()})
             if path == "patrols":
                 return JSONResponse(self.store.patrols(int(q.get("limit", 10))))
             if path == "latest":
@@ -878,4 +950,9 @@ class Temple:
         if (static / "assets").exists():
             routes.append(Mount("/assets", StaticFiles(directory=static / "assets")))
         routes.append(Route("/{path:path}", spa))
-        return Starlette(routes=routes)
+
+        @contextlib.asynccontextmanager
+        async def lifespan(_app):
+            asyncio.create_task(self.deployer.resume())
+            yield
+        return Starlette(routes=routes, lifespan=lifespan)
