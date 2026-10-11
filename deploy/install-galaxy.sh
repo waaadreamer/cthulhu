@@ -25,7 +25,7 @@ mkdir -p "$HOME_DIR" && cd "$HOME_DIR"
 if [ -d src/.git ]; then
   say "updating code"; git -C src pull -q --ff-only
 else
-  say "cloning $REPO"; git clone -q --depth 1 "$REPO" src
+  say "cloning $REPO"; git clone -q "$REPO" src
 fi
 
 # 2. python >= 3.11 venv (uv if present, else system python)
@@ -39,7 +39,13 @@ elif [ -z "$PY" ]; then
   echo "need python>=3.11 (or uv) on PATH" >&2; exit 1
 elif [ ! -x venv/bin/python ]; then
   say "creating venv with $PY"
-  "$PY" -m venv venv 2>/dev/null || { "$PY" -m venv --without-pip venv && curl -fsSL https://bootstrap.pypa.io/get-pip.py | venv/bin/python - -q; }
+  if "$PY" -c 'import ensurepip' 2>/dev/null; then
+    "$PY" -m venv venv
+  else
+    # Debian/Ubuntu without python3-venv: bootstrap pip ourselves.
+    rm -rf venv; "$PY" -m venv --without-pip venv
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py | venv/bin/python - -q
+  fi
 fi
 say "installing python deps"
 if command -v uv >/dev/null; then uv pip install -q -p venv/bin/python -e src; else venv/bin/python -m pip install -q -e src; fi

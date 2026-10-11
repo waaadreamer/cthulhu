@@ -68,9 +68,28 @@ sudo -u cthulhu /opt/cthulhu/venv/bin/python -m cthulhu passwd --config /etc/cth
 - 数据库：`/var/lib/cthulhu-temple/temple.db`（temple 以 ghroth 用户运行，cthulhu 用户无法读写）
 - Codex 登录态：`/var/lib/cthulhu-harness/.codex`（cthulhu）、`/var/lib/cthulhu-ghroth/.codex`（ghroth）
 
-新增星系（另一台机器）：
-1. 在 `temple.json` 的 `galaxies` 里加 `{id, name, token}`，重启 temple。
-2. 在那台机器上用 `galaxy.json` 跑 `python -m cthulhu galaxy`。`temple_ws` 需要能连到中心，例如走 SSH 隧道转发到本地 7500。
+新增星系（集群节点）见下一节。
+
+## 部署到其他星系
+
+星系只需要能**主动**连到神殿的 websocket，神殿不会回连。集群节点通常没有公网入口，所以默认的做法是在节点上建一条 SSH 隧道，把本地 `127.0.0.1:7500` 转发到神殿的 7500 端口。不需要 root 权限。
+
+1. 在神殿上登记星系（以 ghroth 身份运行）：
+   ```bash
+   sudo -u ghroth env PYTHONPATH=/opt/cthulhu /opt/cthulhu/venv/bin/python -m cthulhu provision \
+       --config /etc/cthulhu/temple.json --id gpu1 --name "GPU 集群"
+   sudo systemctl restart cthulhu-v2-temple
+   ```
+   命令会输出一行安装命令，里面带着这个星系的 token，按密码对待。
+2. 在集群节点上，用 agent 要用的那个用户执行：
+   ```bash
+   export CTHULHU_TUNNEL=root@<神殿IP>      # 节点能 SSH 到神殿（需要免密 key）
+   curl -fsSL https://raw.githubusercontent.com/waaadreamer/cthulhu/main/deploy/install-galaxy.sh | bash -s -- <blob>
+   ```
+   脚本会做这些事：克隆代码，建 venv（Python ≥3.11，也可以用 uv），找到或安装 codex，写入 `~/.cthulhu/galaxy.json`，起隧道和守护进程。有 `systemd --user` 时注册为 user service，没有就用 nohup。
+3. 首次部署需要登录：codex 要以这个用户执行一次 `codex login`；如果这个星系要跑 Claude agent，在 `~/.cthulhu/env` 里写上 `ANTHROPIC_*`。
+
+重新执行同一条命令即可升级代码（已有 clone 时会 `git pull`）。日志在 `~/.cthulhu/galaxy.log`，agent 日志在 `~/.cthulhu/state/<agent-id>/`。
 
 ## 模型后端
 
