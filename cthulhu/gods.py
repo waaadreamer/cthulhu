@@ -27,9 +27,6 @@ MEMORY_SCHEMA = {
     },
 }
 
-# Azathoth's final reply to an internal message is shown to the owner unless it is exactly this.
-SILENT = "[静默]"
-
 STR = {"type": "string"}
 
 
@@ -156,11 +153,17 @@ class Azathoth(OwnerChat, MemoryAgent):
                     "提取值得长期保留的内容：主人的目标、意志、偏好、决定、约束、洞见，以及经过核实的、对以后判断有用的客观事实"
                     "（例如集群和星系是什么、在哪里）。不要记录寒暄、执行流水和一次性的进度细节。")
 
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.reporting: dict | None = None   # set while handling messages from shub/yog
+
     def tools(self) -> list[dict]:
         return super().tools() + [
             tool("temple_messages", "读取中心神殿的消息记录（可按 agent 过滤）。", {"agent_id": STR, "limit": {"type": "integer"}}),
             tool("temple_agent", "读取某个 agent 的完整注册信息（含初始化参数）。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_owner_history", "检索你和主人的历史聊天。", {"search": STR, "limit": {"type": "integer"}}),
+            tool("tell_owner", "在主人的聊天窗口里告诉主人当前情况。处理黑山羊/尤格的消息时每次都必须调用。",
+                 {"text": STR}, ["text"]),
         ]
 
     async def call_tool(self, name: str, args: dict):
@@ -174,7 +177,23 @@ class Azathoth(OwnerChat, MemoryAgent):
             return [{"at": time.strftime("%Y-%m-%d %H:%M", time.localtime(t["created_at"])),
                      "owner": t["user_text"] or f"（你主动告知，起因：{t.get('origin') or '内部消息'}）",
                      "you": clip(t["reply"], 2000)} for t in turns]
+        if name == "tell_owner":
+            await self.tell_owner(args["text"])
+            return "已送达主人聊天窗口"
         return await super().call_tool(name, args)
+
+    async def tell_owner(self, text: str) -> None:
+        r = self.reporting
+        origin = None
+        if r is not None:
+            r["told"] = True
+            # No message back to a subordinate this turn means the matter is closed: a completion summary.
+            origin = f"{r['from']}的消息 · {'进展' if r['sent'] else '任务完成'}"
+        await self.link.call("notify_owner", text=text, origin=origin, model=self.latest.get("model"))
+
+    async def on_sent(self, to: str, text: str) -> None:
+        if self.reporting is not None:
+            self.reporting["sent"] = True
 
     async def receive(self, batch: list[dict]) -> None:
         owner = [m for m in batch if m["sender"] == OWNER]
@@ -185,28 +204,29 @@ class Azathoth(OwnerChat, MemoryAgent):
             await self.internal(rest)
 
     async def internal(self, batch: list[dict]) -> None:
-        """Messages from shub/yog. The program, not the model, decides where the reply goes:
-        the final reply is shown in the owner's chat unless it is exactly SILENT."""
-        text = (f"【以下是宇宙内部的消息，不是主人说的。你这轮的最终回复会由程序作为主动消息直接显示在主人的聊天窗口。"
-                f"交付的结果、需要主人决定的事、重大风险、纠正你之前告诉主人的错误信息，就写给主人；"
-                f"纯过程性进展、主人不需要知道的，最终回复只写 {SILENT}。】\n\n" + self.render(batch))
-        activity: list[str] = []
-
-        def on_event(method: str, p: dict) -> None:
-            if method == "item/completed":
-                activity.extend(summarize_items([p.get("item") or {}]))
-
-        result = await self.run_main(text, on_event=on_event)
-        reply = (result.text or "").strip()
-        if result.status != "completed":
-            reply = f"（处理{', '.join(sorted({m['sender_name'] for m in batch}))}的消息时出错：{result.error or result.status}）"
-        if reply and reply != SILENT and not reply.endswith(SILENT):
-            origin = "、".join(sorted({m["sender_name"] for m in batch})) + "的消息"
-            await self.link.call("notify_owner", text=reply, origin=origin, model=self.latest.get("model"),
-                                 activity=activity[-40:])
+        """Messages from shub/yog. Azathoth may answer them or not, but the program makes sure
+        the owner is told every time: tell_owner is required, with a fallback if it is skipped."""
+        self.reporting = {"from": "、".join(sorted({m["sender_name"] for m in batch})), "sent": False, "told": False}
+        try:
+            text = ("【以下是宇宙内部的消息，不是主人说的。你可以用 temple_send 回复或继续安排下属，也可以不回复；"
+                    "但无论哪种，都必须调用 tell_owner 告诉主人当前情况。如果你不再回复下属，就表示这件事已经完成，"
+                    "tell_owner 要写成给主人的完成总结：结果、结论、遗留问题。】\n\n" + self.render(batch))
+            result = await self.run_main(text)
+            if result.status == "completed" and not self.reporting["told"]:
+                done = not self.reporting["sent"]
+                result = await self.run_main(
+                    "【程序提示】你还没有调用 tell_owner。现在调用它告诉主人当前情况"
+                    + ("：你没有回复下属，说明这件事已完成，写成完成总结。" if done else "。"))
+            if not self.reporting["told"]:
+                reply = (result.text or "").strip() if result.status == "completed" else \
+                    f"（处理{self.reporting['from']}的消息时出错：{result.error or result.status}）"
+                if reply:
+                    await self.tell_owner(reply)
             # What reached the owner is part of the owner conversation: distill it.
             if result.status == "completed" and self.last_turn:
                 asyncio.create_task(self.distill(*self.last_turn))
+        finally:
+            self.reporting = None
 
 
 class Shub(MemoryAgent):

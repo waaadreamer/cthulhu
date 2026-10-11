@@ -118,18 +118,15 @@ class Universe(unittest.TestCase):
         self.assertEqual(msgs[0]["receiver"], "sh")
         self.wait(lambda: self.api("memory?agent_id=sh"))
 
-    def test_subordinate_report_reaches_owner_unless_silent(self):
-        # shub reports back; azathoth's reply to that internal message lands in the owner's chat by itself.
-        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_send {\\"to\\": \\"az\\", \\"text\\": \\"巡检完成\\"}"}')
-        note = self.wait(lambda: next(t for t in self.api("chat?agent_id=az") if not t["user_text"] and "巡检完成" in t["reply"]))
-        self.assertTrue(note["origin"])
-        self.assertEqual(note["status"], "done")
-        # A reply of exactly [静默] stays internal.
-        before = len(self.api("chat?agent_id=az&limit=200"))
-        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_send {\\"to\\": \\"az\\", \\"text\\": \\"REPLY [静默]\\"}"}')
-        self.wait(lambda: [m for m in self.api("messages?agent_id=az") if m["text"] == "REPLY [静默]" and m["state"] == "handled"])
-        time.sleep(1)
-        self.assertEqual(len(self.api("chat?agent_id=az&limit=200")), before + 1)  # only the owner's own turn
+    def test_subordinate_report_always_reaches_owner(self):
+        # Azathoth calls tell_owner itself; nothing sent back to shub, so it is a completion summary.
+        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_send {\\"to\\": \\"az\\", \\"text\\": \\"CALL tell_owner {\\\\\\"text\\\\\\": \\\\\\"lab 巡检完成\\\\\\"}\\"}"}')
+        note = self.wait(lambda: next(t for t in self.api("chat?agent_id=az") if not t["user_text"] and t["reply"] == "lab 巡检完成"))
+        self.assertIn("任务完成", note["origin"])
+        # Azathoth forgets tell_owner: the program reminds it, then delivers the reply itself.
+        self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_send {\\"to\\": \\"az\\", \\"text\\": \\"磁盘查完了\\"}"}')
+        note = self.wait(lambda: next(t for t in self.api("chat?agent_id=az") if not t["user_text"] and "tell_owner" in t["reply"]), 30)
+        self.assertIn("任务完成", note["origin"])
 
     def test_memory_revised_in_place_and_pushed_to_live_thread(self):
         self.chat("az", "记一下这个")
