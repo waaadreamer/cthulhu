@@ -230,13 +230,16 @@ function group(turns: Turn[]): Group[] {
   return out
 }
 
-/** A task's reports: progress steps fold into a chain of thought; the final summary stays open. */
+/** A task's reports: progress steps fold into a chain of thought. The final summary stays open, and so
+ * does a blocked note while it is the latest word on the task (it summarises and asks the owner). */
 function TaskView({ turns, agent }: { turns: Turn[]; agent: Agent }) {
-  const final = [...turns].reverse().find((t) => t.kind === 'summary')
+  const latest = turns[turns.length - 1]
+  const summary = [...turns].reverse().find((t) => t.kind === 'summary')
+  const done = !!summary
+  const blocked = !done && latest.kind === 'blocked'
+  const final = summary ?? (blocked ? latest : undefined)
   const steps = turns.filter((t) => t !== final)
-  const done = !!final
-  const [open, setOpen] = useState(!done)
-  const blocked = !done && steps[steps.length - 1]?.kind === 'blocked'
+  const [open, setOpen] = useState(!final)
   const title = turns[0].task_title || turns[0].origin || '任务'
   const last = steps[steps.length - 1]
   return (
@@ -270,7 +273,12 @@ function TaskView({ turns, agent }: { turns: Turn[]; agent: Agent }) {
             )}
           </div>
         )}
-        {final && <><Markdown text={final.reply} /><Footer turn={final} /></>}
+        {final && (
+          <div className={blocked ? 'rounded-xl border border-amber-300/20 bg-amber-300/[0.04] px-3.5 py-2.5' : ''}>
+            <Markdown text={final.reply} />
+            <Footer turn={final} />
+          </div>
+        )}
       </div>
     </div>
   )
