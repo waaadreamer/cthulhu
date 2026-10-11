@@ -34,6 +34,8 @@ def build(cfg: dict, *, codex: str, cwd: str, log_dir, sub_agents: bool, api_lin
         return ClaudeRuntime(cwd, model=cfg.get("model") or "claude-opus-5-5", effort=cfg.get("effort"),
                              log_path=str(log_dir / "claude.log"), cli_path=cfg.get("cli_path"))
     if backend == "galaxy_api":
+        if not isinstance(cfg.get("provider"), str) or not cfg["provider"] or not cfg.get("model"):
+            raise ValueError("galaxy_api requires an explicit provider and model")
         from .galaxy_api_runtime import GalaxyAPIRuntime
         return GalaxyAPIRuntime(codex, cwd, link=api_link, provider=cfg.get("provider"),
                                 state_dir=log_dir, model=cfg.get("model"),

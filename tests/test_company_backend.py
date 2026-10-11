@@ -18,6 +18,15 @@ class BackendMigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_runtime({"backend": "company_codex", "model": "gpt-6-astra"})
 
+    def test_invalid_primary_does_not_turn_into_personal_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            cfg = {"backend": "galaxy_api", "model": "gpt-6-astra",
+                   "fallback": {"backend": "codex", "model": "gpt-6-astra"}}
+            with self.assertRaises(ValueError):
+                backends.Backends(cfg, codex="unused", cwd=root, log_dir=Path(root), sub_agents=False)
+            with self.assertRaises(ValueError):
+                validate_runtime(cfg | {"provider": ""})
+
     def test_personal_environment_and_identity_preserved(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"CODEX_HOME": "/personal",
                 "OPENAI_API_KEY": "personal", "CTHULHU_AGENT_TOKEN": "private", "COMPANY_CODEX_API_KEY": "obsolete"}):

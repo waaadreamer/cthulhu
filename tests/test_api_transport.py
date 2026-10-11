@@ -1,6 +1,7 @@
 """Real authenticated WebSockets and HTTP streaming; upstream is a local fixture."""
 import asyncio
 import json
+import re
 import socket
 import tempfile
 import unittest
@@ -99,10 +100,14 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             history = [{"role": "user", "content": history}]
         tool_output = any(i.get("type") == "function_call_output" for i in history)
         wants_tool = (bool(body.get("tools")) or getattr(self, "codex_mode", False)) and not tool_output
+        nonce = re.search(r"echo_[0-9a-f]{8}", json.dumps(history))
+        value = nonce.group(0) if nonce else "echoed"
+        answer = f"Completed {value} result."
+        tool_name = body.get("tools", [{}])[0].get("name", "echo")
         item = ({"id": f"fc_{number}", "type": "function_call", "call_id": f"call_{number}",
-                 "name": "echo", "arguments": '{"value":"echoed"}', "status": "completed"} if wants_tool else
+                 "name": tool_name, "arguments": json.dumps({"value": value}), "status": "completed"} if wants_tool else
                 {"id": f"msg_{number}", "type": "message", "role": "assistant", "status": "completed",
-                 "content": [{"type": "output_text", "text": "Completed echoed result.", "annotations": []}]})
+                 "content": [{"type": "output_text", "text": answer, "annotations": []}]})
         response = {"id": rid, "object": "response", "created_at": 1, "model": "openai/" + body["model"],
                     "service_tier": "default", "status": "in_progress", "output": []}
         events = [{"type": "response.created", "response": response},
@@ -114,7 +119,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                         "output_index": 0, "delta": item["arguments"]}]
         else:
             events += [{"type": "response.output_text.delta", "item_id": item["id"],
-                        "output_index": 0, "content_index": 0, "delta": "Completed echoed result."}]
+                        "output_index": 0, "content_index": 0, "delta": answer}]
         events += [{"type": "response.output_item.done", "output_index": 0, "item": item},
                    {"type": "response.completed", "response": response | {"status": "completed", "output": [item],
                     "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
@@ -267,3 +272,14 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             part = await self.caller.call("api_next", id=opened["id"])
             if part.get("done"):
                 break
+
+
+    async def test_bounded_live_canary_contract_against_fixture(self):
+        from cthulhu.api_canary import run
+        result = await run(self.caller, "ali", "full")
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["generated_requests"], 5)
+        self.assertEqual(result["echo_executions"], 1)
+        self.assertEqual(len(result["tool_ledger"]), 1)
+        self.assertTrue(result["results"][-1]["started_event_observed"])
+        self.assertTrue(result["results"][-1]["upstream_closed"])

@@ -114,7 +114,7 @@ def validate_runtime(cfg: dict, nested: bool = False) -> dict:
     if tier is not None and backend == "claude":
         raise ValueError("service_tier requires a Codex backend")
     out = {k: cfg[k] for k in ("backend", "model", "effort", "service_tier", "provider") if cfg.get(k)}
-    if backend == "galaxy_api" and not isinstance(cfg.get("provider"), str):
+    if backend == "galaxy_api" and (not isinstance(cfg.get("provider"), str) or not cfg["provider"]):
         raise ValueError("galaxy_api requires a provider galaxy ID")
     if "effort" not in out and out["model"] in DEFAULT_EFFORT:
         out["effort"] = DEFAULT_EFFORT[out["model"]]

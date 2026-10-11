@@ -67,7 +67,7 @@ async def run(link, provider="ali", mode="text"):
                 "reasoning": {"effort": "low"}, "service_tier": "default", "max_output_tokens": 256}
         result, _ = await response(link, provider, body)
         results.append({"check": "text", **result})
-        if not result["ok"]:
+        if not result["ok"] or not result["visible_nonempty"]:
             return {"status": "failed", "results": results, "generated_requests": len(results)}
     if mode == "text":
         return {"status": "passed", "results": results, "generated_requests": 2}
@@ -90,21 +90,30 @@ async def run(link, provider="ali", mode="text"):
     call = calls[0]
     if json.loads(call["arguments"]) != {"value": nonce}:
         return {"status": "failed", "results": results, "generated_requests": 3, "echo_executions": 0}
+    ledger = [{"call_id": call["call_id"], "request_id": result["id"],
+               "tool": "probe_echo", "executions": 1, "arguments_validated": True}]
     # The sole handler is an in-memory echo. Full reasoning/tool history is retained.
     history += terminal["output"] + [{"type": "function_call_output", "call_id": call["call_id"], "output": nonce}]
     result, final = await response(link, provider, body | {"input": history, "tool_choice": "none"})
-    output = json.dumps((final or {}).get("output", []))
-    result["echo_matches"] = nonce in output
+    items = (final or {}).get("output", [])
+    output = "".join(c.get("text", "") for i in items if i.get("type") == "message"
+                     for c in i.get("content", []) if c.get("type") == "output_text")
+    result["echo_matches"] = nonce in output and not any(i.get("type") == "function_call" for i in items)
     results.append({"check": "tool_result_and_history", **result})
-    if not result["ok"] or not result["echo_matches"]:
-        return {"status": "failed", "results": results, "generated_requests": 4, "echo_executions": 1}
+    if not result["ok"] or not result["echo_matches"] or not result["visible_nonempty"]:
+        return {"status": "failed", "results": results, "generated_requests": 4, "echo_executions": 1, "tool_ledger": ledger}
 
     opened = await link.call("api_open", provider=provider, body={
         "model": "gpt-6.1-sol", "input": "Count slowly from one to twenty.", "max_output_tokens": 128})
+    first = await link.call("api_next", id=opened["id"], timeout=100)
+    started = bool(first.get("data")) and not first.get("error") and not first.get("done")
     cancelled = await link.call("api_cancel", id=opened["id"], timeout=10)
+    if not isinstance(cancelled, dict):
+        cancelled = {"cancelled": True, "upstream_closed": False}
+    cancelled["started_event_observed"] = bool(started)
     results.append({"check": "targeted_cancel", "id": opened["id"], **cancelled})
-    return {"status": "passed" if cancelled.get("upstream_closed") else "incomplete",
-            "results": results, "generated_requests": 5, "echo_executions": 1,
+    return {"status": "passed" if started and cancelled.get("upstream_closed") else "incomplete",
+            "results": results, "generated_requests": 5, "echo_executions": 1, "tool_ledger": ledger,
             "provider_disconnect": "local integration test only; production provider WS not disrupted",
             "fast": "not verified; no additional tier benchmark"}
 
