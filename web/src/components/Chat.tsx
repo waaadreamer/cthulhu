@@ -127,7 +127,7 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
           {!results && hasMore && <div className="flex justify-center"><Loader2 className="h-4 w-4 animate-spin text-slate-600" /></div>}
           {!results && turns.length === 0 && <Empty agent={agent} />}
           {group(shown).map((g) => g.kind === 'task'
-            ? <TaskView key={g.key} turns={g.turns} agent={agent} />
+            ? <TaskView key={g.key} turns={g.turns} agent={agent} continued={g.continued} />
             : <TurnView key={g.key} turn={g.turns[0]} agent={agent} stream={streams[g.turns[0].id]} highlight={search ?? undefined} />)}
         </div>
       </div>
@@ -210,12 +210,13 @@ function TurnView({ turn, agent, stream, highlight }: { turn: Turn; agent: Agent
   )
 }
 
-type Group = { kind: 'turn' | 'task'; key: string; turns: Turn[] }
+type Group = { kind: 'turn' | 'task'; key: string; turns: Turn[]; continued?: boolean }
 
-/** Proactive notes about the same task collapse into one block; everything else stays a turn. */
+/** Consecutive proactive notes about the same task collapse into one block. An owner message closes
+ * the open blocks, so whatever the task reports after it (e.g. the final summary) appears below it. */
 function group(turns: Turn[]): Group[] {
   const out: Group[] = []
-  const open = new Map<string, Group>()
+  let open = new Map<string, Group>()
   for (const t of turns) {
     if (!t.user_text && t.task_id) {
       const g = open.get(t.task_id)
@@ -225,21 +226,31 @@ function group(turns: Turn[]): Group[] {
       out.push(ng)
       continue
     }
+    if (t.user_text) open = new Map()
     out.push({ kind: 'turn', key: t.id, turns: [t] })
+  }
+  // Earlier blocks of a task that went on later are marked as continued below.
+  const seen = new Set<string>()
+  for (let i = out.length - 1; i >= 0; i--) {
+    const g = out[i]
+    if (g.kind !== 'task') continue
+    const id = g.turns[0].task_id!
+    if (seen.has(id)) g.continued = true
+    seen.add(id)
   }
   return out
 }
 
 /** A task's reports: progress steps fold into a chain of thought. The final summary stays open, and so
  * does a blocked note while it is the latest word on the task (it summarises and asks the owner). */
-function TaskView({ turns, agent }: { turns: Turn[]; agent: Agent }) {
+function TaskView({ turns, agent, continued }: { turns: Turn[]; agent: Agent; continued?: boolean }) {
   const latest = turns[turns.length - 1]
   const summary = [...turns].reverse().find((t) => t.kind === 'summary')
   const done = !!summary
   const blocked = !done && latest.kind === 'blocked'
   const final = summary ?? (blocked ? latest : undefined)
   const steps = turns.filter((t) => t !== final)
-  const [open, setOpen] = useState(!final)
+  const [open, setOpen] = useState(!final && !continued)
   const title = turns[0].task_title || turns[0].origin || '任务'
   const last = steps[steps.length - 1]
   return (
@@ -247,11 +258,12 @@ function TaskView({ turns, agent }: { turns: Turn[]; agent: Agent }) {
       <Avatar role={agent.role} size="sm" />
       <div className="min-w-0 flex-1 pt-0.5">
         <div className="mb-1.5 flex items-center gap-1.5 text-xs">
-          {done ? <CircleCheck className="h-3.5 w-3.5 text-emerald-400" />
+          {continued && !final ? <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
+            : done ? <CircleCheck className="h-3.5 w-3.5 text-emerald-400" />
             : blocked ? <CircleAlert className="h-3.5 w-3.5 text-amber-300" />
             : <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />}
           <span className="font-medium text-slate-200">{title}</span>
-          <span className="text-slate-500">· {done ? '已完成' : blocked ? '需要你决定' : '进行中'} · {timeLabel(turns[turns.length - 1].created_at)}</span>
+          <span className="text-slate-500">· {continued && !final ? '后续见下方' : done ? '已完成' : blocked ? '需要你决定' : '进行中'} · {timeLabel(turns[turns.length - 1].created_at)}</span>
         </div>
         {steps.length > 0 && (
           <div className="mb-3 overflow-hidden rounded-xl border border-white/[0.06] bg-black/20">
