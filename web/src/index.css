@@ -24,4 +24,7 @@ body {
 .prose :not(pre) > code { @apply bg-white/[0.08] text-violet-200 rounded-md px-1.5 py-0.5 font-normal before:content-none after:content-none; }
 .prose table { @apply text-sm; }
 .prose a { @apply text-cyan-300 no-underline hover:underline; }
+.prose .katex-display { @apply overflow-x-auto overflow-y-hidden py-1; }
+.prose img { @apply my-3; }
+.prose video { margin: 0.75rem 0; }
 .caret::after { content: '▍'; @apply text-violet-300 animate-pulseDot ml-0.5; }

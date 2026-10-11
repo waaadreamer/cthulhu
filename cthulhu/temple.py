@@ -8,15 +8,18 @@ themselves is trusted.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -35,6 +38,20 @@ log = logging.getLogger(__name__)
 SESSION_TTL = 30 * 86400
 OWNER_PRIORITY = 10
 TASK_STATUSES = ("progress", "blocked", "done")
+FILE_PREVIEW_BYTES = 2 * 1024 * 1024
+FILE_RAW_BYTES = 40 * 1024 * 1024    # base64 over the galaxy websocket stays under its 64 MB frame limit
+MEDIA_EXT = {
+    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".avif"},
+    "video": {".mp4", ".webm", ".mov", ".m4v", ".ogv"},
+    "audio": {".mp3", ".wav", ".ogg", ".m4a", ".flac"},
+    "pdf": {".pdf"},
+    "markdown": {".md", ".markdown", ".mdx"},
+}
+
+
+def file_kind(path: str) -> str:
+    ext = Path(path).suffix.lower()
+    return next((k for k, exts in MEDIA_EXT.items() if ext in exts), "text")
 
 
 @dataclass(eq=False)
@@ -331,6 +348,31 @@ class Temple:
             r = {"error": str(e)}
         return {"agent_id": agent_id, "name": a["name"], "online": True} | r
 
+    # file preview (owner only): files live on galaxies, read by the galaxy as its OS user
+
+    async def locate_file(self, path: str, galaxy: str | None) -> list[str]:
+        """Galaxies (hint first) on which `path` exists."""
+        ids = [g for g in self.galaxies if g != galaxy]
+        if galaxy in self.galaxies:
+            ids.insert(0, galaxy)
+
+        async def probe(gid: str):
+            try:
+                st = await self.galaxies[gid].rpc("read_file", timeout=10, path=path)
+                return gid if st.get("exists") else None
+            except Exception:
+                return None
+        return [g for g in await asyncio.gather(*(probe(g) for g in ids)) if g]
+
+    async def read_file(self, path: str, galaxy: str | None, max_bytes: int) -> dict:
+        found = await self.locate_file(path, galaxy)
+        if not found:
+            raise FileNotFoundError(f"no online galaxy has {path}")
+        gid = found[0]
+        r = await self.galaxies[gid].rpc("read_file", timeout=60, path=path, max_bytes=max_bytes)
+        g = self.store.galaxy(gid)
+        return r | {"galaxy": gid, "galaxy_name": g["name"] if g else gid, "found": found}
+
     async def patrol(self) -> list[dict]:
         targets = [a for a in self.store.agents(include_stopped=False) if a["role"] in roles.SUPERVISED]
         return list(await asyncio.gather(*(self.latest_result(a["id"]) for a in targets)))
@@ -601,6 +643,29 @@ class Temple:
                 if request.method == "POST":
                     await self.set_runtime(body["key"], body.get("config"))
                 return JSONResponse({"overrides": self.store.setting("runtimes") or {}, "models": MODEL_CHOICES})
+            if path == "file":
+                # Text preview: up to 2 MB inline. Media and downloads go through /api/raw.
+                r = await self.read_file(q["path"], q.get("galaxy") or None, FILE_PREVIEW_BYTES)
+                kind = file_kind(r["path"]) if not r.get("is_dir") else "dir"
+                r["kind"] = kind
+                if kind in ("image", "video", "audio", "pdf"):
+                    r.pop("data", None)
+                elif "data" in r:
+                    raw = base64.b64decode(r.pop("data"))
+                    r["text"] = raw.decode("utf-8", errors="replace")
+                    if b"\0" in raw[:4096]:
+                        r["kind"], r["text"] = "binary", None
+                return JSONResponse(r)
+            if path == "raw":
+                r = await self.read_file(q["path"], q.get("galaxy") or None, FILE_RAW_BYTES)
+                if r.get("is_dir") or "data" not in r:
+                    return JSONResponse({"error": r.get("error") or "not a file"}, status_code=400)
+                mime = mimetypes.guess_type(r["path"])[0] or "application/octet-stream"
+                headers = {"cache-control": "private, max-age=60", "x-content-type-options": "nosniff",
+                           "content-security-policy": "sandbox"}
+                if q.get("download"):
+                    headers["content-disposition"] = f"attachment; filename*=UTF-8''{quote(Path(r['path']).name)}"
+                return Response(base64.b64decode(r["data"]), media_type=mime, headers=headers)
             if path == "patrols":
                 return JSONResponse(self.store.patrols(int(q.get("limit", 10))))
             if path == "latest":
@@ -610,6 +675,8 @@ class Temple:
             return JSONResponse({"error": str(e)}, status_code=401)
         except Denied as e:
             return JSONResponse({"error": str(e)}, status_code=403)
+        except FileNotFoundError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
         except (KeyError, ValueError) as e:
             return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
 

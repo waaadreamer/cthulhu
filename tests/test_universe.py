@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -166,6 +167,24 @@ class Universe(unittest.TestCase):
         turn = self.chat("az", "再问一次")
         self.assertNotIn("S 集群已连接", turn["reply"])
 
+    def test_file_preview(self):
+        f = self.dir / "work" / "报告.md"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text("# 结果\n$E=mc^2$\n")
+        r = self.api("file?path=" + urllib.parse.quote(str(f)))
+        self.assertEqual((r["kind"], r["galaxy"]), ("markdown", "g1"))
+        self.assertIn("E=mc^2", r["text"])
+        d = self.api("file?path=" + urllib.parse.quote(str(f.parent)))
+        self.assertEqual(d["kind"], "dir")
+        self.assertIn("报告.md", [e["name"] for e in d["entries"]])
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/raw?path=" + urllib.parse.quote(str(f)),
+                                     headers={"cookie": self.cookie})
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.read().decode(), f.read_text())
+            self.assertEqual(resp.headers["content-security-policy"], "sandbox")
+        self.assertEqual(self.api("file?path=/nonexistent/x.md")["status"], 404)
+        self.assertEqual(self.api("file?path=relative.md")["status"], 404)
+
     def test_matrix_denies_via_tool(self):
         # ghroth holds no tools; azathoth may not reach old_ones directly
         turn = self.chat("az", 'CALL temple_spawn {"name": "x", "galaxy_id": "g1", "task": "t", "skill": "s"}')
@@ -207,10 +226,11 @@ class Universe(unittest.TestCase):
         self.assertEqual(asyncio.run(go())["type"], "welcome")
 
     def test_unauthenticated_api(self):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/directory")
-        with self.assertRaises(urllib.error.HTTPError) as cm:
-            urllib.request.urlopen(req)
-        self.assertEqual(cm.exception.code, 401)
+        for path in ("directory", "file?path=/etc/passwd", "raw?path=/etc/passwd"):
+            req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/{path}")
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(req)
+            self.assertEqual(cm.exception.code, 401)
 
 
 class RuntimeSwitching(Universe):

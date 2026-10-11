@@ -10,6 +10,8 @@ import { Messages } from './components/Messages'
 import { Settings } from './components/Settings'
 import { Avatar, StatusDot } from './components/Avatar'
 import { Sigil } from './components/Sigil'
+import { FilePreview } from './components/FilePreview'
+import { FileRef, PreviewContext } from './preview'
 
 type View = { kind: 'chat'; agent: string } | { kind: 'universe' } | { kind: 'messages' } | { kind: 'settings' }
 
@@ -33,6 +35,8 @@ function Temple({ onLogout }: { onLogout: () => void }) {
   const [more, setMore] = useState<Record<string, boolean>>({})
   const [liveMsgs, setLiveMsgs] = useState<Message[]>([])
   const [patrolTick, setPatrolTick] = useState(0)
+  const [preview, setPreview] = useState<FileRef | null>(null)
+  const closePreview = useCallback(() => setPreview(null), [])
 
   const upsertTurn = useCallback((t: Turn) => {
     setChats((c) => {
@@ -117,6 +121,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
   )
 
   return (
+    <PreviewContext.Provider value={setPreview}>
     <div className="flex h-full">
       <aside className="hidden w-64 shrink-0 border-r border-white/[0.06] bg-abyss-950/60 backdrop-blur-xl md:block">{sidebar}</aside>
       {menu && (
@@ -143,7 +148,20 @@ function Temple({ onLogout }: { onLogout: () => void }) {
           {view.kind === 'settings' && <Settings dir={dir} />}
         </div>
       </main>
+      {preview && (
+        <>
+          {/* Wide screens: a resizable-feel side column; narrow screens: a full overlay. */}
+          <div className="hidden w-[min(46vw,760px)] shrink-0 lg:block">
+            <FilePreview file={preview} onClose={closePreview} onOpen={setPreview} />
+          </div>
+          <div className="fixed inset-0 z-50 lg:hidden">
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={closePreview} />
+            <div className="absolute inset-y-0 right-0 w-full max-w-2xl"><FilePreview file={preview} onClose={closePreview} onOpen={setPreview} /></div>
+          </div>
+        </>
+      )}
     </div>
+    </PreviewContext.Provider>
   )
 }
 

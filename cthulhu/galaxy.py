@@ -7,6 +7,7 @@ crashed ones with backoff. Agents inherit this process's OS user.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -31,6 +32,44 @@ class Proc:
         self.task: asyncio.Task | None = None
 
 
+DIR_LIMIT = 500
+
+
+def read_file(path: str, max_bytes: int = 0, offset: int = 0) -> dict:
+    """Stat (max_bytes=0) or read a file; list a directory. Paths must be absolute."""
+    p = Path(path)
+    if not p.is_absolute():
+        raise ValueError("path must be absolute")
+    try:
+        st = p.stat()
+    except OSError as e:
+        return {"exists": False, "error": e.strerror or str(e)}
+    out = {"exists": True, "path": str(p), "size": st.st_size, "mtime": st.st_mtime, "is_dir": p.is_dir()}
+    if out["is_dir"]:
+        entries = []
+        try:
+            for e in sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name))[:DIR_LIMIT]:
+                try:
+                    es = e.stat()
+                    entries.append({"name": e.name, "is_dir": e.is_dir(), "size": es.st_size, "mtime": es.st_mtime})
+                except OSError:
+                    entries.append({"name": e.name, "is_dir": False, "size": None, "mtime": None})
+        except OSError as e:
+            out["error"] = e.strerror or str(e)
+        out["entries"] = entries
+    elif max_bytes:
+        try:
+            with open(p, "rb") as f:
+                f.seek(offset)
+                data = f.read(max_bytes)
+        except OSError as e:
+            out["error"] = e.strerror or str(e)
+            return out
+        out["data"] = base64.b64encode(data).decode()
+        out["truncated"] = offset + len(data) < st.st_size
+    return out
+
+
 class Galaxy:
     def __init__(self, config: dict):
         self.config = config
@@ -44,9 +83,12 @@ class Galaxy:
     async def _welcome(self, w: dict) -> None:
         log.info("galaxy %s connected to temple", w.get("name"))
 
-    async def _frame(self, frame: dict) -> None:
+    async def _frame(self, frame: dict):
         if frame.get("type") == "desired":
             await self.reconcile(frame["agents"])
+        elif frame.get("type") == "rpc" and frame["method"] == "read_file":
+            # The owner previews a file an agent produced; read as this galaxy's OS user.
+            return await asyncio.to_thread(read_file, **frame.get("params", {}))
 
     async def reconcile(self, wanted: list[dict]) -> None:
         wanted_ids = {a["id"] for a in wanted}
