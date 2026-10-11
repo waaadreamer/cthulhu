@@ -146,3 +146,24 @@ class CompanyBackendTests(unittest.IsolatedAsyncioTestCase):
         with patch("cthulhu.agent.asyncio.sleep", new=AsyncMock(side_effect=[None, asyncio.CancelledError])):
             with self.assertRaises(asyncio.CancelledError):
                 await agent.watchdog()
+
+
+    def test_company_network_overrides_do_not_change_personal_environment(self):
+        self.company["network_env"] = {"HTTPS_PROXY": "http://127.0.0.1:18080",
+                                       "HTTP_PROXY": None, "ALL_PROXY": None, "NO_PROXY": ""}
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://old:1234", "https_proxy": "http://lower:1234",
+                                     "HTTP_PROXY": "http://old:1234", "http_proxy": "http://old:1234",
+                                     "ALL_PROXY": "socks5://old:1234", "NO_PROXY": "gateway.example"}):
+            _, env = self.runtime().launch_config()
+            self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:18080")
+            self.assertEqual(env["https_proxy"], env["HTTPS_PROXY"])
+            for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY"):
+                self.assertNotIn(name, env)
+            self.assertEqual(os.environ["https_proxy"], "http://lower:1234")
+            rt = backends.build(dict(backend="codex"), **self.kw)
+            self.assertEqual(rt.launch_config()[1]["HTTPS_PROXY"], "http://old:1234")
+        for network in ({"CODEX_HOME": "/tmp/unsafe"}, {"HTTPS_PROXY": "http://user:secret@host:1234"},
+                        {"HTTPS_PROXY": 1234}, []):
+            self.company["network_env"] = network
+            with self.assertRaises(RuntimeError_):
+                self.runtime().launch_config()

@@ -85,6 +85,24 @@ class CodexRuntime:
                 raise RuntimeError_("company_codex key file must contain one nonempty token")
             for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID"):
                 env.pop(name, None)
+            # Network overrides are local-only and apply solely to this child.
+            # Replace both casings so inherited lower-case proxy variables cannot win.
+            network = cfg.get("network_env", {})
+            allowed = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
+            if not isinstance(network, dict) or any(k not in allowed for k in network):
+                raise RuntimeError_("company_codex network_env only accepts proxy environment names")
+            for name, value in network.items():
+                if value is not None and (not isinstance(value, str) or "\n" in value or "\r" in value):
+                    raise RuntimeError_("company_codex network_env values must be strings or null")
+                if name != "NO_PROXY" and value:
+                    proxy = urlsplit(value)
+                    if (proxy.scheme not in ("http", "https", "socks5", "socks5h") or
+                            not proxy.hostname or proxy.username or proxy.password or proxy.query or proxy.fragment):
+                        raise RuntimeError_("company_codex proxy URL must not contain credentials or query")
+                env.pop(name, None)
+                env.pop(name.lower(), None)
+                if value:
+                    env[name] = env[name.lower()] = value
             env.update(CODEX_HOME=str(home), COMPANY_CODEX_API_KEY=key)
             values = {
                 "model_provider": "company_codex",
