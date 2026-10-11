@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run on the temple as root:  new-galaxy <id> "<name>" [--no-spawn]
+# Registers the galaxy, restarts the temple, prints the one-line install command for the node.
+set -euo pipefail
+[ $# -ge 2 ] || { echo "usage: new-galaxy <id> <name> [--no-spawn]" >&2; exit 1; }
+sudo -u ghroth env PYTHONPATH=/opt/cthulhu /opt/cthulhu/venv/bin/python -m cthulhu provision \
+    --config /etc/cthulhu/temple.json --id "$1" --name "$2" "${@:3}" | grep '^curl'
+systemctl restart cthulhu-v2-temple

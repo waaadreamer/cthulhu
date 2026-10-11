@@ -72,29 +72,34 @@ sudo -u cthulhu /opt/cthulhu/venv/bin/python -m cthulhu passwd --config /etc/cth
 
 ## 部署到其他星系
 
-星系只需要能**主动**连到神殿的 websocket，神殿不会回连。集群节点通常没有公网入口，所以默认的做法是在节点上建一条 SSH 隧道，把本地 `127.0.0.1:7500` 转发到神殿的 7500 端口。不需要 root 权限。
+星系主动用 `wss://<神殿IP>:8000/ws` 连接神殿，节点只需要能出站访问这个端口，自己不需要开放任何端口，也不需要 root 权限。
+- 神殿的证书是自签名的，星系会按 provision 时下发的 SHA-256 指纹校验证书（certificate pinning），所以不需要 CA。
+- 星系连上后，必须通过 token 鉴权才能做任何事。
 
-1. 在神殿上登记星系（以 ghroth 身份运行）：
-   ```bash
-   sudo -u ghroth env PYTHONPATH=/opt/cthulhu /opt/cthulhu/venv/bin/python -m cthulhu provision \
-       --config /etc/cthulhu/temple.json --id gpu1 --name "GPU 集群"
-   sudo systemctl restart cthulhu-v2-temple
-   ```
-   命令会输出一行安装命令，里面带着这个星系的 token，按密码对待。
-2. 在集群节点上，用 agent 要用的那个用户执行：
-   ```bash
-   export CTHULHU_TUNNEL=cthulhu-tunnel@<神殿IP>
-   curl -fsSL https://raw.githubusercontent.com/waaadreamer/cthulhu/main/deploy/install-galaxy.sh | bash -s -- <blob>
-   ```
-   脚本会做这些事：克隆代码，建 venv（Python ≥3.11，也可以用 uv），找到或安装 codex，写入 `~/.cthulhu/galaxy.json`，起隧道和守护进程。有 `systemd --user` 时注册为 user service，没有就用 nohup。
-3. 脚本结束时会打印一条命令，里面是这个节点专用的隧道公钥。到神殿上执行它：
-   ```bash
-   sudo /opt/cthulhu/deploy/authorize-tunnel.sh 'ssh-ed25519 AAAA... cthulhu-galaxy@node'
-   ```
-   `cthulhu-tunnel` 账号没有 shell，只允许转发到 `127.0.0.1:7500`（sshd 的 Match 规则和每把 key 的 `permitopen` 双重限制）。授权后隧道会在 5 秒内自动连上。撤销授权就是删掉 `/var/lib/cthulhu-tunnel/.ssh/authorized_keys` 里对应的那一行。
-4. 首次部署需要登录：codex 要以这个用户执行一次 `codex login`；如果这个星系要跑 Claude agent，在 `~/.cthulhu/env` 里写上 `ANTHROPIC_*`。
+两步完成：
 
-重新执行同一条命令即可升级代码（已有 clone 时会 `git pull`）。日志在 `~/.cthulhu/galaxy.log`，agent 日志在 `~/.cthulhu/state/<agent-id>/`。
+```bash
+# 1. 神殿上（root）：登记星系，并输出节点安装命令
+new-galaxy gpu1 "GPU 集群"
+
+# 2. 节点上（agent 要用的那个用户）：粘贴上一步输出的那一行
+curl -fsSL https://raw.githubusercontent.com/waaadreamer/cthulhu/main/deploy/install-galaxy.sh | bash -s -- <blob>
+```
+
+blob 里包含星系 token，按密码对待。安装脚本会做这些事：
+- 克隆代码。
+- 建 venv（Python ≥3.11，也可以用 uv）。
+- 找到 codex，没有就用 npm 安装。
+- 写入 `~/.cthulhu/galaxy.json`。
+- 以 `systemd --user` 或 nohup 方式常驻，最后确认已连上神殿。
+
+节点首次部署还要手动做两件事：
+- 执行一次 `codex login`。
+- 如果这个星系要跑 Claude agent，在 `~/.cthulhu/env` 里写上 `ANTHROPIC_*`。
+
+重新执行同一条命令即可升级。日志在 `~/.cthulhu/galaxy.log`。
+
+证书续期（当前证书有效期到 2026-11-09）后，指纹会变。这时需要给每个星系更新 `galaxy.json` 里的 `tls_pin`，或者重新 provision。
 
 ## 模型后端
 
