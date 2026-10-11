@@ -35,6 +35,11 @@ from .protocol import agent_token, dumps, sha256, maintenance_token
 from .roles import OWNER, Denied, Role
 from .store import Store, new_id
 
+
+def clip(text: str | None, n: int) -> str:
+    text = text or ""
+    return text if len(text) <= n else text[:n] + "…"
+
 log = logging.getLogger(__name__)
 
 SESSION_TTL = 30 * 86400
@@ -359,13 +364,20 @@ class Temple:
         a = self.store.agent(agent_id)
         if not a:
             raise Denied(f"unknown agent {agent_id}")
+        # The last finished turn comes from the temple's turn log, so it survives agent restarts
+        # (an agent that finishes and is then restarted must still show its result to yog).
+        last = self.store.turn_log(agent_id, limit=1)
+        logged = {"last_reply": clip(last[0]["reply"], 3000), "last_status": last[0]["status"],
+                  "finished_at": last[0]["created_at"]} if last else {}
         conn = self.agents.get(agent_id)
         if conn is None:
-            return {"agent_id": agent_id, "name": a["name"], "online": False, "desired": a["desired"]}
+            return {"agent_id": agent_id, "name": a["name"], "online": False, "desired": a["desired"]} | logged
         try:
             r = await conn.rpc("latest_result", timeout=15)
         except Exception as e:
             r = {"error": str(e)}
+        if logged and logged["finished_at"] > (r.get("finished_at") or 0):
+            r = r | logged
         return {"agent_id": agent_id, "name": a["name"], "online": True} | r
 
     # file preview (owner only): files live on galaxies, read by the galaxy as its OS user

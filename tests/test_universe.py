@@ -210,6 +210,13 @@ class Universe(unittest.TestCase):
                                      and "Ghroth is working" in m["text"]), 20)
         self.assertIn("SLEEP 8", msg["text"])
 
+    def test_latest_result_survives_restart(self):
+        # Yog reads the last finished turn from the temple log, so a restart right after finishing loses nothing.
+        self.chat("gh", "REPLY 部署完成")
+        r = self.api("latest?agent_id=gh")
+        self.assertEqual((r["last_reply"], r["last_status"]), ("部署完成", "completed"))
+        self.assertTrue(r["finished_at"])
+
     def test_impersonation_rejected(self):
         async def go():
             link = Link(f"ws://127.0.0.1:{self.port}/ws", {"kind": "agent", "id": "sh", "token": agent_token("wrong", "sh", 1)},
