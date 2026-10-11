@@ -125,7 +125,7 @@ class Agent:
                   "text": {"type": "string"},
                   "priority": {"type": "integer", "description": "0 普通，5 紧急"}},
                  ["to", "text"]),
-            tool("temple_agents", "列出你可以联系的 agent 及其状态。"),
+            tool("temple_agents", "列出你可以联系的 agent 及其状态，以及所有星系（是否在线、能否创建旧日支配者）。"),
         ]
 
     async def call_tool(self, name: str, args: dict) -> Any:
@@ -133,7 +133,9 @@ class Agent:
             return await self.send(args["to"], args["text"], priority=int(args.get("priority", 0)))
         if name == "temple_agents":
             d = await self.link.call("directory")
-            return [{k: a[k] for k in ("id", "name", "role", "state", "online", "task", "galaxy_id")} for a in d["agents"]]
+            return {"agents": [{k: a[k] for k in ("id", "name", "role", "state", "online", "task", "galaxy_id")}
+                               for a in d["agents"]],
+                    "galaxies": [{k: g[k] for k in ("id", "name", "online", "spawn")} for g in d["galaxies"]]}
         raise ValueError(f"unknown tool {name}")
 
     # public interface

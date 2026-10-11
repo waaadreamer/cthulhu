@@ -123,6 +123,11 @@ class Universe(unittest.TestCase):
         turn = self.chat("az", 'CALL temple_spawn {"name": "x", "galaxy_id": "g1", "task": "t", "skill": "s"}')
         self.assertIn("error", turn["reply"])
 
+    def test_temple_agents_lists_galaxies(self):
+        turn = self.chat("az", "CALL temple_agents {}")
+        self.assertIn('"galaxies"', turn["reply"])
+        self.assertIn('"g1"', turn["reply"])
+
     def test_spawn_and_patrol(self):
         self.chat("az", 'CALL temple_send {"to": "sh", "text": "CALL temple_spawn {\\"name\\": \\"研究员\\", \\"galaxy_id\\": \\"g1\\", \\"task\\": \\"调研\\", \\"skill\\": \\"你是研究员\\"}"}')
         old = self.wait(lambda: next(a for a in self.api("directory")["agents"] if a["role"] == "old_one" and a["online"]), 30)
