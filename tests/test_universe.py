@@ -242,6 +242,21 @@ class Universe(unittest.TestCase):
         # Undrained: the queued message is handled.
         self.wait(lambda: any(t["user_text"] == "排空时到达的消息" and t["status"] == "done" for t in self.api("chat?agent_id=gh")))
 
+    def test_owner_message_not_held_by_drain(self):
+        async def go():
+            from cthulhu.protocol import maintenance_token
+            link = Link(f"ws://127.0.0.1:{self.port}/ws", {"kind": "maintenance", "id": "t2",
+                        "token": maintenance_token(self.secret)}, lambda w: asyncio.sleep(0), lambda f: asyncio.sleep(0))
+            task = asyncio.create_task(link.run())
+            try:
+                await link.call("maintenance_drain", galaxy="g1", enabled=True, timeout=10)
+                turn = await asyncio.to_thread(self.chat, "gh", "排空中也要马上回答")
+                return turn
+            finally:
+                await link.call("maintenance_drain", galaxy="g1", enabled=False, timeout=10)
+                task.cancel()
+        self.assertIn("排空中也要马上回答", asyncio.run(go())["reply"])
+
     def test_impersonation_rejected(self):
         async def go():
             link = Link(f"ws://127.0.0.1:{self.port}/ws", {"kind": "agent", "id": "sh", "token": agent_token("wrong", "sh", 1)},

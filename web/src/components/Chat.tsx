@@ -246,7 +246,8 @@ function group(turns: Turn[]): Group[] {
 function TaskView({ turns, agent, continued }: { turns: Turn[]; agent: Agent; continued?: boolean }) {
   const latest = turns[turns.length - 1]
   const summary = [...turns].reverse().find((t) => t.kind === 'summary')
-  const done = !!summary
+  // Done when the task is closed; a deliverable summary on a still-open task is shown open but not as "done".
+  const done = !!summary && (latest.task_state ?? 'done') === 'done'
   const blocked = !done && latest.kind === 'blocked'
   const final = summary ?? (blocked ? latest : undefined)
   const steps = turns.filter((t) => t !== final)

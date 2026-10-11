@@ -246,7 +246,10 @@ class Azathoth(OwnerChat, MemoryAgent):
                   "reject": {"type": "boolean", "description": "拒绝该请求"},
                   "status_only": {"type": "boolean", "description": "只查看各星系当前版本和最近的部署记录"}}),
             tool("tell_owner", "只在处理黑山羊/尤格的消息时使用：在主人的聊天窗口里告诉主人当前情况，每次都必须调用；"
-                 "进展只写一两句话，任务完成时写完整总结。", {"text": STR}, ["text"]),
+                 "进展只写一两句话，任务完成时写完整总结。",
+                 {"text": STR,
+                  "deliverable": {"type": "boolean", "description": "这条消息就是主人要的东西（报告、答复、结论），"
+                                  "要作为总结展开显示，而不是折叠成过程中的一步"}}, ["text"]),
         ]
 
     async def call_tool(self, name: str, args: dict):
@@ -268,15 +271,17 @@ class Azathoth(OwnerChat, MemoryAgent):
         if name == "tell_owner":
             if self.reporting is None:
                 return "现在是主人在和你对话，直接在最终回复里说即可，不需要 tell_owner。"
-            await self.tell_owner(args["text"])
+            await self.tell_owner(args["text"], deliverable=bool(args.get("deliverable")))
             return "已送达主人聊天窗口"
         return await super().call_tool(name, args)
 
-    async def tell_owner(self, text: str) -> None:
+    async def tell_owner(self, text: str, deliverable: bool = False) -> None:
         r = self.reporting or {}
         r["told"] = True
+        # A deliverable the owner asked for is shown as a summary even while its task stays open.
+        kind = "summary" if deliverable and r.get("kind") in ("progress", "notice") else r.get("kind")
         await self.link.call("notify_owner", text=text, origin=r.get("origin"), task_id=r.get("task_id"),
-                             kind=r.get("kind"), model=self.latest.get("model"))
+                             kind=kind, model=self.latest.get("model"))
 
     async def receive(self, batch: list[dict]) -> None:
         owner = [m for m in batch if m["sender"] == OWNER]
@@ -300,12 +305,14 @@ class Azathoth(OwnerChat, MemoryAgent):
         self.reporting = {"task_id": task_id, "kind": kind, "told": False,
                           "origin": title or "、".join(sorted({m["sender_name"] for m in batch}))}
         guide = {
-            "progress": "这是任务过程中的进展。tell_owner 只写一两句话的进展（像思考过程里的一步：做了什么、发现了什么、下一步），不要展开细节。",
+            "progress": "这是任务过程中的进展。tell_owner 只写一两句话的进展（像思考过程里的一步：做了什么、发现了什么、下一步），不要展开细节。"
+                        "例外：如果这条消息交付的正是主人要的东西（报告、答复、结论），就写完整内容并设 deliverable=true，它会作为总结展开显示。",
             "blocked": "任务受阻，需要主人决定。tell_owner 写一份阶段总结，会在界面上展开显示（之前的进展折叠在上面）："
                        "先列出到目前为止已完成的结果和结论，再说清卡在哪里，最后用主人可以直接回答的具体问题结尾。",
             "summary": "黑山羊标记这个任务已完成。先核对结果是否满足主人的意图，再用 tell_owner 写给主人的完整总结："
                        "结论先行，然后是关键结果、遗留问题；过程不用重复，主人可以展开查看之前的进展。",
-            "notice": "这是尤格的监督报告。tell_owner 用一两句话告诉主人要点；需要主人决定时说清楚。",
+            "notice": "这是尤格或神殿的报告。tell_owner 用一两句话告诉主人要点；需要主人决定时说清楚。"
+                      "如果它交付的正是主人要的东西，就写完整内容并设 deliverable=true。",
         }[kind]
         try:
             text = (f"【以下是宇宙内部的消息，不是主人说的。你可以用 temple_send 回复或继续安排下属，也可以不回复；"

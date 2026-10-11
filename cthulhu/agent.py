@@ -190,11 +190,12 @@ class Agent:
 
     # hooks for subclasses
 
-    def take_batch(self) -> list[dict]:
-        # Highest priority first; everything already queued joins the same turn.
+    def take_batch(self, ready: list[dict] | None = None) -> list[dict]:
+        # Highest priority first; everything already queued (or `ready`) joins the same turn.
         # TODO: steer high-priority messages into the running turn instead of waiting.
-        self.queue.sort(key=lambda m: (-m["priority"], m["created_at"]))
-        batch, self.queue = self.queue, []
+        batch = sorted(self.queue if ready is None else ready, key=lambda m: (-m["priority"], m["created_at"]))
+        taken = {id(m) for m in batch}
+        self.queue = [m for m in self.queue if id(m) not in taken]
         return batch
 
     async def on_sent(self, to: str, text: str) -> None:
@@ -409,12 +410,14 @@ class Agent:
         while True:
             await self.wake.wait()
             self.wake.clear()
-            if not self.queue or self.draining:
+            # While draining only the owner's messages are taken; everything else waits for the drain to end.
+            ready = [m for m in self.queue if m.get("sender") == OWNER] if self.draining else self.queue
+            if not ready:
                 if self.state != "idle":
                     await self.report("idle")    # queued work waits for the drain to end; we are not busy
                 continue
             await self.apply_runtime()
-            batch = self.take_batch()
+            batch = self.take_batch(ready)
             self.current = clip(batch[0]["text"], 120)
             self.current_task = next((m["task_id"] for m in batch if m.get("task_id")), None)
             self.working_since = time.time()

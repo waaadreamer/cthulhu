@@ -259,7 +259,8 @@ class Temple:
 
     async def deliver(self, msg: dict) -> None:
         recipient = self.store.agent(msg["receiver"])
-        if recipient and recipient["galaxy_id"] in self.maintenance:
+        # The owner never waits for a deploy: their messages go through a drain (the deploy waits for them instead).
+        if recipient and recipient["galaxy_id"] in self.maintenance and msg["sender"] != OWNER:
             return
         conn = self.agents.get(msg["receiver"])
         if conn is None:
@@ -640,14 +641,18 @@ class Temple:
             await conn.send({"type": "welcome", "agent": self.public_agent(a) | {"spec": a["spec"]},
                              "memory": self.store.memory(cid), "thread_id": a["thread_id"],
                              "runtime": self.runtime_for(a), "draining": a["galaxy_id"] in self.maintenance,
-                             "pending": [] if a["galaxy_id"] in self.maintenance else self._envelopes(self.store.pending_for(cid))})
-            for m in ([] if a["galaxy_id"] in self.maintenance else self.store.pending_for(cid)):
+                             "pending": self._envelopes(self.deliverable(a))})
+            for m in self.deliverable(a):
                 if m["state"] == "queued":
                     self.store.mark(m["id"], "delivered")
         else:
             raise Denied("unknown client kind")
         await self.broadcast({"type": "directory", **self.directory()})
         return conn
+
+    def deliverable(self, a: dict) -> list[dict]:
+        pending = self.store.pending_for(a["id"])
+        return [m for m in pending if m["sender"] == OWNER] if a["galaxy_id"] in self.maintenance else pending
 
     def _envelopes(self, msgs: list[dict]) -> list[dict]:
         out = []
