@@ -30,7 +30,8 @@ def recoverable(error: str | None) -> bool:
     return any(s in error for s in ('invalid_stream', 'timeout', 'timed out', 'disconnected',
         'connection', 'transport', 'stream', 'temporar', 'overloaded', 'rate limit', '429',
         '408', '500', '502', '503', '504', '529', 'backpressure', 'econnreset', 'offline', 'unavailable', 'app-server exited',
-        'app-server is not running', 'session ended without a result', 'provider_error'))
+        'app-server is not running', 'session ended without a result', 'provider_error',
+        'workspace routing discovery failed'))
 
 # Codex models whose default reasoning effort the harness pins explicitly.
 DEFAULT_EFFORT = {"gpt-6-astra": "medium"}

@@ -161,6 +161,8 @@ for line in sys.stdin:
                         'status':'completed','aggregatedOutput':'persisted recovery-effect=once'}}})
                 n = len(receipt.read_text().splitlines())
                 error = '401 unauthorized' if mode == 'fatal' else ['invalid_stream','timeout','provider_disconnected','transport_disconnected','503 unavailable','invalid_stream'][(n-1)%6]
+                if mode == 'routing':
+                    error = 'workspace routing discovery timed out' if n <= 3 else 'workspace routing discovery failed'
                 out({'method':'turn/completed','params':{'threadId':p['threadId'],
                     'turn':{'id':turn,'status':'failed','error':{'message':error}}}})
         elif p.get("outputSchema"):

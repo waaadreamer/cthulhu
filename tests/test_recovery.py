@@ -86,6 +86,21 @@ class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempt.await_count,6)
         self.assertIn('no configured fallback',result.error)
 
+    async def test_routing_discovery_failure_does_not_stop_at_retry_three(self):
+        pair = self.pair(False)
+        errors = ['workspace routing discovery timed out'] * 3 + ['workspace routing discovery failed'] * 3
+        attempt = AsyncMock(side_effect=[TurnResult('failed', error=e) for e in errors])
+        statuses = []
+        async def report(state): statuses.append(state)
+        with patch.object(backends, 'RETRY_DELAYS', (0,) * 5):
+            result = await pair.recover(attempt, report=report)
+        self.assertEqual(attempt.await_count, 6)
+        self.assertEqual(statuses[-1]['attempt'], 6)
+        self.assertEqual(statuses[-1]['retry'], 5)
+        self.assertIn('no configured fallback is available', result.error)
+        self.assertFalse(backends.recoverable('workspace routing discovery failed: 401 unauthorized'))
+        self.assertFalse(backends.recoverable('workspace routing discovery failed: invalid argument'))
+
     async def test_unsettled_execution_blocks_new_inference(self):
         pair=self.pair(); attempt=AsyncMock(return_value=TurnResult('failed',error='timeout'))
         prepare=AsyncMock(side_effect=RuntimeError('previous tool still running'))
@@ -146,6 +161,20 @@ class RecoveryServerTests(universe.HarnessServer):
         self.assertEqual(turn['status'],'failed')
         self.assertEqual(len((self.dir/'recovery-fatal.jsonl').read_text().splitlines()),1)
         self.assertEqual(self.runtime()['recovery']['phase'],'failed')
+
+    def test_workspace_routing_discovery_fails_through_fifth_retry_then_fallback(self):
+        self.configure()
+        msg = self.api('send', {'to': 'gh', 'text': 'RECOVERY_FIXTURE routing task_fixture'})
+        turn = self.wait(lambda: self.completed(msg['id']), 40)
+        self.assertEqual(turn['status'], 'done', turn)
+        rows = [json.loads(s) for s in (self.dir/'recovery-routing.jsonl').read_text().splitlines()]
+        self.assertEqual([r['model'] for r in rows], ['recovery-primary'] * 6 + ['recovery-fallback'])
+        self.assertTrue(all(r['checked_context'] for r in rows[1:]))
+        self.assertTrue(all(r['task_present'] for r in rows))
+        self.assertEqual((self.dir/'recovery-routing-effect').read_text(), 'once')
+        self.assertEqual(self.runtime()['recovery']['attempt'], 7)
+        self.assertTrue(self.runtime()['recovery']['fallback'])
+        self.assertEqual(self.runtime()['recovery']['phase'], 'completed')
 
     def test_owner_cancel_during_recovery(self):
         self.configure()
