@@ -2,7 +2,7 @@
 
 公司配置、公司key和公司HTTPS请求仅在Ali。Ali通过原有主动发起、已认证并校验证书的
 galaxy WebSocket注册模型能力并处理请求。中心只持授权表和短期流队列，不新增Ali监听端口。
-客户端使用独立后端 `galaxy_api`；未知后端（包括退役的company_codex）明确拒绝。
+GPT 使用 `galaxy_api` 后端，Claude 模型使用原生 `claude` 后端加 `provider`；未知后端明确拒绝。
 既有codex/claude配置与个人认证不变。
 
 ## 配置与选择
@@ -60,6 +60,38 @@ HTTP客户端显式验证CA和原域名，不跟随重定向，不继承不确�
 网页展示请求档位和实际终端档位；fast仅是请求，Ali此前completed返回default，
 因此不能称fast已经兑现。缺失实际model/tier保留unknown。
 
+## 公司 Claude 原生模型
+
+Ali 的既有 `api_provider` 增加公开模型与本机配置路径，保留原 GPT 模型：
+
+```json
+{
+  "models": ["gpt-6-astra", "gpt-6.1-sol", "claude-opus-5-5"],
+  "model_backends": {"claude-opus-5-5": "claude"},
+  "claude_config_file": "/absolute/path/to/private/.claude/settings.json"
+}
+```
+
+中心仅在 Ali 的模型授权表加入 `claude-opus-5-5`。Ali 本机 settings.json 必须禁止
+组和其他用户访问；读取其中 env.ANTHROPIC_BASE_URL 与 ANTHROPIC_AUTH_TOKEN
+（或 ANTHROPIC_API_KEY）。地址、令牌与文件内容均不登记到中心。
+Claude-only provider 无需提供 Codex 配置。
+
+在线目录的 `model_backends` 指定原生执行后端。现有配置选择入口据此保存：
+`{"backend":"claude","provider":"ali","model":"claude-opus-5-5"}`。
+不改变现有模型映射、用户默认或显式 fallback。provider 与消费者均须声明
+`galaxy_api_claude_v1`；旧消费者不能接收此配置，以免忽略 provider 而使用个人认证。
+
+沿用 ClaudeRuntime、Claude Agent SDK 与原生 CLI；CLI 可使用 SDK 自带可执行文件。
+复用同一个 GalaxyAPITransport 和 Broker/Worker 的请求、背压、取消及恢复机制，
+原样转发 Anthropic Messages/SSE，无 Responses 转换。Claude 的工具仍在消费者本地执行。
+CLI 使用独立 CLAUDE_CONFIG_DIR 和 loopback 随机令牌，清除继承的上游凭据与
+其他云厂商路由开关。公司凭据仅由 Ali 注入。仅透传经过字符校验的 anthropic-beta
+协议头，其余调用方 HTTP 头不进入公司请求。
+
+Claude CLI 的请求重试及非流式补发均关闭，初次加五次重试仍由原共享恢复策略负责。
+配置了后备才会使用后备，不创建隐式 Codex fallback。
+
 ## 协议、额度与故障
 
 既有hello/welcome保留兼容性；新增capabilities、version和api_version。
@@ -69,7 +101,7 @@ HTTP客户端显式验证CA和原域名，不跟随重定向，不继承不确�
 - api_register：认证galaxy提交version=1、protocol=responses、模型列表和代码版本。
   神殿按连接身份核对策略，忽略任何客户端宣称的调用方身份。
 - api_catalog：返回调用方星系获准使用的在线provider及模型。
-- api_open：provider ID与完整Responses JSON；神殿生成随机请求ID并绑定当前caller连接和provider连接。
+- api_open：provider ID、原生 protocol（responses/messages）与完整 JSON；神殿生成随机请求ID并绑定当前caller连接和provider连接。
   未知模型、未授权/离线provider、缺少客户端能力均拒绝。
 - api_request事件：经原galaxy WS送达Ali；请求仅包含模型协议数据，不含URL/header或key。
 - api_push：provider逐块上传base64 SSE，携带递增seq；每块等待确认。
@@ -102,7 +134,8 @@ Codex继续执行本机原有工具；Ali只推理，不获得跨星系工具执
 ## 验证入口
 
 `venv/bin/python -m unittest discover -s tests -v` 包含：
-真实认证WS+本地模拟HTTP上游链路、真实打包Codex动态工具和第二轮对话、
+真实认证WS+本地模拟HTTP上游链路、真实打包 Codex/Claude CLI 动态工具和结果续轮、
+Claude 六次实际失败请求后切换显式原生后备、认证错误不重试、
 多请求相关性、终端实际tier、错误脱敏、取消确认、断连重连、排空、授权与限额。
 这些测试不是Ali公司模型的现场验收。
 
@@ -125,6 +158,20 @@ echo仅在内存执行一次。生产provider的WS不做故障注入；断开pro
 任何指定模型未在目录发布时，整次检查生成0个请求；报告保留请求模型与上游返回模型，不能据别名推断实际模型。
 跨星系text canary可经维护连接maintenance_canary指定已升级galaxy，固定最多2个短请求。
 不接受远程shell或任意脚本。
+
+### Claude 原生验收入口
+
+```sh
+venv/bin/python -m cthulhu.api_canary --config /etc/cthulhu/temple.json --provider ali --native-claude --model claude-opus-5-5 --mode full --output /private/path/native-claude.json
+```
+
+此入口实际构建既有 ClaudeRuntime，启动 SDK 原生 CLI，并执行一次无副作用 echo 工具。
+工具返回随机值，提示词不包含该答案；必须观察到原生工具调用、流式文本和准确返回值，
+以及请求/上游返回模型一致，才算通过。推理限制为最多两次上游请求；full 另外发起一次
+Messages 请求并核验定向取消回执。text 模式仍包含原生工具检查，省去最后取消请求。
+报告保留 backend、runtime、provider、请求 ID、requested/returned model 和工具执行次数。
+取消是传输层验收；断连故障与重试使用隔离测试，不能中断生产 provider 来制造错误。
+普通 Responses canary 遇到 Claude 模型在发送前拒绝，避免误报为 Claude-native 运行。
 
 ## 发布与回滚
 

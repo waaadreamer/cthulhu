@@ -5,6 +5,7 @@ import re
 import socket
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -52,7 +53,8 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                   "api_providers": {"ali": {"models": ["gpt-6-astra", "gpt-6.1-sol"], "consumers": ["central"]}}}
         self.temple = Temple(config)
         port = await self.serve(self.temple.app())
-        gateway = await self.serve(Starlette(routes=[Route("/responses", self.gateway, methods=["POST"])]))
+        gateway = await self.serve(Starlette(routes=[Route("/responses", self.gateway, methods=["POST"]),
+                                                    Route("/messages", self.messages_gateway, methods=["POST"])]))
         url = f"ws://127.0.0.1:{port}/ws"
 
         async def welcome(_):
@@ -62,7 +64,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             if frame.get("type") in ("api_request", "api_cancel"):
                 await self.worker.frame(frame)
 
-        self.provider_link = Link(url, {"kind": "galaxy", "id": "ali", "token": "provider-token", "capabilities": ["galaxy_api_v1"]}, welcome, provider_frame)
+        self.provider_link = Link(url, {"kind": "galaxy", "id": "ali", "token": "provider-token", "capabilities": ["galaxy_api_v1", "galaxy_api_claude_v1"]}, welcome, provider_frame)
         self.worker = ProviderWorker(self.provider_link, {"models": ["gpt-6-astra", "gpt-6.1-sol"]})
         self.worker.local_transport = lambda: (f"http://127.0.0.1:{gateway}/responses", "never-leak-test-key")
         self.provider_link.on_disconnect = self.worker.disconnect
@@ -72,7 +74,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
         async def frame(_):
             pass
-        self.caller = Link(url, {"kind": "galaxy", "id": "central", "token": "caller-token", "capabilities": ["galaxy_api_v1"]}, welcome, frame)
+        self.caller = Link(url, {"kind": "galaxy", "id": "central", "token": "caller-token", "capabilities": ["galaxy_api_v1", "galaxy_api_claude_v1"]}, welcome, frame)
         self.links.append(asyncio.create_task(self.caller.run()))
         await asyncio.wait_for(self.caller.connected.wait(), 3)
 
@@ -138,6 +140,54 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(.002)
                 yield wire[17:]
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    async def messages_gateway(self, request):
+        self.assertEqual(request.headers["authorization"], "Bearer never-leak-test-key")
+        self.assertEqual(request.headers["anthropic-version"], "2023-06-01")
+        body = await request.json()
+        self.requests.append(body)
+        status = 429 if body["model"] == getattr(self, "messages_fail_model", None) else getattr(self, "messages_status", 200)
+        if status != 200:
+            return JSONResponse({"error": "never-leak-test-key"}, status_code=status)
+        has_result = any(b.get("type") == "tool_result" for m in body["messages"]
+                         if isinstance(m.get("content"), list) for b in m["content"])
+        name = next((t["name"] for t in body.get("tools", []) if t["name"].endswith("__echo")), None)
+        use_tool = name and not has_result
+        nonce = re.search(r"echo_[0-9a-f]{8}", json.dumps(body["messages"]))
+        value = nonce.group(0) if nonce else "native-echo"
+        tool_answer = re.search(r"tool_result_[0-9a-f]{16}", json.dumps(body["messages"]))
+        answer = tool_answer.group(0) if tool_answer else "Native Claude received native-echo"
+        message = {"id": "msg_native", "type": "message", "role": "assistant", "content": [],
+                   "model": body["model"], "stop_reason": None, "stop_sequence": None,
+                   "usage": {"input_tokens": 10, "output_tokens": 0}}
+        content = ({"type": "tool_use", "id": "toolu_native", "name": name, "input": {}} if use_tool else
+                   {"type": "text", "text": ""})
+        delta = ({"type": "input_json_delta", "partial_json": json.dumps({"value": value})} if use_tool else
+                 {"type": "text_delta", "text": answer})
+        events = [{"type": "message_start", "message": message},
+                  {"type": "content_block_start", "index": 0, "content_block": content},
+                  {"type": "content_block_delta", "index": 0, "delta": delta},
+                  {"type": "content_block_stop", "index": 0},
+                  {"type": "message_delta", "delta": {"stop_reason": "tool_use" if use_tool else "end_turn",
+                                                        "stop_sequence": None}, "usage": {"output_tokens": 10}},
+                  {"type": "message_stop"}]
+        async def stream():
+            for event in events:
+                yield ("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n").encode()
+                if getattr(self, "messages_hold", False):
+                    await asyncio.sleep(30)
+                await asyncio.sleep(.02)
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    async def enable_claude(self):
+        model = "claude-opus-5-5"
+        self.temple.config["api_providers"]["ali"]["models"].append(model)
+        self.worker.config["models"].append(model)
+        self.worker.config["model_backends"] = {model: "claude"}
+        url, key = self.worker.local_transport()
+        self.worker.local_transport = lambda protocol="responses": (url.replace("/responses", "/messages") if protocol == "messages" else url, key)
+        await self.worker.register("test-native")
+        return model
 
     async def consume(self, body):
         opened = await self.caller.call("api_open", provider="ali", body=body)
@@ -388,3 +438,151 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["generated_requests"], 0)
         self.assertEqual(self.requests, [])
+
+    async def test_native_claude_over_provider_stream_and_actual_mcp_tool(self):
+        from cthulhu import backends
+        from cthulhu.claude_runtime import ClaudeRuntime
+        model = await self.enable_claude()
+        self.rt = backends.build({"backend": "claude", "provider": "ali", "model": model},
+                                 codex="must-not-run-codex", cwd=self.tmp.name, log_dir=Path(self.tmp.name),
+                                 sub_agents=False, api_link=self.caller)
+        self.assertIsInstance(self.rt, ClaudeRuntime)
+        calls, deltas = [], []
+        async def handler(name, args):
+            calls.append((name, args))
+            return args["value"]
+        def event(method, params):
+            if method == "item/agentMessage/delta":
+                deltas.append(params["delta"])
+        await self.rt.start()
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "personal-must-not-send",
+                                      "ANTHROPIC_BASE_URL": "https://must-not-call.invalid",
+                                      "CLAUDE_CODE_USE_BEDROCK": "1", "CTHULHU_AGENT_TOKEN": "harness-only"}):
+            thread = await self.rt.start_thread("Call echo once when asked, then report its result.",
+                                                [tool("echo", "Echo without side effects", {"value": {"type": "string"}}, ["value"])], handler)
+        env = self.rt.threads[thread].client.options.env
+        self.assertEqual(env["ANTHROPIC_API_KEY"], self.rt.api_transport.local_token)
+        self.assertEqual(env["CLAUDE_CODE_USE_BEDROCK"], "")
+        self.assertEqual(env["CTHULHU_AGENT_TOKEN"], "")
+        self.assertEqual(env["CLAUDE_CODE_MAX_RETRIES"], "0")
+        result = await self.rt.run_turn(thread, "Call echo once and report its result.", on_event=event, timeout=45)
+        self.assertEqual(result.status, "completed", (result.error, self.requests))
+        self.assertEqual(calls, [("echo", {"value": "native-echo"})])
+        self.assertIn("native-echo", result.text)
+        self.assertTrue(deltas)
+        self.assertTrue(any(i.get("tool") == "echo" for i in result.items))
+        self.assertEqual(self.rt.api_result["provider"], "ali")
+        self.assertEqual(self.rt.api_result["requested_model"], model)
+        self.assertEqual(self.rt.api_result["returned_model"], model)
+        self.assertTrue(any(b.get("type") == "tool_result" for m in self.requests[-1]["messages"]
+                            if isinstance(m.get("content"), list) for b in m["content"]))
+
+    async def test_native_messages_error_cancel_and_legacy_rejection(self):
+        from cthulhu.protocol import CallFailed
+        model = await self.enable_claude()
+        body = {"model": model, "messages": [{"role": "user", "content": "read only"}], "max_tokens": 64}
+        for status, error in [(401, "upstream_auth"), (429, "upstream_rate_limit"), (503, "upstream_unavailable")]:
+            self.messages_status = status
+            opened = await self.caller.call("api_open", provider="ali", protocol="messages", body=body)
+            part = await self.caller.call("api_next", id=opened["id"])
+            self.assertEqual(part["error"], error)
+            self.assertNotIn("never-leak-test-key", json.dumps(part))
+        self.messages_status, self.messages_hold = 200, True
+        opened = await self.caller.call("api_open", provider="ali", protocol="messages", body=body)
+        part = await self.caller.call("api_next", id=opened["id"])
+        self.assertTrue(part["data"])
+        cancelled = await self.caller.call("api_cancel", id=opened["id"])
+        self.assertTrue(cancelled["upstream_closed"])
+        self.assertNotIn(opened["id"], self.worker.tasks)
+        self.temple.galaxies["central"].capabilities.remove("galaxy_api_claude_v1")
+        with self.assertRaises(CallFailed):
+            await self.caller.call("api_open", provider="ali", protocol="messages", body=body)
+
+    async def test_registered_model_selects_claude_without_changing_defaults(self):
+        from cthulhu.protocol import agent_token
+        model = await self.enable_claude()
+        self.temple.store.upsert_agent("old_native", "native", "old_one", "central")
+        async def ignore(_): pass
+        link = Link(self.caller.url, {"kind": "agent", "id": "old_native",
+                    "token": agent_token("test-secret", "old_native", 1),
+                    "capabilities": ["galaxy_api_v1", "galaxy_api_claude_v1"]}, ignore, ignore)
+        self.links.append(asyncio.create_task(link.run()))
+        await asyncio.wait_for(link.connected.wait(), 3)
+        await self.temple.set_runtime("old_native", {"backend": "galaxy_api", "provider": "ali", "model": model})
+        self.assertEqual(self.temple.store.setting("runtimes"), {
+            "old_native": {"backend": "claude", "provider": "ali", "model": model}})
+        self.temple.agents["old_native"].capabilities.remove("galaxy_api_claude_v1")
+        with self.assertRaises(ValueError):
+            await self.temple.set_runtime("old_native", {"backend": "claude", "provider": "ali", "model": model})
+
+    async def test_native_claude_shared_six_attempts_then_configured_claude_fallback(self):
+        from cthulhu import backends
+        primary = await self.enable_claude()
+        fallback = "claude-sonnet-5-5"
+        self.worker.config["models"].append(fallback)
+        self.worker.config["model_backends"][fallback] = "claude"
+        self.temple.config["api_providers"]["ali"]["models"].append(fallback)
+        await self.worker.register("native-recovery")
+        self.messages_fail_model = primary
+        pair = self.rt = backends.Backends({"backend": "claude", "provider": "ali", "model": primary,
+                    "fallback": {"backend": "claude", "provider": "ali", "model": fallback}},
+                    codex="must-not-run-codex", cwd=self.tmp.name, log_dir=Path(self.tmp.name),
+                    sub_agents=False, api_link=self.caller)
+        threads, effects, statuses, checked = {}, [], [], []
+        async def handler(name, args):
+            effects.append(args["value"])
+            return args["value"]
+        async def attempt(rt, note):
+            if rt not in threads:
+                await rt.start()
+                threads[rt] = await rt.start_thread("Call echo then answer.",
+                    [tool("echo", "Echo", {"value": {"type": "string"}}, ["value"])], handler)
+            return await rt.run_turn(threads[rt], "Call echo once, then answer. " + note, timeout=20)
+        async def prepare(rt, result, note):
+            checked.append(await rt.recovery_checkpoint(threads[rt], True))
+            return "Previous attempt settled; no tool executed."
+        async def report(state): statuses.append(state)
+        with patch.object(backends, "RETRY_DELAYS", (0,) * 5):
+            result = await pair.recover(attempt, prepare=prepare, report=report)
+        self.assertEqual(result.status, "completed", (result.error, statuses))
+        self.assertEqual([r["model"] for r in self.requests], [primary] * 6 + [fallback] * 2)
+        self.assertEqual(effects, ["native-echo"])
+        self.assertEqual(len(checked), 6)
+        self.assertEqual(statuses[-1]["attempt"], 7)
+        self.assertTrue(statuses[-1]["fallback"])
+        self.assertEqual(pair.active_cfg["backend"], "claude")
+
+    async def test_native_canary_real_cli_and_tool_result_not_in_prompt(self):
+        from cthulhu.api_canary import run_native_claude, run
+        model = await self.enable_claude()
+        rejected = await run(self.caller, "ali", "full", [model])
+        self.assertEqual(rejected["generated_requests"], 0)
+        result = await run_native_claude(self.caller, "ali", model)
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["backend"], "claude")
+        self.assertEqual(result["runtime"], "ClaudeRuntime")
+        self.assertEqual(result["generated_requests"], 3)
+        self.assertTrue(result["echo_matches"])
+        self.assertTrue(result["native_tool_observed"])
+        self.assertTrue(result["streaming_observed"])
+        self.assertNotIn("tool_result_", json.dumps(self.requests[0]["messages"]))
+        self.assertIn("tool_result_", json.dumps(self.requests[1]["messages"]))
+        self.assertEqual(result["results"][1]["returned_model"], model)
+
+    async def test_native_auth_failure_is_terminal_without_fallback(self):
+        from cthulhu import backends
+        model = await self.enable_claude()
+        self.messages_status = 401
+        self.rt = pair = backends.Backends({"backend": "claude", "provider": "ali", "model": model,
+                    "fallback": {"backend": "claude", "provider": "ali", "model": model}},
+                    codex="must-not-run-codex", cwd=self.tmp.name, log_dir=Path(self.tmp.name),
+                    sub_agents=False, api_link=self.caller)
+        async def attempt(rt, note):
+            await rt.start()
+            thread = await rt.start_thread("Reply ready.", [], None)
+            return await rt.run_turn(thread, "Reply ready.", timeout=20)
+        result = await pair.recover(attempt)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("upstream_auth", result.error)
+        self.assertEqual(len(self.requests), 1)
+        self.assertFalse(pair.using_fallback)

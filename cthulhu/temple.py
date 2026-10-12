@@ -124,6 +124,8 @@ def validate_runtime(cfg: dict, nested: bool = False) -> dict:
     out = {k: cfg[k] for k in ("backend", "model", "effort", "service_tier", "provider") if cfg.get(k)}
     if backend == "galaxy_api" and (not isinstance(cfg.get("provider"), str) or not cfg["provider"]):
         raise ValueError("galaxy_api requires a provider galaxy ID")
+    if cfg.get("provider") and (not isinstance(cfg["provider"], str) or backend not in ("galaxy_api", "claude")):
+        raise ValueError("provider requires a supported native Galaxy API runtime")
     if "effort" not in out and out["model"] in DEFAULT_EFFORT:
         out["effort"] = DEFAULT_EFFORT[out["model"]]
     if not nested:
@@ -536,14 +538,26 @@ class Temple:
 
     async def set_runtime(self, key: str, cfg: dict | None) -> None:
         if cfg is not None:
+            cfg = dict(cfg)
+            if cfg.get("fallback"):
+                cfg["fallback"] = dict(cfg["fallback"])
+            for choice in (cfg, cfg.get("fallback") or {}):
+                if choice.get("provider") and choice.get("backend") in ("galaxy_api", "claude"):
+                    offered = next((p for p in self.api_broker.catalog() if p["id"] == choice["provider"]), None)
+                    if offered and choice.get("model") in offered["models"]:
+                        native = offered["model_backends"][choice["model"]]
+                        choice["backend"] = "claude" if native == "claude" else "galaxy_api"
+                        if native == "claude":
+                            choice.pop("service_tier", None)
             cfg = validate_runtime(cfg)
             for choice in (cfg, cfg.get("fallback") or {}):
-                if choice.get("backend") == "galaxy_api":
+                if choice.get("provider"):
                     targets = [a for a in self.store.agents(include_stopped=False)
                                if a["id"] == key or a["role"] == key]
                     for a in targets:
                         conn = self.agents.get(a["id"])
-                        if not conn or "galaxy_api_v1" not in conn.capabilities:
+                        capability = "galaxy_api_claude_v1" if choice["backend"] == "claude" else "galaxy_api_v1"
+                        if not conn or capability not in conn.capabilities:
                             raise ValueError("target agent requires the Galaxy API protocol upgrade")
                         offered = self.api_broker.catalog(a["galaxy_id"])
                         if not any(x["id"] == choice["provider"] and choice["model"] in x["models"] for x in offered):
@@ -660,7 +674,7 @@ class Temple:
             if (not ws.client or ws.client.host not in ("127.0.0.1", "::1") or
                     not hmac.compare_digest(token, maintenance_token(self.secret))):
                 raise Denied("local maintenance authentication required")
-            conn = Conn(ws, "maintenance", secrets.token_hex(8), capabilities=["galaxy_api_v1"], version=BUILD)
+            conn = Conn(ws, "maintenance", secrets.token_hex(8), capabilities=["galaxy_api_v1", "galaxy_api_claude_v1"], version=BUILD)
             self.maintainers.add(conn)
             await conn.send({"type": "welcome", "api_version": API_VERSION, "version": BUILD})
         elif kind == "galaxy":

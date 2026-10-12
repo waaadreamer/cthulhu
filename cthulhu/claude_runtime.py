@@ -25,7 +25,8 @@ MCP = "temple"
 
 
 def _env() -> dict:
-    keep = {k: v for k, v in os.environ.items() if not k.startswith("CTHULHU_")}
+    # The SDK merges this mapping with os.environ; omission would retain secrets.
+    keep = {k: "" if k.startswith("CTHULHU_") else v for k, v in os.environ.items()}
     return keep
 
 
@@ -57,9 +58,10 @@ class _Thread:
 
 class ClaudeRuntime:
     def __init__(self, cwd: str, *, model: str, effort: str | None = None, log_path: str | None = None,
-                 cli_path: str | None = None):
+                 cli_path: str | None = None, api_transport=None):
         self.cwd, self.model, self.effort = cwd, model, effort
         self.log_path, self.cli_path = log_path, cli_path
+        self.api_transport = api_transport
         self.threads: dict[str, _Thread] = {}
         self.instructions: dict[str, str] = {}   # session -> system prompt, kept for forks/resumes
         self.tool_specs: dict[str, list[dict]] = {}
@@ -70,7 +72,12 @@ class ClaudeRuntime:
         self._log = open(log_path, "a") if log_path else None
 
     async def start(self) -> None:
-        pass
+        if self.api_transport:
+            await self.api_transport.start()
+
+    @property
+    def api_result(self):
+        return self.api_transport.api_result if self.api_transport else {}
 
     async def close(self) -> None:
         for t in list(self.threads.values()):
@@ -79,6 +86,8 @@ class ClaudeRuntime:
             except Exception:
                 pass
         self.threads.clear()
+        if self.api_transport:
+            await self.api_transport.close()
 
     @property
     def alive(self) -> bool:
@@ -120,10 +129,29 @@ class ClaudeRuntime:
         tools = self.tool_specs.get(session_id, [])
         mcp, allowed = self._mcp(tools, self.handlers.get(session_id))
         self.sdk_tools[session_id] = self._last_sdk_tools
+        env = _env()
+        if self.api_transport:
+            await self.start()
+            # Native Claude tools stay local; company credentials stay on the provider.
+            # Blank inherited credentials explicitly because SDK merges parent env.
+            for key in list(env):
+                if key.startswith(("ANTHROPIC_", "CLAUDE_CODE_OAUTH")) or key in (
+                    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+                    "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+                    "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_USE_MANTLE"):
+                    env[key] = ""
+            cfg = self.api_transport.api_transport
+            env.update(ANTHROPIC_BASE_URL=cfg["base_url"].removesuffix("/v1"),
+                       ANTHROPIC_API_KEY=cfg["token"], ANTHROPIC_AUTH_TOKEN="",
+                       CLAUDE_CODE_OAUTH_TOKEN="", CLAUDE_CONFIG_DIR=cfg["home"] + "/claude",
+                       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", CLAUDE_CODE_MAX_RETRIES="0",
+                       CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK="1")
+            bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
+            env["no_proxy"] = env["NO_PROXY"] = bypass + ",127.0.0.1,localhost,::1"
         opts = ClaudeAgentOptions(
             system_prompt={"type": "preset", "preset": "claude_code", "append": self.instructions[session_id]},
             mcp_servers=mcp, allowed_tools=allowed, permission_mode="bypassPermissions",
-            model=model or self.model, effort=effort or self.effort, cwd=self.cwd, env=_env(),
+            model=model or self.model, effort=effort or self.effort, cwd=self.cwd, env=env,
             setting_sources=[], include_partial_messages=True, stderr=self._stderr,
             cli_path=self.cli_path,
         )

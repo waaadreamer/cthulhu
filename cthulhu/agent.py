@@ -73,7 +73,7 @@ class Agent:
         self.threads: dict[str, str] = {}     # backend label -> thread id
         self.loaded: set[str] = set()         # threads open in the current runtime instances
         self.last_turn: tuple | None = None   # (runtime, thread) of the last main-thread turn
-        self.link = Link(temple_url, {"kind": "agent", "id": self.id, "token": launch["token"], "capabilities": ["galaxy_api_v1", "drain_v1"], "version": BUILD},
+        self.link = Link(temple_url, {"kind": "agent", "id": self.id, "token": launch["token"], "capabilities": ["galaxy_api_v1", "galaxy_api_claude_v1", "drain_v1"], "version": BUILD},
                          self._on_welcome, self._on_frame, tls_pin=tls_pin)
         self.build_kw["api_link"] = self.link
         self.backends = Backends(self.default_runtime, **self.build_kw)

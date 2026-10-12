@@ -139,14 +139,14 @@ function BackendFields({ cfg, models, providers, onChange }: { cfg: RuntimeCfg; 
           </button>
         ))}
       </div>
-      {cfg.backend === 'galaxy_api' && (
+      {(cfg.backend === 'galaxy_api' || cfg.provider) && (
         <Field label="在线 API 星系">
           <Select value={cfg.provider ?? ''} options={providers.map(p => p.id)}
             onChange={(v) => onChange({ ...cfg, provider: v, model: providers.find(p => p.id === v)?.models[0] ?? '' })} />
         </Field>
       )}
       <Field label="模型">
-        <ModelInput value={cfg.model} options={cfg.backend === 'galaxy_api' ? providers.find(p => p.id === cfg.provider)?.models ?? [] : models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />
+        <ModelInput value={cfg.model} options={cfg.provider ? providers.find(p => p.id === cfg.provider)?.models ?? [] : models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />
       </Field>
       <Field label="effort">
         <Select value={cfg.effort ?? ''} options={EFFORTS} onChange={(v) => onChange({ ...cfg, effort: v || undefined })} />

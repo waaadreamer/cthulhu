@@ -116,6 +116,28 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await self.open(**{field: "private"})
 
+    async def test_claude_catalog_requires_native_protocol_and_retains_tools(self):
+        model = "claude-opus-5-5"
+        self.provider.capabilities.append("galaxy_api_claude_v1")
+        self.caller.capabilities.append("galaxy_api_claude_v1")
+        self.temple.config["api_providers"]["ali"]["models"].append(model)
+        self.broker.register(self.provider, {"version": 1, "protocol": "responses",
+                                            "models": [model], "model_backends": {model: "claude"}})
+        self.assertEqual(self.broker.catalog("central")[0]["model_backends"], {model: "claude"})
+        with self.assertRaises(Denied):
+            await self.open(model=model)
+        body = {"model": model, "messages": [{"role": "user", "content": [{"type": "tool_result",
+                "tool_use_id": "toolu_1", "content": "already executed"}]}], "max_tokens": 64,
+                "tools": [{"name": "echo", "input_schema": {"type": "object"}}]}
+        await self.broker.open(self.caller, {"provider": "ali", "protocol": "messages", "body": body})
+        sent = self.provider.send.call_args.args[0]
+        self.assertEqual(sent["protocol"], "messages")
+        self.assertEqual(sent["body"]["messages"], body["messages"])
+        self.assertEqual(sent["body"]["tools"], body["tools"])
+        with self.assertRaises(ValueError):
+            await self.broker.open(self.caller, {"provider": "ali", "protocol": "messages",
+                                                "body": body | {"base_url": "https://elsewhere"}})
+
 
 class RuntimeSafetyTests(unittest.IsolatedAsyncioTestCase):
     def runtime(self, root):
@@ -160,6 +182,19 @@ class DrainTests(unittest.TestCase):
 
 
 class ProviderConfigTests(unittest.TestCase):
+    def test_private_claude_settings_are_consumed_only_on_provider(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "settings.json"
+            path.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://company.example/anthropic",
+                                                "ANTHROPIC_AUTH_TOKEN": "private-fixture-token"}}))
+            path.chmod(0o600)
+            worker = ProviderWorker(None, {"claude_config_file": str(path)})
+            self.assertEqual(worker.local_transport("messages"),
+                             ("https://company.example/anthropic/v1/messages", "private-fixture-token"))
+            path.chmod(0o644)
+            with self.assertRaises(ValueError):
+                worker.local_transport("messages")
+
     def test_existing_private_toml_stays_local(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "config.toml"

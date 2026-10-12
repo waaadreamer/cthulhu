@@ -23,7 +23,7 @@ RETRY_DELAYS = (0.5, 1, 2, 3, 5)  # Five retries AFTER the first attempt, on eac
 
 def recoverable(error: str | None) -> bool:
     error = (error or '').lower()
-    if any(s in error for s in ('cancelled', 'canceled', 'unauthorized', 'forbidden', '401', '403',
+    if any(s in error for s in ('cancelled', 'canceled', 'unauthorized', 'forbidden', 'upstream_auth', '401', '403',
                                'invalid api key', 'invalid argument', 'permission denied',
                                'context length', 'too_large', 'not found', 'unsupported')):
         return False
@@ -31,7 +31,7 @@ def recoverable(error: str | None) -> bool:
         'connection', 'transport', 'stream', 'temporar', 'overloaded', 'rate limit', '429',
         '408', '500', '502', '503', '504', '529', 'backpressure', 'econnreset', 'offline', 'unavailable', 'app-server exited',
         'app-server is not running', 'session ended without a result', 'provider_error',
-        'workspace routing discovery failed'))
+        'workspace routing discovery failed', 'upstream_rate_limit'))
 
 # Codex models whose default reasoning effort the harness pins explicitly.
 DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
@@ -46,8 +46,14 @@ def build(cfg: dict, *, codex: str, cwd: str, log_dir, sub_agents: bool, api_lin
         raise ValueError(f"unknown backend {backend}")
     if backend == "claude":
         from .claude_runtime import ClaudeRuntime
+        transport = None
+        if cfg.get("provider"):
+            from .galaxy_api_runtime import GalaxyAPITransport
+            transport = GalaxyAPITransport(link=api_link, provider=cfg["provider"], state_dir=log_dir,
+                                           model=cfg["model"], protocol="messages")
         return ClaudeRuntime(cwd, model=cfg.get("model") or "claude-opus-5-5", effort=cfg.get("effort"),
-                             log_path=str(log_dir / "claude.log"), cli_path=cfg.get("cli_path"))
+                             log_path=str(log_dir / "claude.log"), cli_path=cfg.get("cli_path"),
+                             api_transport=transport)
     if backend == "galaxy_api":
         if not isinstance(cfg.get("provider"), str) or not cfg["provider"] or not cfg.get("model"):
             raise ValueError("galaxy_api requires an explicit provider and model")
@@ -65,8 +71,8 @@ def build(cfg: dict, *, codex: str, cwd: str, log_dir, sub_agents: bool, api_lin
 def label(cfg: dict | None) -> str:
     if not cfg:
         return ""
-    if cfg.get("backend") == "galaxy_api":
-        return f"galaxy_api:{cfg.get('provider')}:{cfg.get('model')}"
+    if cfg.get("provider"):
+        return f"{cfg.get('backend')}:{cfg.get('provider')}:{cfg.get('model')}"
     return f"{cfg.get('backend', 'codex')}:{cfg.get('model') or 'default'}"
 
 

@@ -1,4 +1,4 @@
-"""Versioned Responses transport over existing authenticated galaxy links.
+"""Versioned native model transport over existing authenticated galaxy links.
 
 Company transport configuration and credentials are consumed only by ProviderWorker.
 Broker holds bounded, transient streams and a public, allowlisted capability catalog.
@@ -35,21 +35,31 @@ ERRORS = {"provider_disconnected", "caller_disconnected", "timeout", "cancelled"
           "upstream_auth", "upstream_rate_limit", "upstream_rejected", "upstream_unavailable",
           "invalid_stream", "too_large", "backpressure", "provider_error"}
 NAME = re.compile(r"^[a-zA-Z0-9_./:-]{1,128}$")
+BETA = re.compile(r"^[a-zA-Z0-9,._-]{0,2048}$")
 REQUEST_FIELDS = {"model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls",
                   "reasoning", "text", "service_tier", "max_output_tokens", "include", "stream",
                   "store", "truncation", "prompt_cache_key", "prompt_cache_retention",
                   "temperature", "top_p", "client_metadata"}
+MESSAGE_FIELDS = {"model", "messages", "system", "tools", "tool_choice", "max_tokens", "stream",
+                  "thinking", "output_config", "temperature", "top_p", "top_k", "stop_sequences",
+                  "metadata", "service_tier", "context_management"}
 
 
 def json_size(value) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode())
 
 
-def request_body(body: dict, models: list[str]) -> dict:
+def request_body(body: dict, models: list[str], protocol="responses") -> dict:
     if not isinstance(body, dict) or json_size(body) > MAX_REQUEST:
         raise ValueError("invalid API request size")
     if body.get("model") not in models:
         raise Denied("model not offered")
+    if protocol == "messages":
+        if set(body) - MESSAGE_FIELDS or not isinstance(body.get("messages"), list):
+            raise ValueError("unsupported Messages request fields")
+        return body | {"stream": True}
+    if protocol != "responses":
+        raise ValueError("unsupported provider protocol")
     if body.get("service_tier", "default") not in ("default", "auto", "fast", "priority"):
         raise ValueError("unsupported requested service tier")
     unknown = set(body) - REQUEST_FIELDS
@@ -68,6 +78,7 @@ class Stream:
     provider: object
     model: str
     tier: str
+    protocol: str = "responses"
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(QUEUE_SIZE))
     total: int = 0
     ended: bool = False
@@ -99,12 +110,20 @@ class ProviderBroker:
         models = sorted(set(offered) & set(policy.get("models", [])))
         if not models:
             raise Denied("no permitted models")
+        backends = p.get("model_backends") or {}
+        if not isinstance(backends, dict) or any(k not in offered or v not in ("codex", "claude")
+                                                for k, v in backends.items()):
+            raise ValueError("invalid model backend catalog")
+        if "claude" in backends.values() and "galaxy_api_claude_v1" not in conn.capabilities:
+            raise Denied("provider lacks native Claude capability")
         self.providers[conn.id] = {"conn": conn, "models": models, "version": API_VERSION,
+                                   "model_backends": {m: backends.get(m, "codex") for m in models},
                                    "revision": str(p.get("revision", ""))[:64]}
         return {"version": API_VERSION, "models": models}
 
     def catalog(self, consumer: str | None = None) -> list[dict]:
         return [{"id": gid, "models": item["models"], "protocol": "responses", "version": API_VERSION,
+                 "model_backends": item["model_backends"],
                  "revision": item["revision"], "requested_tiers": ["default", "priority", "fast"],
                  "fast_verified": False}
                 for gid, item in sorted(self.providers.items())
@@ -134,18 +153,29 @@ class ProviderBroker:
         offered = next((x for x in self.catalog(consumer) if x["id"] == gid), None)
         if not offered:
             raise Denied("eligible API provider is not online")
-        body = request_body(p.get("body"), offered["models"])
+        protocol = p.get("protocol", "responses")
+        if protocol == "messages" and "galaxy_api_claude_v1" not in conn.capabilities:
+            raise Denied("caller lacks native Claude capability")
+        body = request_body(p.get("body"), offered["models"], protocol)
+        backend = offered["model_backends"][body["model"]]
+        if protocol != ("messages" if backend == "claude" else "responses"):
+            raise Denied("model requires its native backend protocol")
+        beta = p.get("beta", "")
+        if not isinstance(beta, str) or not BETA.fullmatch(beta):
+            raise ValueError("invalid Anthropic beta header")
         provider = self.providers[gid]["conn"]
         if (len(self.streams) >= MAX_STREAMS or
                 sum(s.caller is conn for s in self.streams.values()) >= MAX_CALLER or
                 sum(s.provider is provider for s in self.streams.values()) >= MAX_PROVIDER):
             raise ValueError("API capacity exhausted")
         sid = secrets.token_hex(16)
-        s = self.streams[sid] = Stream(sid, conn, provider, body["model"], body.get("service_tier", "default"))
+        s = self.streams[sid] = Stream(sid, conn, provider, body["model"], body.get("service_tier", "default"), protocol)
         s.timer = asyncio.create_task(self.expire(s))
-        if not await provider.send({"type": "api_request", "version": API_VERSION, "id": sid, "body": body}):
+        if not await provider.send({"type": "api_request", "version": API_VERSION, "id": sid, "body": body,
+                                    "protocol": protocol, "beta": beta}):
             await self.finish(s, "provider_disconnected")
-        return {"id": sid, "provider": gid, "requested_model": s.model, "requested_tier": s.tier}
+        return {"id": sid, "provider": gid, "backend": backend,
+                "requested_model": s.model, "requested_tier": s.tier}
 
     async def expire(self, s):
         await asyncio.sleep(STREAM_TTL)
@@ -269,11 +299,16 @@ class ProviderWorker:
         self.generation = 0
 
     async def register(self, revision: str):
-        self.local_transport()
+        backends = {self.config.get("model_backends", {}).get(m, "codex") for m in self.config.get("models", [])}
+        if "codex" in backends:
+            self.local_transport()
+        if "claude" in backends:
+            self.local_transport("messages")
         self.ssl_context()
         models = self.config.get("models", [])
         await self.link.call("api_register", version=API_VERSION, protocol="responses",
-                             models=models, revision=revision, timeout=15)
+                             models=models, model_backends=self.config.get("model_backends", {}),
+                             revision=revision, timeout=15)
 
     async def disconnect(self):
         self.generation += 1
@@ -303,7 +338,8 @@ class ProviderWorker:
         if len(self.tasks) >= MAX_PROVIDER:
             await self.link.call("api_push", id=sid, seq=0, error="backpressure", timeout=10)
             return
-        task = asyncio.create_task(self.run(sid, frame.get("body"), self.generation))
+        task = asyncio.create_task(self.run(sid, frame.get("body"), self.generation,
+                                            frame.get("protocol", "responses"), frame.get("beta", "")))
         self.tasks[sid] = task
         task.add_done_callback(lambda _: self.tasks.pop(sid, None))
 
@@ -314,9 +350,16 @@ class ProviderWorker:
             raise ValueError("provider CA store is empty")
         return context
 
-    def local_transport(self):
+    def local_transport(self, protocol="responses"):
         cfg = self.config
-        if cfg.get("codex_config_file"):
+        if protocol == "messages":
+            path = Path(cfg["claude_config_file"])
+            if not path.is_absolute() or path.stat().st_mode & 0o077:
+                raise ValueError("provider config file must be private")
+            local = json.loads(path.read_text()).get("env", {})
+            base_url = local.get("ANTHROPIC_BASE_URL", "")
+            key = local.get("ANTHROPIC_AUTH_TOKEN") or local.get("ANTHROPIC_API_KEY", "")
+        elif cfg.get("codex_config_file"):
             # Read existing provider-local configuration without exporting it.
             path = Path(cfg["codex_config_file"])
             if not path.is_absolute() or path.stat().st_mode & 0o077:
@@ -339,9 +382,10 @@ class ProviderWorker:
             raise ValueError("invalid provider URL")
         if not key or not isinstance(key, str) or any(c.isspace() for c in key):
             raise ValueError("invalid provider key")
-        return base_url.rstrip("/") + "/responses", key
+        suffix = "/v1/messages" if protocol == "messages" else "/responses"
+        return base_url.rstrip("/") + suffix, key
 
-    async def run(self, sid, raw_body, generation):
+    async def run(self, sid, raw_body, generation, protocol="responses", beta=""):
         try:
             import httpx
         except ImportError:
@@ -356,13 +400,21 @@ class ProviderWorker:
             seq += 1
 
         try:
-            body = request_body(raw_body, self.config["models"])
-            url, key = self.local_transport()
+            body = request_body(raw_body, self.config["models"], protocol)
+            backend = self.config.get("model_backends", {}).get(body["model"], "codex")
+            if protocol != ("messages" if backend == "claude" else "responses"):
+                raise ValueError("model requires its native backend protocol")
+            url, key = self.local_transport("messages") if protocol == "messages" else self.local_transport()
+            headers = {"Authorization": f"Bearer {key}", "Accept": "text/event-stream"}
+            if protocol == "messages":
+                headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+                if beta and BETA.fullmatch(beta):
+                    headers["anthropic-beta"] = beta
             # Provider-local proxy only; never sent to temple or accepted from a caller.
             async with httpx.AsyncClient(proxy=self.config.get("proxy"), trust_env=False, verify=self.ssl_context(),
                                          follow_redirects=False, timeout=httpx.Timeout(IDLE_TIMEOUT, connect=15)) as client:
                 async with client.stream("POST", url, json=body,
-                                         headers={"Authorization": f"Bearer {key}", "Accept": "text/event-stream"}) as response:
+                                         headers=headers) as response:
                     if response.status_code != 200:
                         code = ("upstream_auth" if response.status_code in (401, 403) else
                                 "upstream_rate_limit" if response.status_code == 429 else
@@ -374,6 +426,8 @@ class ProviderWorker:
                         return
                     pending = b""
                     complete = False
+                    message_started = False
+                    message_stopped = False
                     async for chunk in response.aiter_bytes():
                         pending += chunk
                         if len(pending) > MAX_EVENT:
@@ -389,16 +443,26 @@ class ProviderWorker:
                             event = json.loads(data)
                             kind = event.get("type", "")
                             if kind in ("error", "response.failed", "response.incomplete"):
-                                await push(error="upstream_rejected")
+                                category = (event.get("error") or {}).get("type")
+                                code = {"authentication_error": "upstream_auth", "permission_error": "upstream_auth",
+                                        "rate_limit_error": "upstream_rate_limit", "overloaded_error": "upstream_unavailable",
+                                        "api_error": "upstream_unavailable"}.get(category, "upstream_rejected")
+                                await push(error=code)
                                 return
                             # Credential redaction is defense in depth against an upstream echo.
                             encoded = json.dumps(event, ensure_ascii=False).replace(key, "[redacted]").encode()
-                            wire = b"data: " + encoded + b"\n\n"
+                            wire = (("event: " + kind + "\n").encode() if protocol == "messages" else b"") + b"data: " + encoded + b"\n\n"
                             meta = {}
                             if kind == "response.completed":
                                 terminal = event.get("response", {})
                                 meta = {k: terminal.get(source) or "unknown"
                                         for k, source in (("returned_model", "model"), ("returned_tier", "service_tier"))}
+                            elif protocol == "messages" and kind == "message_start":
+                                message_started = True
+                                meta = {"returned_model": event.get("message", {}).get("model") or "unknown",
+                                        "returned_tier": "unknown"}
+                            elif protocol == "messages" and kind == "message_delta":
+                                message_stopped = bool(event.get("delta", {}).get("stop_reason"))
                             for offset in range(0, len(wire), MAX_CHUNK):
                                 await push(data=base64.b64encode(wire[offset:offset + MAX_CHUNK]).decode(), meta=meta)
                             if kind == "response.completed":
@@ -406,6 +470,9 @@ class ProviderWorker:
                                     await push(error="invalid_stream")
                                     return
                                 complete = True
+                                break
+                            if protocol == "messages" and kind == "message_stop":
+                                complete = message_started and message_stopped
                                 break
                         if complete:
                             break

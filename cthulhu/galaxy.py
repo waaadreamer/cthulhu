@@ -81,7 +81,7 @@ class Galaxy:
         self.procs: dict[str, Proc] = {}
         from .deploy import local_info
         self.link = Link(config["temple_ws"], {"kind": "galaxy", "id": self.id, "token": config["token"],
-                                                "capabilities": ["galaxy_api_v1", "deploy_v1", "deploy_recovery_v1"], "version": BUILD,
+                                                "capabilities": ["galaxy_api_v1", "galaxy_api_claude_v1", "deploy_v1", "deploy_recovery_v1"], "version": BUILD,
                                                 "deploy": local_info()},
                          self._welcome, self._frame, tls_pin=config.get("tls_pin"))
 
