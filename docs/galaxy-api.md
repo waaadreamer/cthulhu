@@ -92,9 +92,10 @@ Codex继续执行本机原有工具；Ali只推理，不获得跨星系工具执
 工具定义、function_call、function_call_output、完整历史与加密reasoning项由协议透传，
 不依赖previous_response_id。Codex的provider HTTP/stream重试设为0。
 
-失败回退采用保守边界：仅在请求尚未可能发送时允许自动重试个人后备。
-api_open开始后即视为可能已发送，即使响应尚未出现也不自动重放；工具执行后更不重放。
-失败保留明确状态，人工可在了解执行情况后发起新任务。后备使用独立线程和backend标签。
+失败恢复复用共享策略：可重试错误先在当前源执行初次尝试加5次重试，再使用已配置后备。
+再次推理前必须等待原执行及工具结果落定，读取持久化结果和已检查上下文；不重放消息入站或工具调用。
+认证、权限等不可重试错误直接失败；取消立即停止恢复。原执行状态无法确认时，不发起新的推理。
+后备使用独立线程和backend标签。
 回退保持30分钟后，后续任务尝试主后端并重新验证在线能力。
 这不提供任意shell工具的业务exactly-once保证，也不承诺取消后零计费。
 
@@ -117,8 +118,11 @@ venv/bin/python -m cthulhu.api_canary --config /etc/cthulhu/temple.json --provid
 
 维护连接限定loopback，用独立HMAC域认证，仅允许状态、排空和API canary，不允许消息、
 spawn、任意RPC或provider登记。没有冒用现存agent/galaxy连接。
-canary缺少provider时不生成；full最多5个公司请求（两模型短文本、工具及续轮、单请求取消），
+canary缺少provider时不生成；默认full最多5个公司请求（两模型短文本、工具及续轮、单请求取消），
 echo仅在内存执行一次。生产provider的WS不做故障注入；断开provider的回归在隔离测试完成。
+默认检查两个GPT模型；可重复传入 `--model <已发布模型名>` 指定检查范围。
+指定单模型时，full共4个请求，文本、工具调用、携带工具结果的续轮和取消均使用该模型。
+任何指定模型未在目录发布时，整次检查生成0个请求；报告保留请求模型与上游返回模型，不能据别名推断实际模型。
 跨星系text canary可经维护连接maintenance_canary指定已升级galaxy，固定最多2个短请求。
 不接受远程shell或任意脚本。
 

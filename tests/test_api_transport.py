@@ -364,3 +364,27 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result["tool_ledger"]), 1)
         self.assertTrue(result["results"][-1]["started_event_observed"])
         self.assertTrue(result["results"][-1]["upstream_closed"])
+
+    async def test_canary_selected_model_stream_tools_attribution_and_cancel(self):
+        from cthulhu.api_canary import run
+        model = "fixture-opus"
+        self.temple.config["api_providers"]["ali"]["models"].append(model)
+        self.worker.config["models"].append(model)
+        await self.worker.register("test")
+        result = await run(self.caller, "ali", "full", [model])
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["generated_requests"], 4)
+        self.assertEqual(result["echo_executions"], 1)
+        self.assertEqual({r["model"] for r in self.requests}, {model})
+        for check in result["results"][:-1]:
+            self.assertEqual(check["requested_model"], model)
+            self.assertEqual(check["returned_model"], "openai/" + model)
+            self.assertEqual(check["provider"], "ali")
+        self.assertTrue(result["results"][-1]["upstream_closed"])
+
+    async def test_canary_missing_selected_model_sends_nothing(self):
+        from cthulhu.api_canary import run
+        result = await run(self.caller, "ali", "full", ["gpt-6-astra", "not-advertised"])
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["generated_requests"], 0)
+        self.assertEqual(self.requests, [])
