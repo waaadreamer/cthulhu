@@ -24,8 +24,9 @@ venv/bin/python -m cthulhu.feishu_convert \
 - 审阅文件为每个选中线程固定完整源 JSONL 的 SHA256；哈希不符拒绝。首行必须是匹配 thread ID 的 `session_meta`。源哈希与真实 catalog scope 列表进入导入包。
 - 支持有 `turn_id` 的 `event_msg/task_started`，以及相同 ID 的 `task_complete`、`task_failed`、`turn_aborted` 终结记录。未知形式、缺少终结记录或相互交叠的边界拒绝，不猜测状态。这里验证的是下方虚构 fixture 所代表的格式，尚未读取真实 rollout 验证全部历史兼容性。
 - 文字来源引用支持 `event_msg/user_message`、`event_msg/agent_message`，以及 `response_item/message` 的 user/assistant 文本块。system/developer、工具、环境、provider 字段及多媒体块不能作为文字来源；未引用的记录不进入输出。尚未支持的历史格式须先补充经审查的解析测试，不能通过伪造边界绕过。
+- 引用的用户消息还必须通过原桥接包装校验：只接受唯一完整 `\n\n## user_message\n\n` 分隔行，随后按固定顺序解析顶层 JSON 段。系统前缀中的示例不作来源证据；JSON 字符串中的同名标签或分隔符只是文本。重复段、重复 JSON 键、嵌套/不完整包装及不同发送者、聊天、话题均拒绝。`user_input.attachments` 非空则暂缓，不能仅丢弃附件元数据后声称文本等价。最终输出仍只采用独立审阅文件，不自动复制解析出的文本。
 - 导入回合 ID 来自源 `turn_id`，在线程内必须唯一；时间取终结记录的带时区 ISO 时间并转为 Unix 秒。跨线程按时间、线程 ID、回合 ID 稳定排序。失败或中断若没有 assistant 消息，可用空 `reply_lines` 和空 `reply`，不伪造回答。
-- 超过 10000 回合或 32 MiB 输出直接拒绝，不截断；每个输入文件也有 32 MiB 保守上限。全部源线程都需要哈希，审阅文本可只包含该 scope 内实际选定的历史回合，不会自动导出未审阅回合。
+- 超过 10000 回合或 32 MiB 输出直接拒绝，不截断；配置、目录和审阅文件仍限制为 32 MiB。源 JSONL 可大于 32 MiB，程序逐行读取并校验完整文件哈希，只保留审阅所引用的记录和回合边界行号；单行超过 32 MiB 则拒绝。全部源线程都需要哈希，审阅文本可只包含该 scope 内实际选定的历史回合，不会自动导出未审阅回合。
 
 ## 显式审阅文件
 
