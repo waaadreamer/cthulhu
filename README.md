@@ -145,7 +145,7 @@ blob 里包含星系 token，按密码对待。安装脚本会做这些事：
 
 ```bash
 python3 -m unittest discover -s tests -v      # 端到端：真实 temple/galaxy/agent 进程 + 假 codex
-cd web && npm install && npm run build        # 前端构建到 cthulhu/static
+cd web && npm install && npm run build        # 前端构建到 cthulhu/static；线上检出目录有 .served-checkout 标记时拒绝构建，须在另一份 clone 构建后走托管部署
 ```
 
 ## TODO
