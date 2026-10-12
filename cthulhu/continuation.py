@@ -61,6 +61,7 @@ class Continuations:
                                 "(SELECT id FROM agents WHERE role='shub') ORDER BY created_at DESC LIMIT 1", (task_id,))
         report = store.one("SELECT * FROM messages WHERE task_id=? AND sender IN "
                            "(SELECT id FROM agents WHERE role='shub') AND status IS NOT NULL "
+                           "AND receiver IN (SELECT id FROM agents WHERE role='azathoth') "
                            "ORDER BY created_at DESC LIMIT 1", (task_id,))
         owner_blocked = bool(report and report['status'] == 'blocked' and
                              (not instruction or report['created_at'] > instruction['created_at']))
@@ -148,11 +149,24 @@ class Continuations:
                         continue
                     if rec.get('phase') == 'blocked' and rec.get('instruction_id') != (row['instruction'] or {}).get('id'):
                         rec['phase'] = 'waiting' if shub else 'responded'
-                    completed = any(r.get('last_task') == task['id'] and r.get('last_status') == 'completed' and
-                                    r.get('activity') and (r.get('finished_at') or 0) > rec.get('at',0) for r in workers)
+                    # Tool activity is not a receipt: a completed text result may
+                    # be substantive, and a worker may already be on later work.
+                    evidence_at = [r['finished_at'] for r in workers
+                                   if r.get('last_task') == task['id'] and r.get('last_status') == 'completed'
+                                   and (r.get('activity') or (r.get('last_reply') or '').strip())
+                                   and (r.get('finished_at') or 0) > rec.get('at', 0)]
+                    if shub:
+                        evidence_at.extend(m['created_at'] for m in t.store.q(
+                            "SELECT created_at FROM messages WHERE task_id=? AND receiver=? "
+                            "AND sender IN (SELECT id FROM agents WHERE role IN ('old_one','ghroth','nyarlathotep')) "
+                            "AND kind='message' AND state='handled' AND trim(text)!='' AND created_at>?",
+                            (task['id'], target, rec.get('at', 0))))
+                    # Reconcile this collection from its consumed evidence and
+                    # subsequent report, regardless of unrelated current work.
+                    completed = any(not shub or (row['report'] and row['report']['created_at'] >= at)
+                                    for at in evidence_at)
                     active = any(r.get('activity_task') == task['id'] and (r.get('last_activity_at') or 0) > rec.get('at',0) for r in workers)
-                    reported = row['report'] and row['report']['created_at'] > rec.get('at', 0)
-                    if rec.get('phase') in ('sent','escalated') and ((completed and (not shub or reported)) or (not shub and active)):
+                    if rec.get('phase') in ('sent','escalated') and (completed or (not shub and active)):
                         rec['phase'] = 'waiting' if shub else 'responded'
                     if rec.get('phase') != 'sent':
                         continue

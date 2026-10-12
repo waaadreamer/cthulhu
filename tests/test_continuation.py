@@ -85,6 +85,48 @@ class ContinuationServer(HarnessServer):
         store.db.close()
 
 
+class ReconciliationServer(HarnessServer):
+    patrol_interval = .3
+
+    def test_patrol_reconciles_text_result_while_next_work_runs_and_keeps_missing_collection(self):
+        store = Store(self.dir / 'temple.db')
+        task = store.add_task('RECONCILE_RECEIPTS')['id']
+        def dispatch(text):
+            return self.chat('az', 'CALL temple_send ' + json.dumps({'to':'sh', 'task_id':task, 'text':text}))
+        def spawn(name, work):
+            dispatch('CALL temple_spawn ' + json.dumps({'name':name,'galaxy_id':'g1',
+                     'task_id':task,'task':work,'skill':'Isolated receipt reconciliation fixture'}))
+            return self.wait(lambda: next(a for a in store.agents() if a['name']==name))
+        busy = spawn('next phase worker', 'Existing next phase')
+        dispatch('CALL temple_send '+json.dumps({'to':busy['id'],'task_id':task,'text':'SLEEP 30'}))
+        self.wait(lambda: next(a for a in self.api('directory')['agents'] if a['id']==busy['id'])['state']=='working')
+        missing = store.add_task('UNFINISHED_COLLECTION')['id']
+        at = time.time()
+        records = store.setting('continuations') or {}
+        for tid in (task, missing):
+            records[tid] = {'sh':{'phase':'escalated','at':at,'deadline':at-1,
+                'message_id':'fixture_reminder_'+tid,'text':'Collect existing results'}}
+        store.set_setting('continuations',records)
+        source = spawn('text receipt worker', 'Return verified existing receipt')
+        dispatch('CALL temple_send '+json.dumps({'to':source['id'],'task_id':task,
+                  'text':'REPLY Verified SOURCE_HASH and completed regression receipts'}))
+        result = self.wait(lambda: next(r for r in store.turn_log(source['id']) if r['reply'].startswith('Verified SOURCE_HASH')))
+        self.assertEqual(result['status'],'completed')
+        dispatch('CALL temple_send '+json.dumps({'to':'az','task_id':task,'status':'progress',
+                  'text':'Verified collected source/hash/regression receipts; next phase is independently running'}))
+        owners = len(store.q("SELECT id FROM messages WHERE sender='owner'"))
+        self.wait(lambda: (store.setting('continuations') or {})[task]['sh']['phase']=='waiting')
+        time.sleep(1)
+        self.assertEqual((store.setting('continuations') or {})[missing]['sh']['phase'],'escalated')
+        self.assertEqual(next(a for a in self.api('directory')['agents'] if a['id']==busy['id'])['state'],'working')
+        self.assertFalse([m for m in store.messages(task_id=task) if m['sender']=='yo' and m['receiver']=='sh'])
+        self.assertEqual(len(store.q("SELECT id FROM messages WHERE sender='owner'")),owners)
+        print('RECONCILIATION_SERVER '+json.dumps({'task':task,'phase':'waiting','missing_task':missing,
+              'missing_phase':'escalated','busy_worker':busy['id'],'new_reminder_sends':0,'new_owner_messages':0}),flush=True)
+        for tid in (task, missing): store.set_task(tid,'done')
+        store.db.close()
+
+
 class SendGuards(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -147,6 +189,48 @@ class SendGuards(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rec()['phase'],'waiting')
         self.t.store.mark(self.rec()['message_id'],'handled')
         self.assertNotIn('suppressed',await self.send())
+
+    async def test_text_only_completed_collection_reconciles_without_dummy_activity(self):
+        await self.send()
+        records=self.c.records();records[self.task]['shub']['phase']='escalated'
+        self.t.store.set_setting('continuations',records)
+        self.result.update(last_status='completed',activity=[],last_reply='Verified source hash and test receipts',finished_at=time.time())
+        self.t.store.add_message('shub','azathoth','Collection receipts verified; next phase continues',task_id=self.task,status='progress')
+        await self.c.scan('yog')
+        self.assertEqual(self.rec()['phase'],'waiting')
+
+    async def test_consumed_collection_and_later_report_survive_worker_moving_on(self):
+        await self.send()
+        records=self.c.records();records[self.task]['shub']['phase']='escalated'
+        self.t.store.set_setting('continuations',records)
+        evidence=self.t.store.add_message('old','shub','Verified source/hash/test receipts',task_id=self.task)
+        self.t.store.mark(evidence['id'],'handled')
+        self.t.store.add_message('shub','azathoth','Received and verified collection; activation now in progress',task_id=self.task,status='progress')
+        self.result.update(current_task=self.task,state='working',last_task='later-task',activity=[])
+        await self.c.scan('yog')
+        self.assertEqual(self.rec()['phase'],'waiting')
+        self.assertEqual((await self.send())['suppressed'],'in_flight') # Healthy current work still protected.
+
+    async def test_missing_unconsumed_wrong_task_and_unreported_evidence_stay_escalated(self):
+        await self.send()
+        records=self.c.records();records[self.task]['shub']['deadline']=0
+        self.t.store.set_setting('continuations',records)
+        self.result.update(last_status='failed',activity=['attempted'],last_reply='collection failed',finished_at=time.time())
+        self.t.store.add_message('shub','azathoth','Still waiting for collection',task_id=self.task,status='progress')
+        await self.c.scan('yog')
+        self.assertEqual(self.rec()['phase'],'escalated')
+        other=self.t.store.add_task('other')['id']
+        wrong=self.t.store.add_message('old','shub','Other task evidence',task_id=other)
+        self.t.store.mark(wrong['id'],'handled')
+        evidence=self.t.store.add_message('old','shub','Actual task result',task_id=self.task)
+        await self.c.scan('yog')
+        self.assertEqual(self.rec()['phase'],'escalated')
+        self.t.store.mark(evidence['id'],'handled')
+        await self.c.scan('yog') # Existing report predates this result.
+        self.assertEqual(self.rec()['phase'],'escalated')
+        self.t.store.add_message('shub','azathoth','Actual collection now verified',task_id=self.task,status='progress')
+        await self.c.scan('yog')
+        self.assertEqual(self.rec()['phase'],'waiting')
 
     async def test_task_local_active_pending_done_and_owner_blockers(self):
         self.result.update(state='working',current_task=self.task)
