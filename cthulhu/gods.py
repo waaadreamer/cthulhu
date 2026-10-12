@@ -521,9 +521,24 @@ class Yog(MemoryAgent):
         return await super().call_tool(name, args)
 
     async def patrol(self) -> None:
+        started = time.time()
+        log.info("patrol started at=%.3f", started)
+        try:
+            await self._patrol()
+        finally:
+            log.info("patrol ended start=%.3f end=%.3f", started, time.time())
+
+    async def _patrol(self) -> None:
         scan = await self.link.call("continuation_tasks")
         snapshot, tasks = scan["agents"], scan["tasks"]
+        log.info("patrol inputs %s", json.dumps([{
+            'task_id': t['task']['id'], 'revision': t['revision'], 'phase': t['continuation'].get('phase'),
+            'check_at': t['continuation'].get('check_at'), 'source': t['continuation'].get('source'),
+            'active': t['active'], 'pending': t['pending'], 'owner_blocked': t['owner_blocked'],
+            'executors': [{k: e.get(k) for k in ('agent_id', 'state', 'last_task', 'finished_at', 'last_activity_at')}
+                          for e in t['executors']]} for t in tasks], ensure_ascii=False))
         if not snapshot and not tasks:
+            log.info("patrol suppressed: empty snapshot")
             return
         ghroth = next((s for s in snapshot if s.get("role") == Role.GHROTH), None)
         ghroth_busy = bool(ghroth and ghroth.get("state") == "working")
@@ -535,6 +550,7 @@ class Yog(MemoryAgent):
         busy = any(s.get("state") == "working" for s in snapshot)
         if not ghroth_busy and fingerprint == self.last_fingerprint and \
                 not ((busy or tasks) and time.time() - self.last_patrol > 3 * self.patrol_interval):
+            log.info("patrol model suppressed: unchanged fingerprint; deadline scan already ran")
             return
         self.last_fingerprint, self.last_patrol = fingerprint, time.time()
         # Mark turns that finished since the previous patrol, so new results are reported exactly once.
@@ -560,6 +576,7 @@ class Yog(MemoryAgent):
             prompt = (f"【定时巡检 {time.strftime('%Y-%m-%d %H:%M')}】以下是所有旧日支配者与格赫罗斯的 latest_result：\n"
                       f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=1)}\n```\n"
                       f"未完成任务（最新指令、关联执行者、续办记录）：\n{json.dumps(tasks, ensure_ascii=False, indent=1)}\n"
+                      f"实时部署注册表（本次中心采样，优先于旧last_reply和产物中的待部署描述）：{json.dumps(scan.get('deployment', {}), ensure_ascii=False)}\n"
                       f"最近的巡检结论：\n{await self.recent_patrols()}\n\n"
                       "判断任务是否具备续办条件。无人执行且确认可推进时，用 temple_task_continuation 标 ready，让黑山羊核实并续办；"
                       "不直接指挥执行者重启任务。后台下载、评测或服务仍在运行是正常等待，标 waiting；真正需要主人决定标 owner_blocked 并向阿撒托斯报告。"
@@ -567,6 +584,9 @@ class Yog(MemoryAgent):
                       "waiting 有只读复查期限，默认15分钟；重复旧证据不会延长期限。到期由程序请黑山羊核验现有工作并收集完成结果，不重跑评测。"
                       "另一条路径：执行中任务若具体责任执行者有明确停滞证据，用temple_worker_review标stalled直接提醒该执行者，带task_id与最新范围；"
                       "正常后台进展标healthy，不例行催办或转交黑山羊。停滞提醒不授予新工作或重启权限；15分钟无新活动则升级阿撒托斯。"
+                      "报告必须区分本次实际收证与复用的采样时间，并写清下次复查期限；未到期的带时间戳旧样本不是实时进度。"
+                      "收证完成后程序按实际完成时间重新计时，不因复述旧证据延期。"
+                      "新收证结果须确认黑山羊已向上报告；若尚未报告，带task_id向阿撒托斯报告实际结果。已送达的同一结果不重复上报。"
                       f"{rule}除此之外一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
             r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
             if r.status == "failed" and getattr(rt, "retry_safe", True) and self.backends.trip():
@@ -582,6 +602,7 @@ class Yog(MemoryAgent):
             if must_report and not self.reported:
                 await self.send(self.azathoth_id, self.ghroth_fallback(ghroth))
             self.latest = {"last_patrol": clip(r.text, 1500), "finished_at": time.time()}
+            log.info("patrol model result status=%s reported=%s", r.status, self.reported)
             await self.link.call("patrol_log", summary=r.text or r.error or "")
         finally:
             self.ghroth_task = None
@@ -633,6 +654,16 @@ class Ghroth(OwnerChat, MemoryAgent):
 
 class OldOne(Agent):
     role = Role.OLD_ONE
+
+    def take_batch(self, ready=None):
+        candidates = self.queue if ready is None else ready
+        first = min(candidates, key=lambda m: (-m['priority'], m['created_at']))
+        return super().take_batch([m for m in candidates if m.get('task_id') == first.get('task_id')])
+
+    async def send(self, to, text, priority=0, kind="message", **task):
+        if self.current_task and not task.get('task_id'):
+            task['task_id'] = self.current_task
+        return await super().send(to, text, priority, kind, **task)
 
     def skill(self) -> str:
         return (load_role("old_one") + f"\n\n# 黑山羊（ID shub）为你设定的职责\n{self.spec.get('skill', '')}\n\n"

@@ -11,6 +11,17 @@ class Continuations:
     def __init__(self, temple):
         self.temple = temple
         self.lock = asyncio.Lock()
+        self.recheck_seconds = temple.config.get('continuation_recheck_seconds', 900)
+
+    @staticmethod
+    def collection_source(row):
+        """Identify actual completed collection, not a new paraphrase of an old report."""
+        results = [r for r in row['executors'] if r.get('last_task') == row['task']['id'] and
+                   r.get('finished_at') and r.get('activity') and r.get('last_status') == 'completed']
+        if not results:
+            return None
+        result = max(results, key=lambda r: r['finished_at'])
+        return {'agent_id': result['agent_id'], 'finished_at': result['finished_at']}
 
     async def remind(self, yog_id, row, evidence, purpose='resume'):
         t = self.temple
@@ -35,7 +46,8 @@ class Continuations:
                  f"Evidence: {evidence}\nLatest delegated instruction:\n{(row['instruction'] or {}).get('text', '')}")
         rec = {'phase': 'reminded', 'purpose': purpose, 'revision': row['revision'],
                'instruction_id': (row['instruction'] or {}).get('id'), 'at': now, 'deadline': now + 900,
-               'message_id': mid, 'evidence': evidence, 'text': text}
+               'message_id': mid, 'evidence': evidence, 'text': text,
+               'recheck_seconds': row['continuation'].get('recheck_seconds', self.recheck_seconds)}
         records = t.store.setting('continuations') or {}
         records[row['task']['id']] = rec
         t.store.set_setting('continuations', records)
@@ -50,7 +62,7 @@ class Continuations:
             raise ValueError('unknown task')
         messages = store.messages(task_id=task_id, limit=20)
         # Use all explicit associations, including older delegations; never parse prose IDs.
-        links = store.q('SELECT DISTINCT sender, receiver FROM messages WHERE task_id=?', (task_id,))
+        links = store.q("SELECT DISTINCT sender, receiver FROM messages WHERE task_id=? AND kind!='deploy_request'", (task_id,))
         ids = {m[k] for m in links for k in ('sender', 'receiver')}
         agents = [a for a in store.agents(include_stopped=False) if a['role'] in (Role.OLD_ONE, Role.GHROTH)
                   and (a['id'] in ids or a['spec'].get('task_id') == task_id)]
@@ -184,6 +196,20 @@ class Continuations:
                 row['worker_nudges'] = (t.store.setting('worker_nudges') or {}).get(task['id'], {})
                 records = t.store.setting('continuations') or {}
                 rec = records.get(task['id'], {})
+                source = self.collection_source(row)
+                if (rec.get('purpose') == 'inspect' and rec.get('phase') in ('reminded', 'executing') and
+                        source and source['finished_at'] > rec['at'] and not row['owner_blocked']):
+                    # Re-arm independently of a successful model review. This is another inspection,
+                    # not a claim that the workload is healthy or permission to rerun it.
+                    delay = rec.get('recheck_seconds', self.recheck_seconds)
+                    rec = {'phase': 'waiting', 'revision': row['revision'], 'source': source,
+                           'at': source['finished_at'], 'check_at': source['finished_at'] + delay,
+                           'recheck_seconds': delay,
+                           'instruction_id': (row['instruction'] or {}).get('id'),
+                           'evidence': 'A new task-scoped collection finished; interpret its latest result and report it. '
+                                       'Task remains open; schedule bounded follow-up inspection without restarting workload.'}
+                    records[task['id']] = rec
+                    t.store.set_setting('continuations', records)
                 if (rec.get('phase') == 'waiting' and
                         time.time() >= rec.get('check_at', rec.get('at', time.time()) + 900) and
                         not row['owner_blocked'] and not row['active'] and not row['pending'] and
@@ -225,9 +251,29 @@ class Continuations:
                             rec = rec | {'phase': 'escalated'}
                     records[task['id']] = rec
                     t.store.set_setting('continuations', records)
+                if (rec.get('purpose') == 'inspect' and rec.get('phase') == 'executing' and
+                        time.time() >= rec['deadline']):
+                    # Starting a tool is not a completed collection. Keep a bounded failure exit
+                    # even if the agent stays working or finishes with an error.
+                    az = t.god(Role.AZATHOTH)
+                    if az:
+                        mid = f"continuation_escalation_{rec['message_id']}"
+                        if not t.store.message(mid):
+                            await t.route(yog_id, az['id'],
+                                'Waiting-state collection started but has no verified completed result within 15 minutes. '
+                                'Shub must inspect the collection failure or delay; preserve the existing workload. '
+                                f"Reminder: {rec['message_id']}", task_id=task['id'], status='progress', message_id=mid)
+                        rec = rec | {'phase': 'escalated'}
+                        records[task['id']] = rec
+                        t.store.set_setting('continuations', records)
                 row['continuation'] = rec
             rows.append(row)
-        return {'tasks': rows, 'agents': results}
+        deployment = t.deployer.status()
+        return {'tasks': rows, 'agents': results, 'deployment': {
+            'temple_revision': deployment['temple'].get('revision'),
+            'galaxies': {gid: info.get('revision') for gid, info in deployment['galaxies'].items()},
+            'jobs': [{k: j.get(k) for k in ('id', 'state', 'revision', 'finished_at')} for j in deployment['jobs'][:3]],
+            'pending_requests': [r['id'] for r in deployment['requests']]}}
 
     async def review(self, yog_id, p):
         async with self.lock:
@@ -245,6 +291,10 @@ class Continuations:
             if rec.get('phase') == 'owner_blocked' and rec.get('instruction_id') == (row['instruction'] or {}).get('id'):
                 return {'state': 'owner_blocked', 'reason': 'a new authorized instruction is required'}
             if state != 'ready':
+                source = self.collection_source(row)
+                if state == 'waiting' and rec.get('phase') == 'waiting' and rec.get('source') == source:
+                    return {'state': 'waiting', 'check_at': rec.get('check_at', rec['at'] + self.recheck_seconds),
+                            'reason': 'same collection evidence; do not extend its deadline'}
                 if rec.get('revision') == row['revision'] and rec.get('phase') == state:
                     return {'state': state}
                 # Rewording an unchanged assessment does not rearm a reminder.
@@ -253,9 +303,13 @@ class Continuations:
                 rec = {'phase': state, 'revision': row['revision'], 'evidence': p['evidence'], 'at': time.time(),
                        'instruction_id': (row['instruction'] or {}).get('id')}
                 if state == 'waiting':
-                    delay = p.get('check_after_seconds', 900)
-                    if not isinstance(delay, (int, float)) or not 300 <= delay <= 3600:
+                    delay = p.get('check_after_seconds', self.recheck_seconds)
+                    if 'check_after_seconds' in p and (not isinstance(delay, (int, float)) or not 300 <= delay <= 3600):
                         raise ValueError('check_after_seconds must be between 300 and 3600')
+                    rec['source'] = source
+                    rec['recheck_seconds'] = delay
+                    if source:
+                        rec['at'] = min(time.time(), source['finished_at'])
                     rec['check_at'] = rec['at'] + delay
             else:
                 if row['owner_blocked'] or row['active'] or row['pending'] or row['unavailable']:

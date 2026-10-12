@@ -46,6 +46,7 @@ class HarnessServer(unittest.TestCase):
         temple = {"secret": cls.secret, "db": str(cls.dir / "temple.db"), "listen": ["127.0.0.1", cls.port],
                   "galaxies": [{"id": "g1", "name": "test", "token": gtoken}],
                   "gods": [{"id": v, "role": k, "galaxy": "g1"} for k, v in cls.ids.items()]}
+        temple.update(getattr(cls, 'temple_options', {}))
         galaxy = {"id": "g1", "token": gtoken, "temple_ws": f"ws://127.0.0.1:{cls.port}/ws",
                   "state": str(cls.dir / "galaxy"), "codex": FAKE, "cwd": str(cls.dir), "patrol_interval": cls.patrol_interval, "runtimes": cls.runtimes}
         (cls.dir / "temple.json").write_text(json.dumps(temple))

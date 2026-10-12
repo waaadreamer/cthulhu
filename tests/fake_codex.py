@@ -11,10 +11,12 @@ import json
 import time
 import re
 import sys
+from pathlib import Path
 
 ids = itertools.count(1)
 threads = {}
 pending = {}
+cycle_count = 0
 
 
 def out(msg):
@@ -40,6 +42,27 @@ def with_task(args, text):
 
 def continuation_fixture(body, instructions):
     """Deterministic model decisions only for the isolated continuation scenario."""
+    global cycle_count
+    if 'MULTICYCLE_TEST' in body and '定时巡检' in body:
+        return None  # Deliberately never call waiting: program must rearm after collection.
+    if 'Automatic waiting-state inspection' in body and 'MULTICYCLE_TEST' in body:
+        row = json.loads(body.split('【续办前最新状态，以此为准；已完成、仍在执行或真正待决策时不要重试】\n')[-1])
+        worker = re.search(r'EXISTING_EXECUTOR=(old_\w+)', row['instruction']['text']).group(1)
+        return 'temple_send', {'to': worker, 'task_id': row['task']['id'], 'text': 'CYCLIC_COLLECTION: read existing result; never restart.'}
+    if 'CYCLIC_COLLECTION' in body and 'MULTICYCLE_WORKER' in json.dumps(instructions) and '定时巡检' not in body:
+        observations = json.loads((Path(instructions['cwd']) / 'cycle-observations.json').read_text())
+        value = observations[min(cycle_count, len(observations)-1)]
+        cycle_count += 1
+        # Omit task_id intentionally: the real OldOne must retain its incoming task.
+        return 'temple_send', {'to': 'sh', 'text': 'CYCLE_RESULT ' + json.dumps(value)}
+    if 'CYCLE_RESULT ' in body and '定时巡检' not in body:
+        value = json.JSONDecoder().raw_decode(body.split('CYCLE_RESULT ', 1)[1])[0]
+        task = re.search(r'任务 (task_\w+)', body).group(1)
+        return 'temple_send', {'to': 'az', 'task_id': task, 'status': 'done' if value['done'] else 'progress',
+             'text': 'CYCLE_OWNER_RESULT ' + json.dumps(value)}
+    if 'CYCLE_OWNER_RESULT ' in body and '定时巡检' not in body:
+        value = json.JSONDecoder().raw_decode(body.split('CYCLE_OWNER_RESULT ', 1)[1])[0]
+        return 'tell_owner', {'text': '已核验既有测试任务：' + str(value['completed']) + '/3，' + ('完成验收' if value['done'] else '继续等待现有工作')}
     if 'DIRECT_NUDGE_TEST' in body and '定时巡检' in body:
         match = re.search(r'未完成任务[^\n]*\n', body)
         tasks = json.JSONDecoder().raw_decode(body[match.end():])[0] if match else []
