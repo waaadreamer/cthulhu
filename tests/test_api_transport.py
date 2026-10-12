@@ -311,33 +311,29 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         m = self.temple.store.add_message('azathoth', 'shub', 'latest authorized constraints', task_id=task)
         self.temple.store.mark(m['id'], 'handled')
         row = await clients['yog'].call('task_state', task_id=task)
-        params = {'task_id': task, 'revision': row['revision'], 'state': 'ready', 'evidence': 'No executor exists.'}
+        params = {'to': 'shub', 'task_id': task, 'text': 'Read-only task reminder'}
         with self.assertRaises(CallFailed):
             await clients['old_one'].call('task_state', task_id=task)
         with self.assertRaises(CallFailed):
-            await clients['shub'].call('continuation_review', **params)
+            await clients['yog'].call('send', to='shub', text='missing task')
         with self.assertRaises(CallFailed):
-            await clients['shub'].call('worker_review', **params, agent_id='old_one')
-        with self.assertRaises(CallFailed):
-            await clients['old_one'].call('worker_review', **params, agent_id='old_one')
-        with self.assertRaises(CallFailed):
-            await clients['yog'].call('send', to='shub', text='bypass', task_id=task, kind='continuation')
+            await clients['yog'].call('continuation_review', **params)
         with self.assertRaises(CallFailed):
             await clients['yog'].call('restart', agent_id='old_one')
-        reminder = await clients['yog'].call('continuation_review', **params)
-        self.assertEqual(reminder['state'], 'reminded')
-        self.assertEqual((await clients['yog'].call('continuation_review', **params))['state'], 'duplicate')
+        reminder = await clients['yog'].call('send', **params)
+        self.assertNotIn('suppressed', reminder)
+        self.assertEqual((await clients['yog'].call('send', **params))['suppressed'], 'in_flight')
         row = await clients['shub'].call('task_state', task_id=task)
         self.assertEqual(row['instruction']['text'], 'latest authorized constraints')
-        self.assertEqual(self.temple.store.message(reminder['message_id'])['task_id'], task)
-        await clients['shub'].call('handled', id=reminder['message_id'])
+        self.assertEqual(self.temple.store.message(reminder['id'])['task_id'], task)
+        await clients['shub'].call('handled', id=reminder['id'])
         records = self.temple.store.setting('continuations')
-        records[task]['deadline'] = 0
+        records[task]['shub']['deadline'] = 0
         self.temple.store.set_setting('continuations', records)
         # No worker is associated with this task; avoid querying an unrelated fixture RPC.
         self.temple.store.set_agent('old_one', desired='stopped')
-        await clients['yog'].call('continuation_tasks')
-        await clients['yog'].call('continuation_tasks')
+        await clients['yog'].call('patrol')
+        await clients['yog'].call('patrol')
         escalations = [m for m in self.temple.store.messages(task_id=task)
                        if m['sender'] == 'yog' and m['receiver'] == 'azathoth']
         self.assertEqual(len(escalations), 1)

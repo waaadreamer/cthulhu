@@ -67,10 +67,9 @@ def continuation_fixture(body, instructions):
         match = re.search(r'未完成任务[^\n]*\n', body)
         tasks = json.JSONDecoder().raw_decode(body[match.end():])[0] if match else []
         for row in tasks:
-            if row['task']['title'] == 'DIRECT_NUDGE_TEST' and not row.get('worker_nudges'):
-                return 'temple_worker_review', {'task_id': row['task']['id'], 'revision': row['revision'],
-                     'agent_id': row['executors'][0]['agent_id'], 'state': 'stalled',
-                     'evidence': 'Isolated fixture confirms existing assignment made no progress; no external workload is running.'}
+            if row['task']['title'] == 'DIRECT_NUDGE_TEST' and not row.get('reminders'):
+                return 'temple_send', {'task_id': row['task']['id'],
+                     'to': row['executors'][0]['agent_id'], 'text': 'Isolated fixture confirms existing assignment made no progress; no external workload is running.'}
         return None
     if 'Task-scoped worker nudge' in body and 'DIRECT_NUDGE_WORKER' in json.dumps(instructions) and '定时巡检' not in body:
         return 'temple_agents', {}
@@ -88,16 +87,18 @@ def continuation_fixture(body, instructions):
         match = re.search(r'未完成任务[^\n]*\n', body)
         tasks = json.JSONDecoder().raw_decode(body[match.end():])[0] if match else []
         for row in tasks:
-            if row['task']['title'] == 'AUTO_CONTINUATION_TEST' and not any(row[k] for k in ('active', 'pending', 'unavailable', 'owner_blocked')) and not row['continuation']:
-                return 'temple_task_continuation', {'task_id': row['task']['id'], 'revision': row['revision'],
-                    'state': 'ready', 'evidence': 'Isolated fixture: no external processes; latest instruction is ready.'}
+            if row['task']['title'] == 'AUTO_CONTINUATION_TEST' and not any(row[k] for k in ('active', 'pending', 'unavailable', 'owner_blocked')) and not row['reminders']:
+                return 'temple_send', {'to': 'sh', 'task_id': row['task']['id'],
+                    'text': '[Automatic continuation review] Isolated fixture: no external processes; latest instruction is ready.'}
         return None
     if 'Automatic continuation review' in body and 'AUTO_CONTINUATION_TEST' in body:
         row = json.loads(body.split('【续办前最新状态，以此为准；已完成、仍在执行或真正待决策时不要重试】\n')[-1])
         return 'temple_spawn', {'name': 'continuation fixture worker', 'galaxy_id': 'g1',
             'task_id': row['task']['id'], 'task': row['instruction']['text'], 'skill': 'CONTINUATION_WORKER_FIXTURE'}
+    if 'CONTINUATION_COMPLETE' in body and '定时巡检' not in body:
+        return 'temple_send', {'to': 'az', 'task_id': re.search(r'任务 (task_\w+)', body).group(1), 'status': 'done', 'text': 'fixture verified done'}
     if 'CONTINUATION_WORKER_FIXTURE' in json.dumps(instructions) and '你刚被创建' in body:
-        return 'temple_agents', {}
+        return 'temple_send', {'to': 'sh', 'text': 'CONTINUATION_COMPLETE'}
     return None
 
 

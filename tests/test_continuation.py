@@ -68,7 +68,7 @@ class ContinuationServer(HarnessServer):
         completed = self.wait(lambda: store.turn_log(worker['id']), 20)
         self.assertEqual(completed[-1]['status'], 'completed')
         self.assertIn('tool:', completed[-1]['reply'])
-        self.wait(lambda: (store.setting('continuations') or {}).get(task['id'], {}).get('phase') == 'executing', 10)
+        self.wait(lambda: store.task(task['id'])['state'] == 'done', 10)
         self.assertEqual(store.agent(worker['id'])['spec']['task_id'], task['id'])
         shub_turn = next(r for r in store.turn_log('sh') if 'Automatic continuation review' in r['input'])
         self.assertIn('LATEST_ONLY_6789', shub_turn['input'])
@@ -85,15 +85,7 @@ class ContinuationServer(HarnessServer):
         store.db.close()
 
 
-class ContinuationGuards(unittest.IsolatedAsyncioTestCase):
-    def test_shub_batches_different_tasks_separately(self):
-        from cthulhu.gods import Shub
-        shub = object.__new__(Shub)
-        shub.queue = [{'id': str(i), 'task_id': task, 'priority': 0, 'created_at': i}
-                      for i, task in enumerate(('a', 'b', 'a'))]
-        self.assertEqual([m['id'] for m in shub.take_batch()], ['0', '2'])
-        self.assertEqual([m['id'] for m in shub.queue], ['1'])
-
+class SendGuards(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.t = Temple({'secret': 'test', 'db': str(Path(self.tmp.name) / 'db'),
@@ -101,10 +93,10 @@ class ContinuationGuards(unittest.IsolatedAsyncioTestCase):
                          'gods': [{'id': r, 'role': r, 'galaxy': 'g'} for r in ('azathoth', 'shub', 'yog')]})
         self.c = self.t.continuations
         self.task = self.t.store.add_task('test')['id']
-        self.instruction('initial authorized goal')
+        self.instruction('LATEST authorized scope')
         self.t.store.upsert_agent('old', 'worker', 'old_one', 'g', 'shub', {'task_id': self.task})
-        self.result = {'agent_id': 'old', 'online': True, 'state': 'idle', 'last_task': self.task, 'finished_at': 1}
-        self.t.latest_result = AsyncMock(side_effect=lambda _: dict(self.result))
+        self.result = {'agent_id':'old','online':True,'state':'idle','last_task':self.task,'finished_at':1}
+        self.t.latest_result = AsyncMock(side_effect=lambda _:dict(self.result))
         self.t.deliver = AsyncMock()
         self.t.broadcast = AsyncMock()
 
@@ -113,166 +105,129 @@ class ContinuationGuards(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def instruction(self, text):
-        m = self.t.store.add_message('azathoth', 'shub', text, task_id=self.task)
-        self.t.store.mark(m['id'], 'handled')
-        return m
+        m=self.t.store.add_message('azathoth','shub',text,task_id=self.task)
+        self.t.store.mark(m['id'],'handled')
 
-    async def review(self, state='ready', **kw):
-        snap = await self.c.snapshot(self.task)
-        return await self.c.review('yog', {'task_id': self.task, 'revision': snap['revision'],
-                                         'state': state, 'evidence': 'Verified no external workload; dependency satisfied.', **kw})
-
-    def records(self):
-        return self.t.store.setting('continuations') or {}
-
-    def expire(self):
-        records = self.records()
-        records[self.task]['deadline'] = time.time() - 1
-        self.t.store.set_setting('continuations', records)
-
-    async def test_dedup_persists_and_delivery_is_not_progress_escalates_once(self):
-        first = await self.review()
-        self.assertEqual(first['state'], 'reminded')
-        self.t.store.mark(first['message_id'], 'handled')
-        self.assertEqual((await self.review(evidence='Different wording'))['state'], 'duplicate')
-        from cthulhu.continuation import Continuations
-        self.c = self.t.continuations = Continuations(self.t)
-        self.assertEqual((await self.review())['state'], 'duplicate')
-        # A Shub progress report / dispatch receipt is not actual executor activity.
-        self.t.store.add_message('shub', 'azathoth', 'sent', task_id=self.task, status='progress')
-        self.expire()
-        await self.c.scan('yog')
-        await self.c.scan('yog')
-        rows = self.t.store.messages(task_id=self.task)
-        self.assertEqual(len([m for m in rows if m['sender'] == 'yog' and m['receiver'] == 'azathoth']), 1)
-        self.assertEqual(self.records()[self.task]['phase'], 'escalated')
-
-    async def test_active_wait_done_and_owner_decision_guards(self):
-        for field, value in [('state', 'working'), ('active_runs', 1), ('background_busy', True),
-                             ('draining', True), ('online', False)]:
-            before = dict(self.result)
-            self.result[field] = value
-            self.assertEqual((await self.review())['state'], 'guarded')
-            self.result = before
-        self.assertEqual((await self.review('waiting'))['state'], 'waiting')
-        self.assertEqual((await self.review())['state'], 'waiting')
-        # A new external observer result is evidence of a readiness transition.
-        self.result['finished_at'] = 2
-        self.assertEqual((await self.review())['state'], 'reminded')
-        self.t.store.set_task(self.task, 'done')
-        self.assertEqual((await self.review())['state'], 'done')
-        self.t.store.set_task(self.task, 'open')
-        m = self.t.store.add_message('shub', 'azathoth', 'Owner decision required', task_id=self.task, status='blocked')
-        self.t.store.mark(m['id'], 'handled')
-        self.assertEqual((await self.review())['state'], 'guarded')
-        self.instruction('Owner explicitly resolved decision')
-        self.assertEqual((await self.review())['state'], 'reminded')
-
-    async def test_progress_requires_task_scoped_actual_activity(self):
-        await self.review()
-        self.expire()
-        self.result.update(state='working', current_task=self.task, working_since=time.time(), live=['tool()'])
-        await self.c.scan('yog')
-        self.assertEqual(self.records()[self.task]['phase'], 'executing')
-        self.assertFalse([m for m in self.t.store.messages(task_id=self.task) if m['receiver'] == 'azathoth'])
-
-    async def test_stale_assessment_and_new_instruction(self):
-        row = await self.c.snapshot(self.task)
-        self.instruction('newest boundary')
-        self.assertEqual((await self.review(revision=row['revision']))['state'], 'changed')
-        r = await self.review()
-        self.assertIn('newest boundary', self.t.store.message(r['message_id'])['text'])
-        self.assertEqual((await self.review())['state'], 'duplicate')
-
-    async def test_wait_expiry_legacy_default_dedup_and_escalation(self):
-        await self.review('waiting')
-        records = self.records()
-        records[self.task]['check_at'] = time.time()+86400  # Already-deployed waiting records have no deadline.
-        records[self.task]['at'] = time.time()-901
-        self.t.store.set_setting('continuations', records)
-        await self.c.scan('yog')
-        rec = self.records()[self.task]
-        self.assertEqual(rec['purpose'], 'inspect')
-        self.assertIn('NOT authorization to restart', self.t.store.message(rec['message_id'])['text'])
-        await self.c.scan('yog')
-        self.assertEqual(self.records()[self.task]['message_id'], rec['message_id'])
-        self.expire()
-        await self.c.scan('yog')
-        self.assertEqual(self.records()[self.task]['phase'], 'escalated')
-
-    async def test_wait_reinspection_guards_and_same_evidence_does_not_extend(self):
-        await self.review('waiting')
-        first = self.records()[self.task]['at']
-        await self.review('waiting')
-        self.assertEqual(self.records()[self.task]['at'], first)
-        records = self.records();records[self.task]['check_at'] = 0
-        self.t.store.set_setting('continuations', records)
-        self.result.update(state='working', current_task=self.task)
-        await self.c.scan('yog')
-        self.assertEqual(self.records()[self.task]['phase'], 'waiting')
-        self.result['state'] = 'idle'
-        msg = self.t.store.add_message('shub', 'old', 'collection already in flight', task_id=self.task)
-        await self.c.scan('yog')
-        self.assertEqual(self.records()[self.task]['phase'], 'waiting')
-        self.t.store.mark(msg['id'], 'handled')
-        block = self.t.store.add_message('shub', 'azathoth', 'needs owner', task_id=self.task, status='blocked')
-        await self.c.scan('yog')
-        self.assertEqual(self.records()[self.task]['phase'], 'waiting')
-        self.instruction('Owner resolved blocker')
-        self.t.store.set_task(self.task, 'done')
-        await self.c.scan('yog')
-        self.assertEqual(self.records()[self.task]['phase'], 'waiting')
-
-    async def test_predeploy_explicit_message_association_without_spec(self):
-        self.t.store.set_agent('old', spec='{}')
-        before = await self.c.snapshot(self.task)
-        self.assertEqual(before['executors'], [])
-        msg = self.t.store.add_message('shub', 'old', 'explicit later dispatch', task_id=self.task)
-        self.t.store.mark(msg['id'], 'handled')
-        after = await self.c.snapshot(self.task)
-        self.assertEqual([r['agent_id'] for r in after['executors']], ['old'])
-
-    async def test_wait_can_resume_on_new_external_evidence_without_message(self):
-        await self.review('waiting', evidence='Download PID 123 is alive; checkpoint incomplete.')
-        self.assertEqual((await self.review(evidence='Download finished; checksum verified; process exited.'))['state'], 'reminded')
-        self.assertEqual((await self.review('waiting', evidence='Reworded unchanged state'))['state'], 'duplicate')
-        self.assertEqual((await self.review())['state'], 'duplicate')
-
-    async def test_owner_blocker_cannot_be_retried_with_reworded_evidence(self):
-        await self.review('owner_blocked')
-        self.result['finished_at'] = 5
-        self.assertEqual((await self.review(evidence='Retry anyway'))['state'], 'owner_blocked')
-        self.assertEqual((await self.review('waiting', evidence='Relabel without approval'))['state'], 'owner_blocked')
-        self.instruction('Owner resolved the blocker; continue')
-        self.assertEqual((await self.review())['state'], 'reminded')
-
-    async def test_failed_idle_executor_can_retry_and_stopped_one_can_be_reassigned(self):
-        self.result.update(error='previous turn failed', last_status='failed')
-        self.assertEqual((await self.review())['state'], 'reminded')
-        self.instruction('Reassign under existing authorization')
-        self.t.store.set_agent('old', desired='stopped')
-        self.assertEqual((await self.review())['state'], 'reminded')
-
-    async def test_concurrent_reviews_and_reserved_message_recovery(self):
-        results = await asyncio.gather(*(self.review() for _ in range(5)))
-        self.assertEqual(sum(r['state'] == 'reminded' for r in results), 1)
-        records = self.records()
-        # Simulate the durable reservation made just before the message was stored.
-        records[self.task]['message_id'] = 'reserved_unstored_test'
-        self.t.store.set_setting('continuations', records)
-        await self.c.scan('yog')
-        await self.c.scan('yog')
-        self.assertIsNotNone(self.t.store.message('reserved_unstored_test'))
-
-    async def test_permissions_cannot_bypass_reminder_or_manage_executor(self):
+    async def send(self,to='shub',**kw):
         from types import SimpleNamespace
-        for aid, method, p in [('shub', 'continuation_review', {}), ('old', 'continuation_tasks', {}),
-                               ('yog', 'send', {'to': 'shub', 'text': 'bypass'}),
-                               ('yog', 'restart', {'agent_id': 'old'})]:
-            with self.assertRaises(Denied):
-                await self.t.handle_agent_call(SimpleNamespace(id=aid), method, p)
+        return await self.t.handle_agent_call(SimpleNamespace(id='yog'),'send',
+            {'to':to,'task_id':self.task,'text':'fresh readonly collection; preserve workloads',**kw})
 
-        with self.assertRaisesRegex(Denied, 'temple_task_continuation'):
-            await self.t.handle_agent_call(SimpleNamespace(id='yog'), 'send', {'to': 'shub', 'text': 'bypass'})
+    def rec(self,target='shub'):
+        return self.c.records()[self.task][target]
+
+    async def test_public_send_atomic_dedup_latest_scope_and_recovery(self):
+        answers=await asyncio.gather(*(self.send() for _ in range(5)))
+        self.assertEqual(sum('suppressed' not in r for r in answers),1)
+        self.assertEqual((await self.send('old'))['suppressed'],'in_flight')
+        rec=self.rec();mid=rec['message_id']
+        self.assertIn('LATEST authorized scope',self.t.store.message(mid)['text'])
+        self.t.store.mark(mid,'handled')
+        self.instruction('new latest scope while collection pending')
+        self.assertEqual((await self.send())['suppressed'],'in_flight')
+        from cthulhu.continuation import Continuations
+        self.c=self.t.continuations=Continuations(self.t)
+        self.assertEqual((await self.send())['suppressed'],'in_flight')
+        records=self.c.records();records[self.task]['shub']['message_id']='reserved_send'
+        self.t.store.set_setting('continuations',records)
+        await self.c.scan('yog');await self.c.scan('yog')
+        self.assertEqual(self.t.store.message('reserved_send')['task_id'],self.task)
+
+    async def test_started_failed_collection_escalates_once_and_late_completion_releases(self):
+        await self.send()
+        records=self.c.records();records[self.task]['shub']['deadline']=0
+        self.t.store.set_setting('continuations',records)
+        self.result.update(current_task=self.task,state='working',last_activity_at=time.time(),activity_task=self.task)
+        await self.c.scan('yog');await self.c.scan('yog')
+        self.assertEqual(self.rec()['phase'],'escalated')
+        self.assertEqual(len([m for m in self.t.store.messages(task_id=self.task) if m['receiver']=='azathoth']),1)
+        self.result.update(state='idle',current_task=None,last_status='completed',activity=['readonly'],finished_at=time.time())
+        self.t.store.add_message('shub','azathoth','fresh collection verified',task_id=self.task,status='progress')
+        await self.c.scan('yog')
+        self.assertEqual(self.rec()['phase'],'waiting')
+        self.t.store.mark(self.rec()['message_id'],'handled')
+        self.assertNotIn('suppressed',await self.send())
+
+    async def test_task_local_active_pending_done_and_owner_blockers(self):
+        self.result.update(state='working',current_task=self.task)
+        self.assertEqual((await self.send())['suppressed'],'in_flight')
+        # Historical association is not ownership of all future agent activity.
+        self.result.update(current_task='unrelated',last_task='unrelated',last_activity_at=time.time())
+        self.assertNotIn('suppressed',await self.send())
+        self.t.store.set_setting('continuations',{})
+        m=self.t.store.add_message('shub','old','collection in flight',task_id=self.task)
+        self.assertEqual((await self.send())['suppressed'],'in_flight')
+        self.t.store.mark(m['id'],'handled')
+        self.t.store.add_message('shub','azathoth','needs owner',task_id=self.task,status='blocked')
+        self.assertEqual((await self.send())['suppressed'],'done_or_owner_blocked')
+        self.instruction('owner resolved blocker')
+        self.t.store.set_task(self.task,'done')
+        self.assertEqual((await self.send())['suppressed'],'done_or_owner_blocked')
+
+    async def test_direct_worker_send_guards_response_and_escalation(self):
+        self.result.update(activity_task=self.task,last_activity_at=time.time())
+        self.assertEqual((await self.send('old'))['suppressed'],'recent_activity')
+        self.result.update(last_activity_at=0,current_task='other')
+        self.assertEqual((await self.send('old'))['suppressed'],'worker_unavailable_or_other_task')
+        self.result.update(current_task=self.task,state='working')
+        first=await self.send('old')
+        self.t.store.mark(first['id'],'handled')
+        self.assertEqual((await self.send('old'))['suppressed'],'in_flight')
+        records=self.c.records();records[self.task]['old']['deadline']=0
+        self.t.store.set_setting('continuations',records)
+        await self.c.scan('yog')
+        self.assertEqual(self.rec('old')['phase'],'escalated')
+        self.result.update(last_activity_at=time.time())
+        await self.c.scan('yog')
+        self.assertEqual(self.rec('old')['phase'],'responded')
+
+    async def test_migration_folds_both_legacy_records_without_wait_timers(self):
+        self.t.store.set_setting('continuations',{self.task:{'phase':'waiting','check_at':time.time()+86400,'at':1}})
+        self.t.store.set_setting('worker_nudges',{self.task:{'old':{'phase':'nudged','at':1,'deadline':time.time()+900,'message_id':'old_reminder','text':'scope'}}})
+        records=self.c.records()
+        self.assertEqual(records[self.task]['old']['phase'],'sent')
+        self.assertEqual(records[self.task]['shub']['phase'],'waiting')
+        self.assertNotIn('check_at',records[self.task]['shub'])
+        self.assertIsNone(self.t.store.setting('worker_nudges'))
+        self.assertEqual(self.c.records(),records)
+
+    async def test_two_tasks_do_not_cross_block_and_deploy_is_not_assignment(self):
+        other=self.t.store.add_task('maintenance')['id']
+        self.t.store.upsert_agent('ghroth','maintenance','ghroth','g',spec={'task_id':other})
+        self.t.store.add_message('ghroth','azathoth','deploy fix',task_id=self.task,kind='deploy_request')
+        busy={'agent_id':'ghroth','online':True,'state':'working','current_task':other,'last_task':other}
+        self.t.latest_result=AsyncMock(side_effect=lambda aid:dict(self.result if aid=='old' else busy))
+        self.assertEqual([r['agent_id'] for r in (await self.c.snapshot(self.task))['executors']],['old'])
+        self.assertNotIn('suppressed',await self.send())
+        self.assertEqual((await self.send(task_id=other))['suppressed'],'in_flight')
+
+    async def test_tool_schema_permissions_and_suppressed_is_not_reported_sent(self):
+        from types import SimpleNamespace
         from cthulhu.gods import Yog
-        self.assertIn('temple_task_continuation', Yog.send_tool(Yog.__new__(Yog))['description'])
+        from cthulhu.agent import Agent
+        y=object.__new__(Yog)
+        names={t['name'] for t in y.tools()}
+        self.assertIn('temple_send',names)
+        self.assertFalse({'temple_task_continuation','temple_worker_review'} & names)
+        with self.assertRaises(Denied):await self.send(task_id=None)
+        self.t.store.upsert_agent('other','unrelated','old_one','g')
+        with self.assertRaises(Denied):await self.send('other')
+        for method in ('continuation_review','worker_review','continuation_tasks','restart'):
+            with self.assertRaises((Denied,ValueError)):
+                await self.t.handle_agent_call(SimpleNamespace(id='yog'),method,{'agent_id':'old'})
+        a=object.__new__(Agent);a.link=SimpleNamespace(call=AsyncMock(return_value={'suppressed':'in_flight','id':'prior'}));a.on_sent=AsyncMock()
+        self.assertEqual((await a.send('shub','duplicate',task_id=self.task))['suppressed'],'in_flight')
+        a.on_sent.assert_not_called()
+
+    async def test_task_closed_during_scan_does_not_escalate(self):
+        await self.send()
+        records=self.c.records();records[self.task]['shub']['deadline']=0
+        self.t.store.set_setting('continuations',records)
+        snapshot=self.c.snapshot
+        async def closing(*args):
+            row=await snapshot(*args)
+            self.t.store.set_task(self.task,'done')
+            return row
+        self.c.snapshot=closing
+        await self.c.scan('yog')
+        self.assertFalse([m for m in self.t.store.messages(task_id=self.task) if m['receiver']=='azathoth'])

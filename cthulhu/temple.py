@@ -285,8 +285,8 @@ class Temple:
         me = self.store.agent(conn.id)
         role = me["role"]
         if method == "send":
-            if role == Role.YOG and self.role_of(p["to"]) == Role.SHUB:
-                raise Denied("use temple_task_continuation for task-scoped, deduplicated reminders")
+            if role == Role.YOG and self.role_of(p["to"]) in (Role.SHUB, Role.OLD_ONE):
+                return await self.continuations.send(conn.id, p)
             task_id, status = self.task_fields(role, self.role_of(p["to"]), p)
             msg = await self.route(conn.id, p["to"], p["text"], kind=p.get("kind", "message"),
                                    priority=int(p.get("priority", 0)), reply_to=p.get("reply_to"),
@@ -350,19 +350,11 @@ class Temple:
             if role not in (Role.YOG, Role.SHUB, Role.AZATHOTH):
                 raise Denied("task state is reserved for supervision and coordination")
             return await self.continuations.snapshot(p["task_id"])
-        if method in ("continuation_tasks", "continuation_review", "worker_review"):
-            if role != Role.YOG:
-                raise Denied("only yog assesses continuation")
-            if me["galaxy_id"] in self.maintenance:
-                return {"tasks": [], "agents": []} if method == "continuation_tasks" else {"state": "draining"}
-            if method == "worker_review":
-                return await self.continuations.worker_review(conn.id, p)
-            return (await self.continuations.scan(conn.id) if method == "continuation_tasks"
-                    else await self.continuations.review(conn.id, p))
         if method == "patrol":
             if role != Role.YOG:
                 raise Denied("only yog patrols")
-            return [] if me["galaxy_id"] in self.maintenance else await self.patrol()
+            return ({"tasks": [], "agents": []} if me["galaxy_id"] in self.maintenance
+                    else await self.continuations.scan(conn.id))
         if method == "patrol_log":
             if role != Role.YOG:
                 raise Denied("only yog patrols")

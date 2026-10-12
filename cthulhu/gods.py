@@ -356,7 +356,7 @@ class Shub(MemoryAgent):
     async def receive(self, batch: list[dict]) -> None:
         # The roster is part of shub's permanent context; refresh it whenever it changed.
         text = self.render(batch)
-        for task_id in dict.fromkeys(m.get("task_id") for m in batch if m.get("kind") == "continuation"):
+        for task_id in dict.fromkeys(m.get("task_id") for m in batch if m.get("sender_role") == Role.YOG):
             if task_id:
                 state = await self.link.call("task_state", task_id=task_id)
                 text += "\n【续办前最新状态，以此为准；已完成、仍在执行或真正待决策时不要重试】\n" + json.dumps(state, ensure_ascii=False)
@@ -452,19 +452,11 @@ class Yog(MemoryAgent):
         return super().tools() + [
             tool("temple_latest_result", "远程读取某个 agent 的最新工作状态与产出。", {"agent_id": STR}, ["agent_id"]),
             TASK_STATE_TOOL,
-            tool("temple_task_continuation", "评估未完成任务：ready 提醒黑山羊续办；waiting 正常等待；owner_blocked 需要主人决定。必须核实外部进程，不能仅凭 agent idle 判断。程序去重并核对最新状态。",
-                 {"task_id": STR, "revision": STR, "state": {"type": "string", "enum": ["ready", "waiting", "owner_blocked"]},
-                  "evidence": STR},
-                 ["task_id", "revision", "state", "evidence"]),
-            tool("temple_worker_review", "执行中任务的具体执行者监督：healthy表示真实进展正常；stalled须有停滞证据，直接向该执行者发送任务内提醒。不得仅凭agent空闲判断后台工作停止；不得用此工具重跑工作。",
-                 {"task_id": STR, "agent_id": STR, "revision": STR,
-                  "state": {"type": "string", "enum": ["healthy", "stalled"]}, "evidence": STR},
-                 ["task_id", "agent_id", "revision", "state", "evidence"]),
         ]
 
     def send_tool(self, extra=None):
         result = super().send_tool({"task_id": STR})
-        result['description'] += " 给黑山羊的任务提醒必须用 temple_task_continuation，不能用此工具。"
+        result['description'] += " 任务提醒统一用此工具：等待收证发黑山羊，明确停滞发具体执行者，必须带task_id。正常后台进展不要催办。程序按任务去重，suppressed表示本次未发送。"
         return result
 
     async def _on_frame(self, frame: dict):
@@ -515,10 +507,6 @@ class Yog(MemoryAgent):
             return await self.link.call("latest_result", agent_id=args["agent_id"])
         if name == "temple_task_state":
             return await self.link.call("task_state", task_id=args["task_id"])
-        if name == "temple_task_continuation":
-            return await self.link.call("continuation_review", **args)
-        if name == "temple_worker_review":
-            return await self.link.call("worker_review", **args)
         return await super().call_tool(name, args)
 
     async def patrol(self) -> None:
@@ -530,11 +518,10 @@ class Yog(MemoryAgent):
             log.info("patrol ended start=%.3f end=%.3f", started, time.time())
 
     async def _patrol(self) -> None:
-        scan = await self.link.call("continuation_tasks")
+        scan = await self.link.call("patrol")
         snapshot, tasks = scan["agents"], scan["tasks"]
         log.info("patrol inputs %s", json.dumps([{
-            'task_id': t['task']['id'], 'revision': t['revision'], 'phase': t['continuation'].get('phase'),
-            'source': t['continuation'].get('source'),
+            'task_id': t['task']['id'], 'reminders': {aid: r.get('phase') for aid, r in t['reminders'].items()},
             'active': t['active'], 'pending': t['pending'], 'owner_blocked': t['owner_blocked'],
             'executors': [{k: e.get(k) for k in ('agent_id', 'state', 'last_task', 'finished_at', 'last_activity_at')}
                           for e in t['executors']]} for t in tasks], ensure_ascii=False))
@@ -546,7 +533,7 @@ class Yog(MemoryAgent):
         # Volatile fields excluded so an idle universe does not cost a model call.
         stable = [{k: s.get(k) for k in ("agent_id", "state", "online", "finished_at", "last_status", "queued")}
                   for s in snapshot]
-        stable_tasks = [(t['task']['id'], t['revision'], t['continuation'], t['worker_nudges']) for t in tasks]
+        stable_tasks = [(t['task']['id'], t['reminders']) for t in tasks]
         fingerprint = hashlib.sha256(json.dumps([stable, stable_tasks], sort_keys=True).encode()).hexdigest()
         busy = any(s.get("state") == "working" for s in snapshot)
         if not tasks and not ghroth_busy and fingerprint == self.last_fingerprint and \
@@ -567,6 +554,12 @@ class Yog(MemoryAgent):
         d = await self.link.call("directory")
         self.azathoth_id = next((a["id"] for a in d["agents"] if a["role"] == Role.AZATHOTH), self.azathoth_id)
         self.ghroth_task = ghroth.get("current_task") if ghroth_busy else None
+        # Waiting tasks use exactly the same public send as model-authored reminders.
+        from .continuation import INSPECT
+        for row in tasks:
+            for target, rec in row['reminders'].items():
+                if rec.get('phase') == 'waiting' and any(a['id'] == target and a['role'] == Role.SHUB for a in d['agents']):
+                    await self.send(target, INSPECT, task_id=row['task']['id'])
         self.reported = False
         rule = ("本次巡检中格赫罗斯" + ("正在工作" if ghroth_busy else "刚完成了新结果") +
                 "：无论是否正常，都必须给阿撒托斯发一条消息，用一两句话说明它在做什么、做到哪一步、是否正常"
@@ -579,12 +572,11 @@ class Yog(MemoryAgent):
                       f"未完成任务（最新指令、关联执行者、续办记录）：\n{json.dumps(tasks, ensure_ascii=False, indent=1)}\n"
                       f"实时部署注册表（本次中心采样，优先于旧last_reply和产物中的待部署描述）：{json.dumps(scan.get('deployment', {}), ensure_ascii=False)}\n"
                       f"最近的巡检结论：\n{await self.recent_patrols()}\n\n"
-                      "判断任务是否具备续办条件。无人执行且确认可推进时，用 temple_task_continuation 标 ready，让黑山羊核实并续办；"
-                      "不直接指挥执行者重启任务。后台下载、评测或服务仍在运行是正常等待，标 waiting；真正需要主人决定标 owner_blocked 并向阿撒托斯报告。"
-                      "未知不能当 ready；等待中每轮收证，具备实际续办条件才标ready。程序在提醒后15分钟未验证执行活动时升级给阿撒托斯，不以消息送达算推进。"
-                      "waiting 每次现有五分钟巡检都检查等待条件，程序请黑山羊收取新证据；已有收证在途则复用，不增加独立等待计时或重复重跑。"
-                      "另一条路径：执行中任务若具体责任执行者有明确停滞证据，用temple_worker_review标stalled直接提醒该执行者，带task_id与最新范围；"
-                      "正常后台进展标healthy，不例行催办或转交黑山羊。停滞提醒不授予新工作或重启权限；15分钟无新活动则升级阿撒托斯。"
+                      "逐任务检查：等待收证或具备续办条件时，用temple_send(to=黑山羊ID,task_id,text)请其核实已有工作并推进或收尾。"
+                      "已有在途收证复用；程序每次五分钟巡检通过同一send继续检查等待任务。不要只凭agent空闲推断后台停止，不重启正常工作。"
+                      "执行中具体责任worker有明确停滞证据时，也用temple_send直接提醒该worker，带task_id和证据；正常后台进展不发送催办。"
+                      "suppressed是去重或状态保护，表示本次未发送，不可报告为送达。程序在15分钟无收证完成或worker响应时升级阿撒托斯。"
+                      "真正需要主人决定的阻塞向阿撒托斯报告，并由黑山羊按既有blocked状态上报，不当作已批准重试。"
                       "报告必须区分本次实际收证与复用的采样时间；旧样本不是实时进度。"
                       "收证完成仍未结束的任务在下一次巡检继续检查；完成则交黑山羊验收并向上汇报。"
                       "新收证结果须确认黑山羊已向上报告；若尚未报告，带task_id向阿撒托斯报告实际结果。已送达的同一结果不重复上报。"

@@ -1,10 +1,14 @@
-"""Task-scoped supervision; only Shub decides how work is resumed."""
+"""One task-local reminder lifecycle behind ordinary Yog sends and the existing patrol."""
 import asyncio
-import hashlib
-import json
 import time
 
-from .roles import Role
+from .roles import Role, Denied
+from .store import new_id
+
+INSPECT = ('[Automatic waiting-state inspection] Check existing work and collect fresh evidence. '
+           'This is NOT authorization to restart. Reuse any collection already in flight. '
+           'Read temple_task_state and latest instructions, locate the existing executor from roster/history '
+           'if legacy associations are empty, then collect/finalize only actually completed authorized work.')
 
 
 class Continuations:
@@ -12,46 +16,29 @@ class Continuations:
         self.temple = temple
         self.lock = asyncio.Lock()
 
-    @staticmethod
-    def collection_source(row):
-        """Identify actual completed collection, not a new paraphrase of an old report."""
-        results = [r for r in row['executors'] if r.get('last_task') == row['task']['id'] and
-                   r.get('finished_at') and r.get('activity') and r.get('last_status') == 'completed']
-        if not results:
-            return None
-        result = max(results, key=lambda r: r['finished_at'])
-        return {'agent_id': result['agent_id'], 'finished_at': result['finished_at']}
-
-    async def remind(self, yog_id, row, evidence, purpose='resume'):
+    def records(self):
+        """Fold old records into one task -> recipient map; no second runtime state machine."""
         t = self.temple
-        shub = t.god(Role.SHUB)
-        if not shub or shub['desired'] != 'running' or shub['galaxy_id'] in t.maintenance:
-            return None
-        from .store import new_id
-        now, mid = time.time(), new_id('continuation')
-        if purpose == 'inspect':
-            text = ('[Automatic waiting-state inspection] This patrol checks the waiting condition of this unfinished task. '
-                    'This is NOT evidence that its background workload stopped and NOT authorization to restart it. '
-                    'Read temple_task_state/latest instructions, reuse any collection already in flight, and ask the '
-                    'existing executor for one read-only check of the current process/job, progress, last update and '
-                    'completion/observer result. If legacy executor associations are empty, use your roster/history '
-                    'to locate the existing executor and include task_id in the request; do not create a duplicate workload. '
-                    'Collect/finalize only if the existing work actually finished and the latest instructions authorize it. ')
-        else:
-            text = ('[Automatic continuation review] This task is unfinished and assessed ready with no active executor. '
-                    'Read temple_task_state and the latest owner instructions; inspect actual workload state. '
-                    'Resume, retry, or reassign only authorized work; preserve active downloads/evaluations/policies. ')
-        text += ('Verify executor activity, not delivery; report genuine owner-decision blockers. '
-                 f"Evidence: {evidence}\nLatest delegated instruction:\n{(row['instruction'] or {}).get('text', '')}")
-        rec = {'phase': 'reminded', 'purpose': purpose, 'revision': row['revision'],
-               'instruction_id': (row['instruction'] or {}).get('id'), 'at': now, 'deadline': now + 900,
-               'message_id': mid, 'evidence': evidence, 'text': text}
         records = t.store.setting('continuations') or {}
-        records[row['task']['id']] = rec
-        t.store.set_setting('continuations', records)
-        await t.route(yog_id, shub['id'], text, task_id=row['task']['id'],
-                      kind='continuation', message_id=mid)
-        return rec
+        old_workers = t.store.setting('worker_nudges') or {}
+        changed = bool(old_workers)
+        shub = t.god(Role.SHUB)
+        for task, rec in list(records.items()):
+            if 'phase' in rec and shub:
+                records[task] = {shub['id']: rec}
+                changed = True
+        for task, workers in old_workers.items():
+            records.setdefault(task, {}).update({aid: rec for aid, rec in workers.items() if rec.get('message_id')})
+        if changed:
+            for by_target in records.values():
+                for rec in by_target.values():
+                    rec['phase'] = {'reminded': 'sent', 'executing': 'sent', 'nudged': 'sent',
+                                    'responding': 'responded', 'owner_blocked': 'blocked'}.get(rec['phase'], rec['phase'])
+                    for key in ('check_at', 'recheck_seconds', 'revision', 'purpose', 'source'):
+                        rec.pop(key, None)
+            t.store.set_setting('continuations', records)
+            t.store.x("DELETE FROM settings WHERE key='worker_nudges'")
+        return records
 
     async def snapshot(self, task_id, results=None):
         t, store = self.temple, self.temple.store
@@ -78,7 +65,7 @@ class Continuations:
         owner_blocked = bool(report and report['status'] == 'blocked' and
                              (not instruction or report['created_at'] > instruction['created_at']))
         def task_active(r):
-            return bool((r.get('current_task') or r.get('last_task')) == task_id and
+            return bool(r.get('current_task') == task_id and
                         (r.get('state') == 'working' or r.get('active_runs') or r.get('background_busy')))
         active = any(task_active(r) for r in executors)
         pending = store.q("SELECT id FROM messages WHERE task_id=? AND state!='handled' AND receiver IN "
@@ -86,103 +73,60 @@ class Continuations:
                           "(SELECT id FROM agents WHERE role='yog')", (task_id,))
         # A missing/offline/unknown runtime is not proof that restarting its workload is safe.
         unavailable = any(not r.get('online') or not r.get('state') or r.get('draining') for r in executors)
-        revision = hashlib.sha256(json.dumps([task['state'], instruction and instruction['id'],
-            [(m['id'], m['state']) for m in messages if t.role_of(m['sender']) != Role.YOG],
-            [{'agent_id': r['agent_id'], 'online': r.get('online'), 'draining': r.get('draining'),
-              'active': task_active(r), 'known_state': bool(r.get('state')),
-              'finished_at': r.get('finished_at') if r.get('last_task') == task_id else None}
-             for r in executors]],
-            sort_keys=True).encode()).hexdigest()
         return {'task': task, 'instruction': instruction, 'messages': messages, 'executors': executors,
                 'active': active, 'pending': bool(pending), 'unavailable': unavailable,
-                'owner_blocked': owner_blocked, 'revision': revision,
-                'worker_nudges': {aid: rec for aid, rec in (store.setting('worker_nudges') or {}).get(task_id, {}).items()},
-                'continuation': (store.setting('continuations') or {}).get(task_id, {})}
+                'owner_blocked': owner_blocked, 'report': report,
+                'reminders': self.records().get(task_id, {})}
 
-    async def worker_review(self, yog_id, p):
-        """A scoped observation/nudge, never a restart or a new assignment."""
+    async def send(self, yog_id, p):
+        """Validate and deduplicate a normal send at current state; no client revision handshake."""
+        t, task_id, target = self.temple, p.get('task_id'), p['to']
+        if not task_id or not p.get('text', '').strip():
+            raise Denied('task_id and concrete reminder text are required')
+        row = await self.snapshot(task_id)
         async with self.lock:
-            t = self.temple
-            row = await self.snapshot(p['task_id'])
-            if row['revision'] != p['revision']:
-                return {'state': 'changed'}
-            aid = p['agent_id']
-            worker = next((r for r in row['executors'] if r['agent_id'] == aid), None)
-            if not worker or t.role_of(aid) != Role.OLD_ONE:
-                raise ValueError('an associated old_one is required')
-            if p['state'] not in ('healthy', 'stalled') or not p.get('evidence', '').strip():
-                raise ValueError('healthy/stalled assessment with concrete evidence is required')
-            records = t.store.setting('worker_nudges') or {}
-            by_agent = records.setdefault(p['task_id'], {})
-            rec = by_agent.get(aid, {})
-            if p['state'] == 'healthy':
-                # Healthy background progress can be established independently of agent tool activity.
-                if rec.get('phase') == 'healthy' and rec.get('revision') == row['revision']:
-                    return {'state': 'healthy'}
-                by_agent[aid] = {'phase': 'healthy', 'evidence': p['evidence'], 'at': time.time(),
-                                 'revision': row['revision']}
-                t.store.set_setting('worker_nudges', records)
-                return {'state': 'healthy'}
-            if (row['task']['state'] != 'open' or row['owner_blocked'] or
-                    row['continuation'].get('phase') in ('waiting', 'owner_blocked') or
-                    not worker.get('online') or not worker.get('state') or worker.get('draining') or
-                    t.store.agent(aid)['galaxy_id'] in t.maintenance or
-                    worker.get('current_task') not in (None, p['task_id'])):
-                return {'state': 'guarded'}
-            now = time.time()
-            if worker.get('activity_task') == p['task_id'] and now - (worker.get('last_activity_at') or 0) < 300:
-                return {'state': 'recent_activity'}
-            instruction_id = (row['instruction'] or {}).get('id')
-            if rec.get('phase') in ('nudged', 'escalated') and rec.get('instruction_id') == instruction_id:
-                return {'state': 'duplicate'}
-            if rec.get('phase') == 'healthy' and rec.get('revision') == row['revision']:
-                return {'state': 'healthy', 'reason': 'no observed change since healthy assessment'}
-            from .store import new_id
-            text = ('[Task-scoped worker nudge] Yog observed possible stalled progress in your existing assignment. '
-                    'Check the specific issue and report concrete current activity/results or the blocker to Shub with task_id. '
-                    'Preserve healthy background evaluation/download/training/policies. This message does not create work, '
-                    'authorize workload restart, or override owner instructions. If already progressing, report fresh evidence; '
-                    'otherwise proceed only within your current authorized assignment. '
-                    f"Evidence: {p['evidence']}\nLatest delegated instruction:\n{(row['instruction'] or {}).get('text', '')}")
-            rec = {'phase': 'nudged', 'at': now, 'deadline': now + 900, 'instruction_id': instruction_id,
-                   'message_id': new_id('worker_nudge'), 'text': text, 'evidence': p['evidence']}
-            by_agent[aid] = rec
-            t.store.set_setting('worker_nudges', records)
-            await t.route(yog_id, aid, text, kind='worker_nudge', task_id=p['task_id'], message_id=rec['message_id'])
-            return {'state': 'nudged', 'message_id': rec['message_id']}
-
-    async def check_worker_nudges(self, yog_id, row):
-        t = self.temple
-        records = t.store.setting('worker_nudges') or {}
-        for aid, rec in records.get(row['task']['id'], {}).items():
-            if rec['phase'] != 'nudged':
-                continue
-            if row['owner_blocked'] or row['continuation'].get('phase') in ('waiting', 'owner_blocked'):
-                rec['phase'] = 'waiting'
-                continue
-            if rec['instruction_id'] != (row['instruction'] or {}).get('id'):
-                rec['phase'] = 'changed'
-                continue
-            # Recover a crash between reservation and message persistence without duplication.
-            if not t.store.message(rec['message_id']):
-                a = t.store.agent(aid)
-                if a and a['desired'] == 'running':
-                    await t.route(yog_id, aid, rec['text'], kind='worker_nudge', task_id=row['task']['id'], message_id=rec['message_id'])
-            worker = next((r for r in row['executors'] if r['agent_id'] == aid), {})
-            if worker.get('activity_task') == row['task']['id'] and (worker.get('last_activity_at') or 0) > rec['at']:
-                rec['phase'] = 'responding'
-            elif time.time() >= rec['deadline']:
-                # A still-working flag or handled receipt alone is not evidence of a response.
-                az = t.god(Role.AZATHOTH)
-                if az:
-                    mid = 'worker_escalation_' + rec['message_id']
-                    if not t.store.message(mid):
-                        await t.route(yog_id, az['id'],
-                            f"Worker {aid} has no verified new activity after task-scoped nudge {rec['message_id']}. "
-                            'Inspect its current evidence and involve Shub for coordination if needed; do not restart a healthy workload.',
-                            task_id=row['task']['id'], status='progress', message_id=mid)
-                    rec['phase'] = 'escalated'
-        t.store.set_setting('worker_nudges', records)
+            # Fresh store facts after network awaits, without holding a global lock during remote reads.
+            row = await self.snapshot(task_id, row['executors'])
+            direct = t.role_of(target) == Role.OLD_ONE
+            worker = next((r for r in row['executors'] if r['agent_id'] == target), None)
+            if direct and not worker:
+                raise Denied('worker is not associated with this task')
+            records = self.records()
+            rec = records.get(task_id, {}).get(target, {})
+            instruction = (row['instruction'] or {}).get('id')
+            suppressed = None
+            if row['task']['state'] != 'open' or row['owner_blocked']:
+                suppressed = 'done_or_owner_blocked'
+            elif rec.get('phase') == 'blocked' and rec.get('instruction_id') == instruction:
+                suppressed = 'owner_blocked'
+            elif t.store.agent(target)['desired'] != 'running':
+                suppressed = 'recipient_stopped'
+            elif t.store.agent(target)['galaxy_id'] in t.maintenance or t.store.agent(yog_id)['galaxy_id'] in t.maintenance:
+                suppressed = 'draining'
+            elif direct and (not worker.get('online') or not worker.get('state') or worker.get('draining') or
+                             worker.get('current_task') not in (None, task_id)):
+                suppressed = 'worker_unavailable_or_other_task'
+            elif direct and worker.get('activity_task') == task_id and time.time() - (worker.get('last_activity_at') or 0) < 300:
+                suppressed = 'recent_activity'
+            elif not direct and (row['active'] or row['pending'] or any(r.get('draining') for r in row['executors'])):
+                suppressed = 'in_flight'
+            elif any(r.get('phase') == 'sent' for r in records.get(task_id, {}).values()):
+                suppressed = 'in_flight'
+            elif rec.get('phase') == 'escalated' and rec.get('instruction_id') == instruction:
+                suppressed = 'escalated'
+            elif t.store.q("SELECT id FROM messages WHERE task_id=? AND receiver=? AND state!='handled'", (task_id,target)):
+                suppressed = 'in_flight'
+            if suppressed:
+                return {'suppressed': suppressed, 'id': rec.get('message_id'), 'task_id': task_id}
+            now, mid = time.time(), new_id('reminder')
+            text = (('[Task-scoped worker nudge] ' if direct else '[Task-scoped reminder] ') + p['text'] +
+                    '\nThis message does not create work or authorize workload restart. Verify real execution, not delivery. '
+                    'Report genuine owner-decision blockers. Latest delegated instruction:\n' + (row['instruction'] or {}).get('text',''))
+            records.setdefault(task_id, {})[target] = {'phase': 'sent', 'at': now, 'deadline': now+900,
+                'instruction_id': instruction, 'message_id': mid, 'text': text}
+            t.store.set_setting('continuations', records)
+            return await t.route(yog_id, target, text, task_id=task_id, priority=p.get('priority',0),
+                                 kind='message', message_id=mid)
 
     async def scan(self, yog_id):
         t = self.temple
@@ -191,80 +135,42 @@ class Continuations:
         for task in t.store.q("SELECT * FROM tasks WHERE state='open' ORDER BY updated_at"):
             row = await self.snapshot(task['id'], results)
             async with self.lock:
-                if t.store.task(task['id'])['state'] != 'open':
+                row = await self.snapshot(task['id'], row['executors'])
+                if row['task']['state'] != 'open':
                     continue
-                await self.check_worker_nudges(yog_id, row)
-                row['worker_nudges'] = (t.store.setting('worker_nudges') or {}).get(task['id'], {})
-                records = t.store.setting('continuations') or {}
-                rec = records.get(task['id'], {})
-                source = self.collection_source(row)
-                if (rec.get('purpose') == 'inspect' and rec.get('phase') in ('reminded', 'executing', 'escalated') and
-                        source and source['finished_at'] > rec['at'] and not row['owner_blocked']):
-                    # Re-arm independently of a successful model review. This is another inspection,
-                    # not a claim that the workload is healthy or permission to rerun it.
-                    rec = {'phase': 'waiting', 'revision': row['revision'], 'source': source,
-                           'at': source['finished_at'],
-                           'instruction_id': (row['instruction'] or {}).get('id'),
-                           'evidence': 'A new task-scoped collection finished; interpret its latest result and report it. '
-                                       'Task remains open; inspect on each patrol without restarting workload.'}
-                    records[task['id']] = rec
-                    t.store.set_setting('continuations', records)
-                if (rec.get('phase') == 'waiting' and
-                        not row['owner_blocked'] and not row['active'] and not row['pending'] and
-                        not any(r.get('draining') for r in row['executors'])):
-                    updated = await self.remind(yog_id, row, rec.get('evidence', ''), purpose='inspect')
-                    if updated:
-                        rec = updated
-                        records[task['id']] = rec
-                if rec.get('phase') == 'reminded' and rec.get('instruction_id') != (row['instruction'] or {}).get('id'):
-                    rec = rec | {'phase': 'changed'}
-                    records[task['id']] = rec
-                    t.store.set_setting('continuations', records)
-                if rec.get('phase') == 'reminded':
-                    # Recover the tiny reserve-before-route crash window using the same message ID.
-                    if not t.store.message(rec['message_id']) and rec.get('text'):
-                        shub = t.god(Role.SHUB)
-                        if shub and shub['desired'] == 'running':
-                            await t.route(yog_id, shub['id'], rec['text'], task_id=task['id'],
-                                          kind='continuation', message_id=rec['message_id'])
-                    # Delivery/handled receipts and Shub's own activity are not executor progress.
-                    progressed = any((r.get('current_task') == task['id'] and
-                                      (r.get('working_since') or 0) > rec['at'] and r.get('live')) or
-                                     (r.get('last_task') == task['id'] and
-                                      (r.get('finished_at') or 0) > rec['at'] and r.get('activity'))
-                                     for r in row['executors'])
-                    if progressed:
-                        rec = rec | {'phase': 'executing', 'progress_at': time.time()}
-                    elif row['owner_blocked']:
-                        rec = rec | {'phase': 'owner_blocked'}
-                    elif time.time() >= rec['deadline'] and not row['active']:
+                records = self.records()
+                for target, rec in records.get(task['id'], {}).items():
+                    shub = t.role_of(target) == Role.SHUB
+                    workers = row['executors'] if shub else [r for r in row['executors'] if r['agent_id'] == target]
+                    if row['owner_blocked']:
+                        rec['phase'] = 'blocked'
+                        rec['instruction_id'] = (row['instruction'] or {}).get('id')
+                        continue
+                    if rec.get('phase') == 'blocked' and rec.get('instruction_id') != (row['instruction'] or {}).get('id'):
+                        rec['phase'] = 'waiting' if shub else 'responded'
+                    completed = any(r.get('last_task') == task['id'] and r.get('last_status') == 'completed' and
+                                    r.get('activity') and (r.get('finished_at') or 0) > rec.get('at',0) for r in workers)
+                    active = any(r.get('activity_task') == task['id'] and (r.get('last_activity_at') or 0) > rec.get('at',0) for r in workers)
+                    reported = row['report'] and row['report']['created_at'] > rec.get('at', 0)
+                    if rec.get('phase') in ('sent','escalated') and ((completed and (not shub or reported)) or (not shub and active)):
+                        rec['phase'] = 'waiting' if shub else 'responded'
+                    if rec.get('phase') != 'sent':
+                        continue
+                    # Recover reservation-before-route crashes using the exact persisted message ID.
+                    if not t.store.message(rec['message_id']):
+                        await t.route(yog_id, target, rec['text'], task_id=task['id'], kind='message', message_id=rec['message_id'])
+                    if time.time() >= rec['deadline']:
                         az = t.god(Role.AZATHOTH)
                         if az:
-                            mid = f"continuation_escalation_{rec['message_id']}"
+                            mid = 'reminder_escalation_' + rec['message_id']
                             if not t.store.message(mid):
                                 await t.route(yog_id, az['id'],
-                                    'Automatic continuation stalled: no executor activity was verified after the reminder. '
-                                    'Shub must inspect actual execution or report the concrete blocker; delivery is not progress. '
-                                    f"Reminder: {rec['message_id']}", task_id=task['id'], status='progress', message_id=mid)
-                            rec = rec | {'phase': 'escalated'}
-                    records[task['id']] = rec
-                    t.store.set_setting('continuations', records)
-                if (rec.get('purpose') == 'inspect' and rec.get('phase') == 'executing' and
-                        time.time() >= rec['deadline']):
-                    # Starting a tool is not a completed collection. Keep a bounded failure exit
-                    # even if the agent stays working or finishes with an error.
-                    az = t.god(Role.AZATHOTH)
-                    if az:
-                        mid = f"continuation_escalation_{rec['message_id']}"
-                        if not t.store.message(mid):
-                            await t.route(yog_id, az['id'],
-                                'Waiting-state collection started but has no verified completed result within 15 minutes. '
-                                'Shub must inspect the collection failure or delay; preserve the existing workload. '
-                                f"Reminder: {rec['message_id']}", task_id=task['id'], status='progress', message_id=mid)
-                        rec = rec | {'phase': 'escalated'}
-                        records[task['id']] = rec
-                        t.store.set_setting('continuations', records)
-                row['continuation'] = rec
+                                    f"Reminder {rec['message_id']} has no verified " + ('completed collection' if shub else 'worker response') +
+                                    ' after 15 minutes. Coordinate the specific task failure; preserve existing workloads.',
+                                    task_id=task['id'], status='progress', message_id=mid)
+                            rec['phase'] = 'escalated'
+                t.store.set_setting('continuations', records)
+                row['reminders'] = records.get(task['id'], {})
             rows.append(row)
         deployment = t.deployer.status()
         return {'tasks': rows, 'agents': results, 'deployment': {
@@ -272,45 +178,3 @@ class Continuations:
             'galaxies': {gid: info.get('revision') for gid, info in deployment['galaxies'].items()},
             'jobs': [{k: j.get(k) for k in ('id', 'state', 'revision', 'finished_at')} for j in deployment['jobs'][:3]],
             'pending_requests': [r['id'] for r in deployment['requests']]}}
-
-    async def review(self, yog_id, p):
-        async with self.lock:
-            t = self.temple
-            row = await self.snapshot(p['task_id'])
-            if p['revision'] != row['revision']:
-                return {'state': 'changed', 'reason': 'refresh task state before deciding'}
-            state = p['state']
-            if state not in ('ready', 'waiting', 'owner_blocked') or not p.get('evidence', '').strip():
-                raise ValueError('state and concrete evidence are required')
-            if row['task']['state'] != 'open':
-                return {'state': 'done'}
-            records = t.store.setting('continuations') or {}
-            rec = records.get(p['task_id'], {})
-            if rec.get('phase') == 'owner_blocked' and rec.get('instruction_id') == (row['instruction'] or {}).get('id'):
-                return {'state': 'owner_blocked', 'reason': 'a new authorized instruction is required'}
-            if state != 'ready':
-                if (state == 'waiting' and rec.get('purpose') == 'inspect' and
-                        rec.get('phase') in ('reminded', 'executing', 'escalated')):
-                    return {'state': rec['phase'], 'reason': 'collection already requested; scan tracks its completion'}
-                if rec.get('revision') == row['revision'] and rec.get('phase') == state:
-                    return {'state': state}
-                # Rewording an unchanged assessment does not rearm a reminder.
-                if rec.get('revision') == row['revision'] and rec.get('phase') in ('reminded', 'escalated'):
-                    return {'state': 'duplicate'}
-                rec = {'phase': state, 'revision': row['revision'], 'evidence': p['evidence'], 'at': time.time(),
-                       'instruction_id': (row['instruction'] or {}).get('id')}
-            else:
-                if row['owner_blocked'] or row['active'] or row['pending'] or row['unavailable']:
-                    return {'state': 'guarded', 'active': row['active'], 'pending': row['pending'],
-                            'unavailable': row['unavailable'], 'owner_blocked': row['owner_blocked']}
-                instruction_id = (row['instruction'] or {}).get('id')
-                if rec.get('phase') in ('reminded', 'escalated') and rec.get('instruction_id') == instruction_id:
-                    return {'state': 'duplicate'}
-                if rec.get('phase') == 'waiting' and rec.get('revision') == row['revision'] and rec.get('evidence') == p['evidence']:
-                    return {'state': 'waiting', 'reason': 'no observed readiness change'}
-                rec = await self.remind(yog_id, row, p['evidence'])
-                if rec is None:
-                    return {'state': 'unavailable'}
-            records[p['task_id']] = rec
-            t.store.set_setting('continuations', records)
-            return {'state': rec['phase'], 'task_id': p['task_id'], 'message_id': rec.get('message_id')}

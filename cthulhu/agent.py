@@ -174,6 +174,8 @@ class Agent:
     async def send(self, to: str, text: str, priority: int = 0, kind: str = "message", **task) -> dict:
         r = await self.link.call("send", to=to, text=text, priority=priority, kind=kind,
                                  **{k: v for k, v in task.items() if v})
+        if r.get('suppressed'):
+            return r
         await self.on_sent(to, text)
         return {"sent": r["id"], **({"task_id": r["task_id"]} if r.get("task_id") else {})}
 
