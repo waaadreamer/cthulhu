@@ -21,6 +21,12 @@ cycle_count = 0
 
 
 def out(msg):
+    p = msg.get('params', {})
+    if msg.get('method') == 'item/completed' and p.get('threadId') in threads:
+        threads[p['threadId']].setdefault('journal', []).append(p['item'])
+    if msg.get('method') == 'turn/completed' and p.get('threadId') in threads:
+        entry = threads[p['threadId']]
+        entry.setdefault('turns', []).append(p['turn'] | {'items': entry.pop('journal', [])})
     sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
@@ -124,14 +130,40 @@ for line in sys.stdin:
         threads[t] = p
         out({"id": rid, "result": {"thread": {"id": t}}})
     elif m == "thread/resume":
+        threads.setdefault(p['threadId'], p)
         out({"id": rid, "result": {"thread": {"id": p["threadId"]}}})
+    elif m == 'thread/read':
+        entry = threads.get(p['threadId'], {})
+        out({'id':rid,'result':{'thread':{'id':p['threadId'],'turns':entry.get('turns', [])}}})
     elif m == "turn/start":
         turn = f"tu{next(ids)}"
         out({"id": rid, "result": {"turn": {"id": turn}}})
         text = p["input"][0]["text"]
-        body = text.split("</handoff>")[-1]
+        body = text.split("</handoff>")[-1].split("</recovery>")[-1]
         fixture = continuation_fixture(body, threads.get(p['threadId'], {})) if not p.get('outputSchema') else None
-        if p.get("outputSchema"):
+        cfg = threads.get(p['threadId'], {})
+        recovery_fixture = re.findall(r'RECOVERY_FIXTURE (\w+)', text)
+        if recovery_fixture and cfg.get('model', '').startswith('recovery-') and not p.get('outputSchema'):
+            mode = recovery_fixture[-1]
+            root = Path(cfg['cwd'])
+            receipt = root / ('recovery-' + mode + '.jsonl')
+            with receipt.open('a') as f:
+                f.write(json.dumps({'model':cfg['model'],'thread':p['threadId'],
+                    'checked_context':'<recovery>' in text,'task_present':'task_' in text})+'\n')
+            if cfg['model'] == 'recovery-fallback':
+                finish(p['threadId'],turn,'RECOVERED_WITH_EXISTING_EFFECT ' + (root/('recovery-' + mode + '-effect')).read_text())
+            else:
+                effect = root/('recovery-' + mode + '-effect')
+                if '<recovery>' not in text:
+                    with effect.open('a') as f: f.write('once')
+                    out({'method':'item/completed','params':{'threadId':p['threadId'],'turnId':turn,
+                        'item':{'id':'effect','type':'commandExecution','command':'write recovery-effect once',
+                        'status':'completed','aggregatedOutput':'persisted recovery-effect=once'}}})
+                n = len(receipt.read_text().splitlines())
+                error = '401 unauthorized' if mode == 'fatal' else ['invalid_stream','timeout','provider_disconnected','transport_disconnected','503 unavailable','invalid_stream'][(n-1)%6]
+                out({'method':'turn/completed','params':{'threadId':p['threadId'],
+                    'turn':{'id':turn,'status':'failed','error':{'message':error}}}})
+        elif p.get("outputSchema"):
             finish(p["threadId"], turn, json.dumps({"add": ["记住: " + text[-20:]], "update": [], "forget": []}))
         elif fixture:
             name, args = fixture

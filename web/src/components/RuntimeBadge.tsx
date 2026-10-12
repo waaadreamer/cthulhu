@@ -11,10 +11,12 @@ export function RuntimeBadge({ runtime, compact }: { runtime?: RuntimeStatus | n
   if (!runtime) return null
   const fb = runtime.fallback_active
   const api = runtime.api_result
+  const recovery = runtime.recovery
+  const recovering = recovery && ['running', 'checking', 'retrying', 'switching'].includes(recovery.phase) && recovery.attempt > 1
   const detail = api ? `请求 ${api.requested_model ?? runtime.model}/${api.requested_tier ?? 'default'} → 实际 ${api.returned_model ?? '未知'}/${api.returned_tier ?? '未知'} · provider ${api.provider}` : `${runtime.backend}:${runtime.model ?? ''}`
   return (
     <span
-      title={fb ? `主后端 ${runtime.config.backend}:${runtime.config.model} 暂时不可用，正在使用后备` : detail}
+      title={[detail, fb ? '正在使用已配置的后备源' : '', recovery ? `第 ${recovery.attempt} 次尝试 · ${recovery.source} · ${recovery.phase}${recovery.error ? ` · ${recovery.error}` : ''}` : ''].filter(Boolean).join('\n')}
       className={`chip ring-1 ${fb ? 'bg-amber-400/15 text-amber-200 ring-amber-400/40' : STYLE[runtime.backend] ?? STYLE.codex}`}
     >
       {fb && <AlertTriangle className="h-3 w-3" />}
@@ -22,6 +24,8 @@ export function RuntimeBadge({ runtime, compact }: { runtime?: RuntimeStatus | n
       {modelLabel(runtime.model)}
       {runtime.api_result?.returned_tier && !compact && <span className="opacity-70">· 实际 {runtime.api_result.returned_tier}</span>}
       {fb && !compact && <span className="opacity-70">· 后备</span>}
+      {recovering && <span>· 重试 {recovery.retry}/5</span>}
+      {recovery?.phase === 'failed' && <span>· 恢复失败</span>}
     </span>
   )
 }

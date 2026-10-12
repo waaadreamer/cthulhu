@@ -14,18 +14,29 @@ backend-neutral turn log bridges the gap (see Agent.handoff_context).
 from __future__ import annotations
 
 import time
-import logging
+import asyncio
 
-from .runtime import CodexRuntime
+from .runtime import CodexRuntime, TurnResult, RuntimeError_
+
+RETRY_DELAYS = (0.5, 1, 2, 3, 5)  # Five retries AFTER the first attempt, on each source.
+
+
+def recoverable(error: str | None) -> bool:
+    error = (error or '').lower()
+    if any(s in error for s in ('cancelled', 'canceled', 'unauthorized', 'forbidden', '401', '403',
+                               'invalid api key', 'invalid argument', 'permission denied',
+                               'context length', 'too_large', 'not found', 'unsupported')):
+        return False
+    return any(s in error for s in ('invalid_stream', 'timeout', 'timed out', 'disconnected',
+        'connection', 'transport', 'stream', 'temporar', 'overloaded', 'rate limit', '429',
+        '408', '500', '502', '503', '504', '529', 'backpressure', 'econnreset', 'offline', 'unavailable', 'app-server exited',
+        'app-server is not running', 'session ended without a result', 'provider_error'))
 
 # Codex models whose default reasoning effort the harness pins explicitly.
 DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
 
 # After the primary fails, stay on the fallback this long before trying it again.
 FALLBACK_HOLD = 30 * 60
-# A primary that failed only to *start* (e.g. its Galaxy API provider was reconnecting during a deploy)
-# is retried much sooner; a failure during a turn keeps the full hold.
-STARTUP_RETRY = 60
 
 
 def build(cfg: dict, *, codex: str, cwd: str, log_dir, sub_agents: bool, api_link=None):
@@ -80,14 +91,23 @@ class Backends:
 
     @property
     def using_fallback(self) -> bool:
+        selected = getattr(self, '_selected', None)
+        if selected is not None:
+            return selected[0] is self.fallback
         return self.fallback is not None and time.time() - self.failed_at < self.hold
 
     @property
     def active(self):
+        selected = getattr(self, '_selected', None)
+        if selected is not None:
+            return selected[0]
         return self.fallback if self.using_fallback else self.primary
 
     @property
     def active_cfg(self) -> dict:
+        selected = getattr(self, '_selected', None)
+        if selected is not None:
+            return selected[1]
         return self.cfg["fallback"] if self.using_fallback else self.cfg
 
     def trip(self, hold: float = FALLBACK_HOLD) -> bool:
@@ -100,15 +120,80 @@ class Backends:
     async def start(self) -> None:
         if self.started:
             return
-        try:
-            await self.primary.start()
-        except Exception:
-            await self.primary.close()
-            if not self.trip(STARTUP_RETRY):
-                raise
-            logging.getLogger(__name__).warning("primary startup failed; starting configured fallback")
-            await self.fallback.start()
+        async def attempt(rt, note):
+            await rt.start()
+            return TurnResult('completed')
+        result = await self.recover(attempt)
+        if result.status != 'completed':
+            raise RuntimeError_(result.error or result.status)
         self.started = True
+
+    async def recover(self, attempt, *, prepare=None, report=None, cancel=None):
+        """One serial recovery policy for startup, foreground, patrol and scoped turns.
+
+        prepare must settle the previous execution and return checked context before
+        another model call. It is never a replay of tool calls or message ingress.
+        """
+        cancel = cancel or asyncio.Event()
+        rt = self.active
+        cfg = self.active_cfg
+        choices = [(rt, cfg)]
+        if rt is self.primary and self.fallback is not None:
+            choices.append((self.fallback, self.cfg['fallback']))
+        note, total = '', 0
+        state = {}
+        async def publish(phase, **kw):
+            state.update(phase=phase, **kw)
+            if report:
+                await report(dict(state))
+        try:
+            for source, (rt, cfg) in enumerate(choices):
+                if source:
+                    self.trip()
+                self._selected = (rt, cfg)
+                for retry in range(len(RETRY_DELAYS) + 1):
+                    if cancel.is_set():
+                        await publish('interrupted')
+                        return TurnResult('interrupted', error='Recovery cancelled')
+                    total += 1
+                    await publish('running', attempt=total, retry=retry, retries=5,
+                                  source=label(cfg), fallback=rt is self.fallback)
+                    try:
+                        result = await attempt(rt, note)
+                    except asyncio.CancelledError:
+                        await publish('interrupted')
+                        raise
+                    except Exception as e:
+                        result = TurnResult('failed', error=f'{type(e).__name__}: {e}')
+                    if cancel.is_set():
+                        result = TurnResult('interrupted', error='Recovery cancelled')
+                    if result.status != 'failed' or not recoverable(result.error):
+                        await publish(result.status, error=result.error)
+                        return result
+                    await publish('checking', error=result.error)
+                    if prepare:
+                        try:
+                            note = await prepare(rt, result, note)
+                        except Exception as e:
+                            result.error = f'{result.error}; recovery cannot safely continue: {e}'
+                            await publish('failed', error=result.error)
+                            return result
+                    if retry < len(RETRY_DELAYS):
+                        await publish('retrying')
+                        try:
+                            await asyncio.wait_for(cancel.wait(), RETRY_DELAYS[retry])
+                        except asyncio.TimeoutError:
+                            pass
+                    elif source + 1 < len(choices):
+                        await publish('switching')
+            result.error = (result.error or 'Backend failure') + ('; configured fallback exhausted' if len(choices) > 1
+                            or rt is self.fallback else '; no configured fallback is available')
+            await publish('failed', error=result.error)
+            return result
+        finally:
+            if self.using_fallback:
+                self.failed_at = time.time()
+            self._selected = None
 
     async def close(self) -> None:
         for rt in (self.primary, self.fallback):

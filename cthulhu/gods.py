@@ -93,7 +93,7 @@ class MemoryAgent(Agent):
                              if correct_only else
                              "- add：确实是新的长期信息才新增。\n")
                           + MEMORY_RULES + "已有条目里不符合这些规则的，也用 forget 删掉。没有变化就全部返回空数组。")
-                r = await self.run(fork, prompt, output_schema=MEMORY_SCHEMA, track=False, timeout=600, runtime=rt)
+                r = await self.run_background(fork, prompt, output_schema=MEMORY_SCHEMA, timeout=600, runtime=rt)
                 data = json.loads(r.text or "{}")
                 log.info("%s memory%s: add %s update %s forget %s", self.name, " (correct only)" if correct_only else "",
                          len(data.get("add", [])), [u.get("id") for u in data.get("update", [])], data.get("forget", []))
@@ -132,7 +132,7 @@ class MemoryAgent(Agent):
                       f"需要整体整理到一半以下。\n{MEMORY_RULES}\n\n当前永久上下文：\n{listing}\n\n"
                       "合并重复和相近的条目（update 保留其中一条的编号写合并后的全文，forget 其余），删除不符合规则或已过时的条目。"
                       "主人的意志、偏好、决定、授权和约束必须保留。add 返回空数组。")
-            r = await self.run(fork, prompt, output_schema=MEMORY_SCHEMA, track=False, timeout=900, runtime=rt)
+            r = await self.run_background(fork, prompt, output_schema=MEMORY_SCHEMA, timeout=900, runtime=rt)
             data = json.loads(r.text or "{}")
             known = {m["id"] for m in current}
             for u in data.get("update", []):
@@ -565,7 +565,16 @@ class Yog(MemoryAgent):
                 "：无论是否正常，都必须给阿撒托斯发一条消息，用一两句话说明它在做什么、做到哪一步、是否正常"
                 "（已工作多久见 working_since）。" if must_report else "")
         rt = self.runtime
-        thread = await rt.start_thread(await self.instructions(), self.tools(), self.call_tool, ephemeral=True)
+        thread = None
+        async def attempt(active, note):
+            nonlocal rt, thread
+            if thread is None or active is not rt:
+                if thread:
+                    await rt.drop_thread(thread)
+                rt = active
+                await rt.start()
+                thread = await rt.start_thread(await self.instructions(), self.tools(), self.call_tool, ephemeral=True)
+            return await self.run(thread, note + prompt, track=False, timeout=1800, runtime=rt)
         try:
             prompt = (f"【定时巡检 {time.strftime('%Y-%m-%d %H:%M')}】以下是所有旧日支配者与格赫罗斯的 latest_result：\n"
                       f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=1)}\n```\n"
@@ -581,15 +590,10 @@ class Yog(MemoryAgent):
                       "收证完成仍未结束的任务在下一次巡检继续检查；完成则交黑山羊验收并向上汇报。"
                       "新收证结果须确认黑山羊已向上报告；若尚未报告，带task_id向阿撒托斯报告实际结果。已送达的同一结果不重复上报。"
                       f"{rule}除此之外一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
-            r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
-            if r.status == "failed" and getattr(rt, "retry_safe", True) and self.backends.trip():
-                await rt.drop_thread(thread)
-                rt = self.runtime
-                thread = await rt.start_thread(await self.instructions(), self.tools(), self.call_tool, ephemeral=True)
-                r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
+            r = await self.recover(attempt)
             if must_report and not self.reported and r.status == "completed":
-                r2 = await self.run(thread, "【程序提示】你还没有给阿撒托斯发格赫罗斯的情况。现在用 temple_send 发一条（英文，一两句话）。",
-                                    track=False, timeout=600, runtime=rt)
+                prompt = "【程序提示】你还没有给阿撒托斯发格赫罗斯的情况。现在用 temple_send 发一条（英文，一两句话）。"
+                r2 = await self.recover(attempt)
                 if r2.status != "completed":
                     log.warning("yog follow-up report turn failed: %s", r2.error)
             if must_report and not self.reported:
@@ -599,7 +603,8 @@ class Yog(MemoryAgent):
             await self.link.call("patrol_log", summary=r.text or r.error or "")
         finally:
             self.ghroth_task = None
-            await rt.drop_thread(thread)
+            if thread:
+                await rt.drop_thread(thread)
 
     async def send(self, to: str, text: str, priority: int = 0, kind: str = "message", **task) -> dict:
         if to == self.azathoth_id and self.ghroth_task and not task.get("task_id"):

@@ -42,13 +42,13 @@ class FakeClient:
         if self.o.model == "claude-broken":
             # Simulates the relay rejecting the request (rate limit / content filter).
             yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=True, num_turns=1,
-                                session_id=self.sid, result="API Error: 403 temporarily restricted", uuid="x")
+                                session_id=self.sid, result="API Error: 503 temporarily unavailable", uuid="x")
             return
         yield StreamEvent(uuid="u", session_id=self.sid, event={"type": "message_start"})
         if "只输出一个 JSON" in text:
             reply = json.dumps({"add": ["记住: " + (hist[-1] if hist else "")[-20:]], "update": [], "forget": []}, ensure_ascii=False)
-        elif "CALL " in text.split("</handoff>")[-1]:
-            name, args = text.split("</handoff>")[-1].split("CALL ", 1)[1].split(" ", 1)
+        elif "CALL " in text.split("</handoff>")[-1].split("</recovery>")[-1]:
+            name, args = text.split("</handoff>")[-1].split("</recovery>")[-1].split("CALL ", 1)[1].split(" ", 1)
             m = re.search(r"任务 (task_\w+)", text)
             args = args.replace("$TASK", m.group(1)) if m else args
             full = f"mcp__temple__{name}"
@@ -63,7 +63,7 @@ class FakeClient:
         elif "SLEEP " in text and "定时巡检" not in text:
             await asyncio.sleep(float(text.split("SLEEP ", 1)[1].split()[0]))
             reply = "slept"
-        elif "REPLY " in text.split("</handoff>")[-1]:
+        elif "REPLY " in text.split("</handoff>")[-1].split("</recovery>")[-1]:
             reply = text.split("REPLY ", 1)[1].strip()
         else:
             reply = f"echo[{self.o.model}]: " + text

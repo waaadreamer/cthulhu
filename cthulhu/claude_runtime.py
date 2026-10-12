@@ -66,6 +66,7 @@ class ClaudeRuntime:
         self.handlers: dict[str, ToolHandler] = {}
         self.turn_ids: dict[str, str] = {}
         self.sdk_tools: dict[str, list] = {}       # session -> SdkMcpTool list (tests read it)
+        self.checkpoints: dict[str, list] = {}
         self._log = open(log_path, "a") if log_path else None
 
     async def start(self) -> None:
@@ -183,6 +184,8 @@ class ClaudeRuntime:
                        output_schema: dict | None = None, timeout: float = 6 * 3600,
                        on_start: Callable[[str], None] | None = None) -> TurnResult:
         t = self.threads.get(thread_id)
+        if t is None and thread_id in self.instructions:
+            t = await self._open(thread_id, resume=True)
         if t is None:
             raise RuntimeError_(f"unknown thread {thread_id}")
         if output_schema:
@@ -197,11 +200,30 @@ class ClaudeRuntime:
                 return await asyncio.wait_for(self._turn(t, text, on_event, turn_id, output_schema is not None), timeout)
             except asyncio.TimeoutError:
                 await t.client.interrupt()
-                return TurnResult("interrupted", error="turn time budget exceeded")
+                # Drain to a terminal SDK result before permitting continuation.
+                async def settle():
+                    async for msg in t.client.receive_response():
+                        if isinstance(msg, ResultMessage):
+                            return
+                    raise RuntimeError_('timeout: previous SDK execution did not settle')
+                await asyncio.wait_for(settle(), 60)
+                return TurnResult("failed", error="turn timeout (execution settled)")
+            except asyncio.CancelledError:
+                await t.client.interrupt()
+                raise
+            except Exception as e:
+                # SDK transport loss: disconnect owns/settles its process. Reopen
+                # this same session on the next attempt, retaining observed effects.
+                await asyncio.wait_for(t.client.disconnect(), 60)
+                self.threads.pop(thread_id, None)
+                return TurnResult('failed', error=f'{type(e).__name__}: {e}')
             finally:
                 self.turn_ids.pop(thread_id, None)
 
     async def _turn(self, t: _Thread, text: str, on_event: EventHandler | None, turn_id: str, json_only: bool) -> TurnResult:
+        checkpoint = self.checkpoints.setdefault(t.session_id, [])
+        checkpoint.append({'input': text[-16000:]})
+        del checkpoint[:-60]
         await t.client.query(text)
         items: list[dict] = []
         texts: list[str] = []
@@ -228,6 +250,8 @@ class ClaudeRuntime:
                     continue
                 body = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
                 new = _items(msg)
+                checkpoint.append({'text': body, 'items': new})
+                del checkpoint[:-60]
                 if new and body:
                     # Text before a tool call is commentary, not the answer.
                     emit("item/completed", {"item": {"type": "agentMessage", "id": f"c{msg_n}", "text": body, "phase": "commentary"}})
@@ -250,6 +274,12 @@ class ClaudeRuntime:
                 err = "; ".join(msg.errors or []) or (msg.result if msg.is_error else None)
                 return TurnResult(status, final, err, items)
         return TurnResult("failed", "", "claude session ended without a result", items)
+
+    async def recovery_checkpoint(self, thread_id: str, terminal: bool) -> str:
+        t = self.threads.get(thread_id)
+        if (t and t.lock.locked()) or not terminal:
+            raise RuntimeError_('previous Claude execution outcome is unknown')
+        return json.dumps({'thread': thread_id, 'events': self.checkpoints.get(thread_id, [])}, ensure_ascii=False)[-32000:]
 
     async def interrupt(self, thread_id: str, turn_id: str) -> None:
         t = self.threads.get(thread_id)

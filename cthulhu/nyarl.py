@@ -151,8 +151,12 @@ class NyarlBridge:
         No scope->thread registry is maintained in this agent.
         """
         candidate = params.get('threadId')
-        for attempt in range(2):
-            rt = self.runtime
+        previous_runtime = None
+        async def attempt(rt, note):
+            nonlocal candidate, previous_runtime
+            if previous_runtime is not None and previous_runtime is not rt:
+                candidate = None
+            previous_runtime = rt
             await rt.start()
             history = await self.link.call('turn_log', scope=scope, limit=HANDOFF_TURNS * 3)
             label = backends.label(self.backends.active_cfg)
@@ -178,7 +182,7 @@ class NyarlBridge:
             last = max((i for i, r in enumerate(history) if r['thread'] == candidate), default=-1)
             bridge = '\n'.join(f"已处理输入：{clip(r['input'],1500)}\n回复：{clip(r['reply'],1500)}"
                                for r in history[last+1:][-HANDOFF_TURNS:])
-            prompt = ('<handoff>以下仅为本会话已处理历史，不要重复执行。\n' + bridge + '</handoff>\n' if bridge else '') + params['prompt']
+            prompt = note + ('<handoff>以下仅为本会话已处理历史，不要重复执行。\n' + bridge + '</handoff>\n' if bridge else '') + params['prompt']
             pending_events = []
             def on_event(method, p):
                 item = p.get('item', {})
@@ -211,12 +215,11 @@ class NyarlBridge:
                                  model=self.backends.active_cfg.get('model'), thread=candidate,
                                  input=params['text'], reply=result.text or result.error or '',
                                  status=result.status, scope=scope)
-            if result.status == 'failed' and attempt == 0 and getattr(rt, 'retry_safe', True) and self.backends.trip():
-                candidate = None
-                continue
-            if result.text:
-                await emit({'type': 'final_text', 'content': result.text})
             return result
+        result = await self.recover(attempt, cancel=self.channel_runs[self.channel_run_id]['cancel'])
+        if result.text:
+            await emit({'type': 'final_text', 'content': result.text})
+        return result
 
     async def ipc(self, reader, writer):
         lock = asyncio.Lock()

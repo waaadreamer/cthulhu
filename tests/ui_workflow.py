@@ -44,6 +44,9 @@ async def main():
             t.store.x('UPDATE messages SET created_at=2,state=\'handled\' WHERE id=?',(m['id'],))
         m=t.store.add_message('az','worker','旧任务唯一消息',task_id='history_000');t.store.mark(m['id'],'handled')
         t.store.upsert_agent('worker','长提示执行者','old_one','test','az',{'task': '\n'.join(['长职责内容 '*20]*400)})
+        cfg={'backend':'codex','model':'gpt-6-astra'}
+        t.status['worker']={'state':'working','runtime':cfg | {'config':cfg,'default':cfg,'fallback_active':False,
+            'recovery':{'phase':'retrying','attempt':3,'retry':2,'retries':5,'source':'codex:gpt-6-astra','fallback':False}}}
         server=uvicorn.Server(uvicorn.Config(t.app(),host='127.0.0.1',port=port,log_level='error'))
         serve=asyncio.create_task(server.serve())
         while not server.started:
@@ -54,6 +57,11 @@ async def main():
             async for line in proc.stdout:
                 text=line.decode().strip()
                 print(text,flush=True)
+                if text == 'RECOVERY_DONE':
+                    status=t.status['worker']
+                    status['runtime']['recovery'].update(phase='completed',attempt=7,retry=0,source='codex:gpt-6.1-sol',fallback=True)
+                    status['runtime'].update(model='gpt-6.1-sol',fallback_active=True)
+                    await t.broadcast({'type':'status','agent_id':'worker','status':status})
                 if text == 'FEISHU_RECEIPT':
                     t.store.x('UPDATE channel_events SET receipt=? WHERE message_id=?', (json.dumps({'state':'sent','message_id':'fixture-platform-receipt'}),channel_mid))
                     await t.broadcast({'type':'chat','turn':t.store.turn(channel_mid)})

@@ -87,6 +87,21 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
             self.t.store.channel_accept('nyarlathotep','fixture-app','e1',scope+'wrong',{'prompt':'bad','text':'bad'})
         self.assertEqual(self.t.store.q('select count(*) n from chat_turns')[0]['n'],1)
 
+    async def test_scoped_recovery_keeps_one_ingress_and_final_reply(self):
+        from unittest.mock import patch
+        from cthulhu import backends
+        self.n.pending_runtime={'backend':'codex','model':'recovery-primary',
+            'fallback':{'backend':'codex','model':'recovery-fallback'}}
+        with patch.object(backends,'RETRY_DELAYS',(0,)*5):
+            events=await self.run_event(prompt='RECOVERY_FIXTURE channel')
+        self.assertEqual(len([e for e in events if e['type']=='final_text']),1)
+        self.assertEqual(len([e for e in events if e['type']=='correlation']),1)
+        self.assertEqual(self.t.store.q('select count(*) n from channel_events')[0]['n'],1)
+        self.assertEqual(self.t.store.q('select count(*) n from turn_log where scope != ?',[''])[0]['n'],7)
+        self.assertEqual(self.t.store.turn_log('nyarlathotep'),[])
+        self.assertEqual((self.path/'recovery-channel-effect').read_text(),'once')
+        self.assertEqual(self.n.recovery['attempt'],7)
+
     async def test_authority_and_dormant_scopes(self):
         for change in ({'sender_id':'outsider'},{'chat_id':'other-chat'},{'app_id':'other-app'},{'scope_id':'forged'}):
             with self.assertRaises(Exception):

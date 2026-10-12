@@ -34,9 +34,7 @@ class GalaxyAPIRuntime(CodexRuntime):
         self.server = None
         self.server_task = None
         self.stream_ids: set[str] = set()
-        self.retry_safe = True
         self.api_result = {}
-        self.request_count = 0
         self.turn_lock = asyncio.Lock()
 
     async def start(self):
@@ -78,13 +76,6 @@ class GalaxyAPIRuntime(CodexRuntime):
                 return JSONResponse({"error": {"message": "API request too large"}}, status_code=413)
         try:
             body = request_body(json.loads(data), [self.model])
-            self.request_count += 1
-            if self.request_count > 1:
-                # A follow-up inference may follow tools even if a native event was missed.
-                self.retry_safe = False
-            # From this point, loss of an acknowledgement makes dispatch ambiguous.
-            # Never automatically replay a possibly dispatched inference on another backend.
-            self.retry_safe = False
             opened = await self.link.call("api_open", provider=self.provider, body=body, timeout=20)
         except Exception:
             return JSONResponse({"error": {"message": "Galaxy API route unavailable"}}, status_code=503)
@@ -118,26 +109,9 @@ class GalaxyAPIRuntime(CodexRuntime):
                         pass
         return StreamingResponse(events(), media_type="text/event-stream")
 
-    def _notify(self, method, params):
-        if method == "item/started":
-            kind = params.get("item", {}).get("type")
-            if kind not in ("userMessage", "agentMessage", "reasoning", "plan", "contextCompaction"):
-                self.retry_safe = False
-        super()._notify(method, params)
-
-    async def _serve(self, msg):
-        if msg.get("method") == "item/tool/call":
-            self.retry_safe = False
-        await super()._serve(msg)
-
     async def run_turn(self, *args, **kwargs):
         async with self.turn_lock:
-            self.retry_safe = True
-            self.request_count = 0
-            result = await super().run_turn(*args, **kwargs)
-            if result.status == "failed" and not self.retry_safe:
-                result.error = (result.error or "Galaxy API failed") + "; automatic replay suppressed after possible tool execution"
-            return result
+            return await super().run_turn(*args, **kwargs)
 
     async def close(self):
         await super().close()

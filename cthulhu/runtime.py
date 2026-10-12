@@ -58,6 +58,7 @@ class CodexRuntime:
         self.listeners: dict[str, EventHandler] = {}  # thread id -> event callback
         self.tool_handlers: dict[str, ToolHandler] = {}
         self.usage: dict[str, dict] = {}             # thread id -> last token usage
+        self.serving: dict[asyncio.Task, str] = {}
 
     def launch_config(self) -> tuple[list[str], dict]:
         env = _child_env()
@@ -148,7 +149,9 @@ class CodexRuntime:
                     if fut and not fut.done():
                         fut.set_result(msg)
                 elif "id" in msg:
-                    asyncio.create_task(self._serve(msg))
+                    task = asyncio.create_task(self._serve(msg))
+                    self.serving[task] = (msg.get('params') or {}).get('threadId', '')
+                    task.add_done_callback(lambda t: self.serving.pop(t, None))
                 else:
                     self._notify(msg.get("method", ""), msg.get("params") or {})
         finally:
@@ -270,12 +273,42 @@ class CodexRuntime:
                 return await asyncio.wait_for(asyncio.shield(fut), timeout)
             except asyncio.TimeoutError:
                 await self.interrupt(thread_id, turn_id)
-                return await asyncio.wait_for(fut, 60)
+                result = await asyncio.wait_for(asyncio.shield(fut), 60)
+                return TurnResult('failed', result.text, 'turn timeout (execution settled)', result.items)
             finally:
                 self.turns.pop(turn_id, None)
         finally:
             if on_event:
                 self.listeners.pop(thread_id, None)
+
+    async def recovery_checkpoint(self, thread_id: str, terminal: bool) -> str:
+        # Do not start another model while a dispatched dynamic tool is still running.
+        serving = [t for t, thread in self.serving.items() if thread == thread_id]
+        if serving:
+            _, pending = await asyncio.wait(serving, timeout=60)
+            if pending:
+                raise RuntimeError_('previous tool call is still running; inspect its existing execution')
+        if not self.alive:
+            await self.start()
+            await self.resume_thread(thread_id, self.tool_handlers.get(thread_id))
+        snapshot = (await self.request('thread/read', {'threadId': thread_id, 'includeTurns': True}, timeout=20)).get('thread')
+        if not snapshot:
+            raise RuntimeError_('persisted thread snapshot unavailable')
+        turns = snapshot.get('turns', [])
+        if turns and turns[-1].get('status') in ('inProgress', 'running'):
+            turn_id = turns[-1]['id']
+            await self.interrupt(thread_id, turn_id)
+            for _ in range(60):
+                await asyncio.sleep(0.5)
+                snapshot = (await self.request('thread/read', {'threadId': thread_id, 'includeTurns': True}, timeout=10))['thread']
+                turns = snapshot.get('turns', [])
+                if turns and turns[-1].get('status') in ('completed', 'failed', 'interrupted'):
+                    break
+            else:
+                raise RuntimeError_('previous turn has not settled')
+        if not terminal and not (turns and turns[-1].get('status') in ('completed', 'failed', 'interrupted')):
+            raise RuntimeError_('previous dispatch outcome is unknown')
+        return json.dumps({'thread': thread_id, 'turns': turns[-3:]}, ensure_ascii=False)[-32000:]
 
     async def interrupt(self, thread_id: str, turn_id: str) -> None:
         try:

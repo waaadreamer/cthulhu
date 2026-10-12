@@ -122,50 +122,21 @@ class RuntimeSafetyTests(unittest.IsolatedAsyncioTestCase):
         return GalaxyAPIRuntime("unused", root, link=SimpleNamespace(connected=asyncio.Event()),
                                 provider="ali", state_dir=Path(root), model="gpt-6-astra")
 
-    async def test_native_and_dynamic_tools_disable_replay(self):
-        with tempfile.TemporaryDirectory() as root:
-            rt = self.runtime(root)
-            self.assertTrue(rt.retry_safe)
-            rt._notify("item/started", {"threadId": "t", "item": {"type": "reasoning"}})
-            self.assertTrue(rt.retry_safe)
-            rt._notify("item/started", {"threadId": "t", "item": {"type": "commandExecution"}})
-            self.assertFalse(rt.retry_safe)
-            rt.retry_safe = True
-            rt.tool_handlers["t"] = AsyncMock(return_value="done")
-            rt._write = AsyncMock()
-            await rt._serve({"id": 1, "method": "item/tool/call",
-                             "params": {"threadId": "t", "tool": "side_effect", "arguments": {}}})
-            self.assertFalse(rt.retry_safe)
-            rt.tool_handlers["t"].assert_awaited_once()
-
-    async def test_agent_does_not_replay_failed_side_effects(self):
-        agent = object.__new__(Agent)
-        runtime = SimpleNamespace(retry_safe=False)
-        agent.backends = SimpleNamespace(active=runtime, trip=lambda: self.fail("must not trip after tools"),
-                                          active_cfg={"backend": "galaxy_api", "model": "gpt-6-astra"})
-        agent.threads = {}
-        agent.ensure_thread = AsyncMock(return_value="t")
-        agent.handoff_context = AsyncMock(return_value="")
-        agent.memory_delta = AsyncMock(return_value="")
-        agent.run = AsyncMock(return_value=TurnResult("failed", error="disconnected after tool"))
-        agent.link = SimpleNamespace(call=AsyncMock())
-        result = await agent.run_main("execute once")
-        self.assertEqual(result.status, "failed")
-        agent.run.assert_awaited_once()
-
     async def test_startup_fallback_and_failed_switch_keep_old(self):
         with tempfile.TemporaryDirectory() as root:
             kw = dict(codex="unused", cwd=root, log_dir=Path(root), sub_agents=False)
             pair = backends.Backends({"backend": "galaxy_api", "provider": "offline", "model": "gpt-6-astra",
                                       "fallback": {"backend": "codex", "model": "gpt-6-astra"}}, **kw)
+            pair.primary.start = AsyncMock(side_effect=RuntimeError("provider offline"))
             pair.fallback.start = AsyncMock()
-            await pair.start()
+            with patch.object(backends, "RETRY_DELAYS", (0,)*5):
+                await pair.start()
             self.assertTrue(pair.using_fallback)
             self.assertEqual(pair.active_cfg["backend"], "codex")
             pair.fallback.start.assert_awaited_once()
-            # A startup failure is retried after a short hold, not the 30-minute one.
-            self.assertEqual(pair.hold, backends.STARTUP_RETRY)
-            pair.failed_at -= backends.STARTUP_RETRY + 1
+            # Five startup retries precede the configured fallback, with the usual hold.
+            self.assertEqual(pair.hold, backends.FALLBACK_HOLD)
+            pair.failed_at -= backends.FALLBACK_HOLD + 1
             self.assertFalse(pair.using_fallback)
 
 
