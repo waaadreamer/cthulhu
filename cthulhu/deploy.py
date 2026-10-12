@@ -37,11 +37,27 @@ RESTART_TIMEOUT = 5 * 60
 MAX_JOBS = 20
 
 
-async def git(root: Path, *args: str, check: bool = True) -> str:
+async def _communicate(p, timeout: float, operation: str):
+    """Settle our entire command group before rollback or cancellation continues."""
+    communication = asyncio.create_task(p.communicate())
+    try:
+        return await asyncio.wait_for(asyncio.shield(communication), timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError) as error:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await communication
+        if isinstance(error, asyncio.CancelledError):
+            raise
+        raise RuntimeError(f"{operation} timed out after {timeout:g}s; subprocess group stopped") from None
+
+
+async def git(root: Path, *args: str, check: bool = True, timeout: float = 300) -> str:
     p = await asyncio.create_subprocess_exec(
         "git", "-c", f"safe.directory={root}", *args, cwd=root,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, err = await asyncio.wait_for(p.communicate(), 300)
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+    out, err = await _communicate(p, timeout, f"git {args[0] if args else ''}".strip())
     if check and p.returncode:
         raise RuntimeError(f"git {' '.join(args)}: {(err or out).decode(errors='replace').strip()[:500]}")
     return out.decode().strip()
@@ -98,8 +114,9 @@ async def _is_ancestor(root: Path, a: str, b: str) -> bool:
 
 async def _run(*cmd: str, cwd: Path, env: dict | None = None, timeout: float = 300) -> None:
     p = await asyncio.create_subprocess_exec(*cmd, cwd=cwd, env=os.environ | (env or {}),
-                                             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    out, _ = await asyncio.wait_for(p.communicate(), timeout)
+                                             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                                             start_new_session=True)
+    out, _ = await _communicate(p, timeout, Path(cmd[0]).name)
     if p.returncode:
         raise RuntimeError(f"{Path(cmd[0]).name} {' '.join(cmd[1:3])} 失败：{out.decode(errors='replace')[-800:]}")
 
