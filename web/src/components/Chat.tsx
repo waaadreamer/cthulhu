@@ -127,7 +127,7 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
           {!results && hasMore && <div className="flex justify-center"><Loader2 className="h-4 w-4 animate-spin text-slate-600" /></div>}
           {!results && turns.length === 0 && <Empty agent={agent} />}
           {group(shown).map((g) => g.kind === 'task'
-            ? <TaskView key={g.key} turns={g.turns} agent={agent} continued={g.continued} />
+            ? <TaskView key={g.key} turns={g.turns} agent={agent} streams={streams} />
             : <TurnView key={g.key} turn={g.turns[0]} agent={agent} stream={streams[g.turns[0].id]} highlight={search ?? undefined} />)}
         </div>
       </div>
@@ -210,61 +210,46 @@ function TurnView({ turn, agent, stream, highlight }: { turn: Turn; agent: Agent
   )
 }
 
-type Group = { kind: 'turn' | 'task'; key: string; turns: Turn[]; continued?: boolean }
+type Group = { kind: 'turn' | 'task'; key: string; turns: Turn[] }
 
-/** Consecutive proactive notes about the same task collapse into one block. An owner message closes
- * the open blocks, so whatever the task reports after it (e.g. the final summary) appears below it. */
+/** One stable group per task, ordered by its latest message/update, even across owner messages. */
 function group(turns: Turn[]): Group[] {
-  const out: Group[] = []
-  let open = new Map<string, Group>()
-  for (const t of turns) {
-    if (!t.user_text && t.task_id) {
-      const g = open.get(t.task_id)
-      if (g) { g.turns.push(t); continue }
-      const ng: Group = { kind: 'task', key: `task-${t.task_id}-${t.id}`, turns: [t] }
-      open.set(t.task_id, ng)
-      out.push(ng)
-      continue
-    }
-    if (t.user_text) open = new Map()
-    out.push({ kind: 'turn', key: t.id, turns: [t] })
+  const groups = new Map<string, Group>()
+  for (const t of [...turns].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))) {
+    const key = t.task_id ? `task-${t.task_id}` : t.id
+    const g = groups.get(key)
+    if (g) g.turns.push(t)
+    else groups.set(key, { kind: t.task_id ? 'task' : 'turn', key, turns: [t] })
   }
-  // Earlier blocks of a task that went on later are marked as continued below.
-  const seen = new Set<string>()
-  for (let i = out.length - 1; i >= 0; i--) {
-    const g = out[i]
-    if (g.kind !== 'task') continue
-    const id = g.turns[0].task_id!
-    if (seen.has(id)) g.continued = true
-    seen.add(id)
-  }
-  return out
+  const latest = (g: Group) => Math.max(...g.turns.map((t) => Math.max(t.created_at, t.updated_at)))
+  return [...groups.values()].sort((a, b) => latest(a) - latest(b) || a.key.localeCompare(b.key))
 }
 
 /** A task's reports: progress steps fold into a chain of thought. The final summary stays open, and so
  * does a blocked note while it is the latest word on the task (it summarises and asks the owner). */
-function TaskView({ turns, agent, continued }: { turns: Turn[]; agent: Agent; continued?: boolean }) {
+function TaskView({ turns, agent, streams }: { turns: Turn[]; agent: Agent; streams: Record<string, Stream> }) {
   const latest = turns[turns.length - 1]
   const summary = [...turns].reverse().find((t) => t.kind === 'summary')
   // Done when the task is closed; a deliverable summary on a still-open task is shown open but not as "done".
   const done = !!summary && (latest.task_state ?? 'done') === 'done'
   const blocked = !done && latest.kind === 'blocked'
   const final = summary ?? (blocked ? latest : undefined)
-  const steps = turns.filter((t) => t !== final)
-  const [open, setOpen] = useState(!final && !continued)
+  const finalIndex = final ? turns.indexOf(final) : turns.length
+  const steps = turns.slice(0, finalIndex)
+  const after = final ? turns.slice(finalIndex + 1) : []
+  const [open, setOpen] = useState(!final)
   const title = turns[0].task_title || turns[0].origin || '任务'
   const last = steps[steps.length - 1]
   return (
-    <div className="flex gap-3 animate-rise">
+    <div data-task-id={latest.task_id} className="flex gap-3 animate-rise">
       <Avatar role={agent.role} size="sm" />
       <div className="min-w-0 flex-1 pt-0.5">
         <div className="mb-1.5 flex items-center gap-1.5 text-xs">
-          {continued && !final ? <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
-            : done ? <CircleCheck className="h-3.5 w-3.5 text-emerald-400" />
+          {done ? <CircleCheck className="h-3.5 w-3.5 text-emerald-400" />
             : blocked ? <CircleAlert className="h-3.5 w-3.5 text-amber-300" />
             : <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />}
           <span className="font-medium text-slate-200">{title}</span>
-          <span className="text-slate-500">· {continued && !final ? '后续见下方' : done ? '已完成' : blocked ? '需要你决定' : '进行中'} · {timeLabel(turns[turns.length - 1].created_at)}</span>
+          <span className="text-slate-500">· {done ? '已完成' : blocked ? '需要你决定' : '进行中'} · {timeLabel(turns[turns.length - 1].created_at)}</span>
         </div>
         {steps.length > 0 && (
           <div className="mb-3 overflow-hidden rounded-xl border border-white/[0.06] bg-black/20">
@@ -279,7 +264,9 @@ function TaskView({ turns, agent, continued }: { turns: Turn[]; agent: Agent; co
                   <li key={t.id} className="relative border-l border-white/10 pl-4 text-sm text-slate-300">
                     <span className={`absolute -left-[4.5px] top-1.5 h-2 w-2 rounded-full ${t.kind === 'blocked' ? 'bg-amber-300' : 'bg-violet-400/70'}`} />
                     <div className="mb-0.5 text-[11px] text-slate-500">{timeLabel(t.created_at)}</div>
-                    <Markdown text={t.reply} />
+                    {t.user_text && <p className="mb-2 whitespace-pre-wrap text-indigo-300">{t.user_text}</p>}
+                    {(streams[t.id]?.activity ?? t.activity).length > 0 && <Activity items={streams[t.id]?.activity ?? t.activity} live={t.status === 'running'} />}
+                    <Markdown text={streams[t.id]?.reply ?? t.reply} streaming={t.status === 'running'} />
                   </li>
                 ))}
               </ol>
@@ -288,10 +275,11 @@ function TaskView({ turns, agent, continued }: { turns: Turn[]; agent: Agent; co
         )}
         {final && (
           <div className={blocked ? 'rounded-xl border border-amber-300/20 bg-amber-300/[0.04] px-3.5 py-2.5' : ''}>
-            <Markdown text={final.reply} />
+            <Markdown text={streams[final.id]?.reply ?? final.reply} streaming={final.status === 'running'} />
             <Footer turn={final} />
           </div>
         )}
+        {after.map((t) => <TurnView key={t.id} turn={t} agent={agent} stream={streams[t.id]} />)}
       </div>
     </div>
   )

@@ -216,7 +216,7 @@ class Store:
                (state, time.time() if state == "handled" else None, mid))
 
     def messages(self, agent_id: str | None = None, limit=100, before: float | None = None,
-                 search: str | None = None, task_id: str | None = None) -> list[dict]:
+                 search: str | None = None, task_id: str | None = None, before_id: str | None = None) -> list[dict]:
         sql, args = "SELECT * FROM messages WHERE 1=1", []
         if agent_id:
             sql += " AND (sender=? OR receiver=?)"
@@ -227,10 +227,15 @@ class Store:
         if task_id:
             sql += " AND task_id=?"
             args.append(task_id)
-        if before:
+        if before_id:
+            cursor = self.message(before_id)
+            if cursor:
+                sql += " AND (created_at, id) < (?, ?)"
+                args += [cursor['created_at'], cursor['id']]
+        elif before:
             sql += " AND created_at<?"
             args.append(before)
-        rows = self.q(sql + " ORDER BY created_at DESC LIMIT ?", (*args, limit))
+        rows = self.q(sql + " ORDER BY created_at DESC, id DESC LIMIT ?", (*args, limit))
         return rows[::-1]
 
     def pending_counts(self) -> dict[str, int]:
@@ -250,12 +255,20 @@ class Store:
     def set_task(self, task_id: str, state: str) -> None:
         self.x("UPDATE tasks SET state=?, updated_at=? WHERE id=?", (state, time.time(), task_id))
 
-    def tasks(self, search: str | None = None, limit=20) -> list[dict]:
-        sql, args = "SELECT * FROM tasks", []
+    def tasks(self, search: str | None = None, limit=20, before_id: str | None = None,
+              state: str | None = None, history=False) -> list[dict]:
+        sql, args = "SELECT * FROM tasks WHERE 1=1", []
         if search:
-            sql += " WHERE title LIKE ? OR id IN (SELECT task_id FROM messages WHERE text LIKE ?)"
-            args += [f"%{search}%"] * 2
-        return self.q(sql + " ORDER BY updated_at DESC LIMIT ?", (*args, limit))
+            sql += " AND (title LIKE ? OR id LIKE ? OR id IN (SELECT task_id FROM messages WHERE text LIKE ?))"
+            args += [f"%{search}%"] * 3
+        if state:
+            sql += " AND state=?"
+            args.append(state)
+        if before_id and (cursor := self.task(before_id)):
+            sql += " AND (created_at, id) < (?, ?)"
+            args += [cursor['created_at'], cursor['id']]
+        order = 'created_at DESC, id DESC' if history else 'updated_at DESC'
+        return self.q(sql + f" ORDER BY {order} LIMIT ?", (*args, limit))
 
     # permanent memory
 

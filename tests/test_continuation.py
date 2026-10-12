@@ -187,7 +187,7 @@ class ContinuationGuards(unittest.IsolatedAsyncioTestCase):
     async def test_wait_expiry_legacy_default_dedup_and_escalation(self):
         await self.review('waiting')
         records = self.records()
-        records[self.task].pop('check_at')  # Already-deployed waiting records have no deadline.
+        records[self.task]['check_at'] = time.time()+86400  # Already-deployed waiting records have no deadline.
         records[self.task]['at'] = time.time()-901
         self.t.store.set_setting('continuations', records)
         await self.c.scan('yog')
@@ -201,10 +201,10 @@ class ContinuationGuards(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.records()[self.task]['phase'], 'escalated')
 
     async def test_wait_reinspection_guards_and_same_evidence_does_not_extend(self):
-        await self.review('waiting', check_after_seconds=300)
-        first = self.records()[self.task]['check_at']
-        await self.review('waiting', check_after_seconds=3600)
-        self.assertEqual(self.records()[self.task]['check_at'], first)
+        await self.review('waiting')
+        first = self.records()[self.task]['at']
+        await self.review('waiting')
+        self.assertEqual(self.records()[self.task]['at'], first)
         records = self.records();records[self.task]['check_at'] = 0
         self.t.store.set_setting('continuations', records)
         self.result.update(state='working', current_task=self.task)
@@ -271,3 +271,8 @@ class ContinuationGuards(unittest.IsolatedAsyncioTestCase):
                                ('yog', 'restart', {'agent_id': 'old'})]:
             with self.assertRaises(Denied):
                 await self.t.handle_agent_call(SimpleNamespace(id=aid), method, p)
+
+        with self.assertRaisesRegex(Denied, 'temple_task_continuation'):
+            await self.t.handle_agent_call(SimpleNamespace(id='yog'), 'send', {'to': 'shub', 'text': 'bypass'})
+        from cthulhu.gods import Yog
+        self.assertIn('temple_task_continuation', Yog.send_tool(Yog.__new__(Yog))['description'])

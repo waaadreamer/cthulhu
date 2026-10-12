@@ -11,7 +11,6 @@ class Continuations:
     def __init__(self, temple):
         self.temple = temple
         self.lock = asyncio.Lock()
-        self.recheck_seconds = temple.config.get('continuation_recheck_seconds', 900)
 
     @staticmethod
     def collection_source(row):
@@ -31,7 +30,7 @@ class Continuations:
         from .store import new_id
         now, mid = time.time(), new_id('continuation')
         if purpose == 'inspect':
-            text = ('[Automatic waiting-state inspection] The evidence for this unfinished task is due for refresh. '
+            text = ('[Automatic waiting-state inspection] This patrol checks the waiting condition of this unfinished task. '
                     'This is NOT evidence that its background workload stopped and NOT authorization to restart it. '
                     'Read temple_task_state/latest instructions, reuse any collection already in flight, and ask the '
                     'existing executor for one read-only check of the current process/job, progress, last update and '
@@ -46,8 +45,7 @@ class Continuations:
                  f"Evidence: {evidence}\nLatest delegated instruction:\n{(row['instruction'] or {}).get('text', '')}")
         rec = {'phase': 'reminded', 'purpose': purpose, 'revision': row['revision'],
                'instruction_id': (row['instruction'] or {}).get('id'), 'at': now, 'deadline': now + 900,
-               'message_id': mid, 'evidence': evidence, 'text': text,
-               'recheck_seconds': row['continuation'].get('recheck_seconds', self.recheck_seconds)}
+               'message_id': mid, 'evidence': evidence, 'text': text}
         records = t.store.setting('continuations') or {}
         records[row['task']['id']] = rec
         t.store.set_setting('continuations', records)
@@ -79,8 +77,10 @@ class Continuations:
                            "ORDER BY created_at DESC LIMIT 1", (task_id,))
         owner_blocked = bool(report and report['status'] == 'blocked' and
                              (not instruction or report['created_at'] > instruction['created_at']))
-        active = any((not r.get('current_task') or r['current_task'] == task_id) and
-                     (r.get('state') == 'working' or r.get('active_runs') or r.get('background_busy')) for r in executors)
+        def task_active(r):
+            return bool((r.get('current_task') or r.get('last_task')) == task_id and
+                        (r.get('state') == 'working' or r.get('active_runs') or r.get('background_busy')))
+        active = any(task_active(r) for r in executors)
         pending = store.q("SELECT id FROM messages WHERE task_id=? AND state!='handled' AND receiver IN "
                           "(SELECT id FROM agents WHERE role IN ('shub','old_one','ghroth')) AND sender NOT IN "
                           "(SELECT id FROM agents WHERE role='yog')", (task_id,))
@@ -88,9 +88,10 @@ class Continuations:
         unavailable = any(not r.get('online') or not r.get('state') or r.get('draining') for r in executors)
         revision = hashlib.sha256(json.dumps([task['state'], instruction and instruction['id'],
             [(m['id'], m['state']) for m in messages if t.role_of(m['sender']) != Role.YOG],
-            [{k: r.get(k) for k in ('agent_id', 'online', 'state', 'current_task', 'last_task',
-                                  'finished_at', 'active_runs', 'background_busy', 'draining',
-                                  'last_activity_at', 'activity_task')} for r in executors]],
+            [{'agent_id': r['agent_id'], 'online': r.get('online'), 'draining': r.get('draining'),
+              'active': task_active(r), 'known_state': bool(r.get('state')),
+              'finished_at': r.get('finished_at') if r.get('last_task') == task_id else None}
+             for r in executors]],
             sort_keys=True).encode()).hexdigest()
         return {'task': task, 'instruction': instruction, 'messages': messages, 'executors': executors,
                 'active': active, 'pending': bool(pending), 'unavailable': unavailable,
@@ -197,21 +198,18 @@ class Continuations:
                 records = t.store.setting('continuations') or {}
                 rec = records.get(task['id'], {})
                 source = self.collection_source(row)
-                if (rec.get('purpose') == 'inspect' and rec.get('phase') in ('reminded', 'executing') and
+                if (rec.get('purpose') == 'inspect' and rec.get('phase') in ('reminded', 'executing', 'escalated') and
                         source and source['finished_at'] > rec['at'] and not row['owner_blocked']):
                     # Re-arm independently of a successful model review. This is another inspection,
                     # not a claim that the workload is healthy or permission to rerun it.
-                    delay = rec.get('recheck_seconds', self.recheck_seconds)
                     rec = {'phase': 'waiting', 'revision': row['revision'], 'source': source,
-                           'at': source['finished_at'], 'check_at': source['finished_at'] + delay,
-                           'recheck_seconds': delay,
+                           'at': source['finished_at'],
                            'instruction_id': (row['instruction'] or {}).get('id'),
                            'evidence': 'A new task-scoped collection finished; interpret its latest result and report it. '
-                                       'Task remains open; schedule bounded follow-up inspection without restarting workload.'}
+                                       'Task remains open; inspect on each patrol without restarting workload.'}
                     records[task['id']] = rec
                     t.store.set_setting('continuations', records)
                 if (rec.get('phase') == 'waiting' and
-                        time.time() >= rec.get('check_at', rec.get('at', time.time()) + 900) and
                         not row['owner_blocked'] and not row['active'] and not row['pending'] and
                         not any(r.get('draining') for r in row['executors'])):
                     updated = await self.remind(yog_id, row, rec.get('evidence', ''), purpose='inspect')
@@ -291,10 +289,9 @@ class Continuations:
             if rec.get('phase') == 'owner_blocked' and rec.get('instruction_id') == (row['instruction'] or {}).get('id'):
                 return {'state': 'owner_blocked', 'reason': 'a new authorized instruction is required'}
             if state != 'ready':
-                source = self.collection_source(row)
-                if state == 'waiting' and rec.get('phase') == 'waiting' and rec.get('source') == source:
-                    return {'state': 'waiting', 'check_at': rec.get('check_at', rec['at'] + self.recheck_seconds),
-                            'reason': 'same collection evidence; do not extend its deadline'}
+                if (state == 'waiting' and rec.get('purpose') == 'inspect' and
+                        rec.get('phase') in ('reminded', 'executing', 'escalated')):
+                    return {'state': rec['phase'], 'reason': 'collection already requested; scan tracks its completion'}
                 if rec.get('revision') == row['revision'] and rec.get('phase') == state:
                     return {'state': state}
                 # Rewording an unchanged assessment does not rearm a reminder.
@@ -302,15 +299,6 @@ class Continuations:
                     return {'state': 'duplicate'}
                 rec = {'phase': state, 'revision': row['revision'], 'evidence': p['evidence'], 'at': time.time(),
                        'instruction_id': (row['instruction'] or {}).get('id')}
-                if state == 'waiting':
-                    delay = p.get('check_after_seconds', self.recheck_seconds)
-                    if 'check_after_seconds' in p and (not isinstance(delay, (int, float)) or not 300 <= delay <= 3600):
-                        raise ValueError('check_after_seconds must be between 300 and 3600')
-                    rec['source'] = source
-                    rec['recheck_seconds'] = delay
-                    if source:
-                        rec['at'] = min(time.time(), source['finished_at'])
-                    rec['check_at'] = rec['at'] + delay
             else:
                 if row['owner_blocked'] or row['active'] or row['pending'] or row['unavailable']:
                     return {'state': 'guarded', 'active': row['active'], 'pending': row['pending'],

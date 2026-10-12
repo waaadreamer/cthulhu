@@ -286,7 +286,7 @@ class Temple:
         role = me["role"]
         if method == "send":
             if role == Role.YOG and self.role_of(p["to"]) == Role.SHUB:
-                raise Denied("use continuation_review for task-scoped, deduplicated reminders")
+                raise Denied("use temple_task_continuation for task-scoped, deduplicated reminders")
             task_id, status = self.task_fields(role, self.role_of(p["to"]), p)
             msg = await self.route(conn.id, p["to"], p["text"], kind=p.get("kind", "message"),
                                    priority=int(p.get("priority", 0)), reply_to=p.get("reply_to"),
@@ -877,7 +877,11 @@ class Temple:
                 before = float(q["before"]) if q.get("before") else None
                 return JSONResponse(self.store.messages(q.get("agent_id") or None,
                                                         limit=min(int(q.get("limit", 100)), 500), before=before,
-                                                        task_id=q.get("task_id") or None))
+                                                        task_id=q.get("task_id") or None, before_id=q.get("before_id") or None))
+            if path == "tasks":
+                return JSONResponse(self.store.tasks(q.get("search") or None,
+                    limit=max(1, min(int(q.get("limit", 50)), 100)), before_id=q.get("before_id") or None,
+                    state=q.get("state") or None, history=True))
             if path == "memory":
                 if request.method == "POST":
                     # The owner corrects or removes an entry by hand.

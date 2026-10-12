@@ -108,7 +108,7 @@ class WorkerGuards(unittest.IsolatedAsyncioTestCase):
         self.assertIn('LATEST_SCOPE', self.t.store.message(r['message_id'])['text'])
 
     async def test_wait_deadline_is_untouched_and_nudge_reservation_survives_restart(self):
-        await self.review('waiting', check_after_seconds=900)
+        await self.review('waiting')
         original = self.records()[self.task].copy()
         self.assertEqual((await self.worker_review())['state'], 'guarded')
         self.assertEqual(self.records()[self.task], original)

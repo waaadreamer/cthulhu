@@ -46,7 +46,6 @@ class HarnessServer(unittest.TestCase):
         temple = {"secret": cls.secret, "db": str(cls.dir / "temple.db"), "listen": ["127.0.0.1", cls.port],
                   "galaxies": [{"id": "g1", "name": "test", "token": gtoken}],
                   "gods": [{"id": v, "role": k, "galaxy": "g1"} for k, v in cls.ids.items()]}
-        temple.update(getattr(cls, 'temple_options', {}))
         galaxy = {"id": "g1", "token": gtoken, "temple_ws": f"ws://127.0.0.1:{cls.port}/ws",
                   "state": str(cls.dir / "galaxy"), "codex": FAKE, "cwd": str(cls.dir), "patrol_interval": cls.patrol_interval, "runtimes": cls.runtimes}
         (cls.dir / "temple.json").write_text(json.dumps(temple))
@@ -56,9 +55,8 @@ class HarnessServer(unittest.TestCase):
         py = str(ROOT / "venv" / "bin" / "python")
         env = os.environ | {"PYTHONPATH": str(ROOT), "CTHULHU_FAKE_CLAUDE": "1"}
         cls.temple = subprocess.Popen([py, "-m", "cthulhu", "temple", "--config", str(cls.dir / "temple.json")], env=env)
-        time.sleep(1.5)
         cls.galaxy = subprocess.Popen([py, "-m", "cthulhu", "galaxy", "--config", str(cls.dir / "galaxy.json")], env=env)
-        cls.cookie = cls.login()
+        cls.cookie = cls.wait(cls.login, 30)
         cls.wait(lambda: all(a["online"] for a in cls.api("directory")["agents"]), 30)
 
     @classmethod

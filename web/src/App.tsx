@@ -108,7 +108,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
         {working > 0 && <span className="chip bg-amber-400/15 text-amber-300">{working} 工作中</span>}
       </NavItem>
       <NavItem active={view.kind === 'messages'} onClick={() => go({ kind: 'messages' })}>
-        <Waypoints className="h-[18px] w-[18px] text-fuchsia-300" /><span className="flex-1">消息流</span>
+        <Waypoints className="h-[18px] w-[18px] text-fuchsia-300" /><span className="flex-1">任务与消息</span>
       </NavItem>
       <NavItem active={view.kind === 'settings'} onClick={() => go({ kind: 'settings' })}>
         <SlidersHorizontal className="h-[18px] w-[18px] text-amber-300" /><span className="flex-1">模型设置</span>

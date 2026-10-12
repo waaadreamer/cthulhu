@@ -153,7 +153,7 @@ function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; on
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
       <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-white/10 bg-abyss-900/95 shadow-2xl backdrop-blur-xl animate-rise">
         <div className={`h-1 bg-gradient-to-r ${m.grad}`} />
-        <header className="flex items-start gap-3 p-5">
+        <header className="flex shrink-0 items-start gap-3 p-5">
           <Avatar role={agent.role} size="lg" live={agent} />
           <div className="min-w-0 flex-1">
             <h3 className="text-lg font-semibold text-white">{agent.name}</h3>
@@ -163,8 +163,11 @@ function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; on
           </div>
           <button className="btn-icon" onClick={onClose}><X className="h-5 w-5" /></button>
         </header>
-        {agent.task && <p className="mx-5 mb-4 rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-sm text-slate-300">{agent.task}</p>}
-        <nav className="flex gap-1 border-b border-white/[0.06] px-5">
+        {agent.task && <details className="mx-5 mb-4 shrink-0 rounded-xl border border-white/[0.06] bg-white/[0.03] text-sm text-slate-300">
+          <summary className="cursor-pointer p-3">任务与职责</summary>
+          <div className="max-h-[25vh] overflow-y-auto whitespace-pre-wrap break-words px-3 pb-3">{agent.task}</div>
+        </details>}
+        <nav className="flex shrink-0 gap-1 border-b border-white/[0.06] px-5">
           {(['latest', ...(hasMemory ? ['memory'] : []), 'messages'] as const).map((t) => (
             <button key={t} onClick={() => setTab(t as typeof tab)}
               className={`relative px-3 py-2.5 text-sm transition ${tab === t ? 'text-white' : 'text-slate-500 hover:text-slate-300'}`}>

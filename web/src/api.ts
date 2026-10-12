@@ -68,8 +68,12 @@ export interface Turn {
   updated_at: number
 }
 
+export interface Task { id: string; title: string; state: 'open' | 'done'; created_at: number; updated_at: number }
+
 export interface Message {
   id: string
+  task_id?: string | null
+  status?: string | null
   sender: string
   receiver: string
   kind: string
