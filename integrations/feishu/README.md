@@ -43,6 +43,8 @@ worker的`bin_dir`需要真实Node和官方lark-cli的可执行链接或实际�
 
 ### 单会话历史导入
 
+源端 `cthulhu.feishu_convert` 将明确审阅的单scope历史转换为下述输入，复用本导入器校验；命令、审阅格式、源文件边界和已验证范围见 [CONVERT.md](CONVERT.md)。`reviewed: true` 仅记录人工审阅，不构成自动脱敏或身份授权。
+
 `venv/bin/python -m cthulhu.feishu_import --config TRUSTED_DISABLED_CONFIG --bundle REVIEWED_HISTORY_JSON --sha256 EXPECTED_FILE_SHA256` 默认仅校验，不访问数据库。维护者在切换前备份已有数据库，再追加 `--db TEMPLE_DB --apply` 原子导入；不新增公开RPC或传输入口。配置是 `{"feishu":{"enabled":false,"app_id":"...","owner":{"sender_id":"...","chat_id":"...","verified_by":"可信绑定证据","legacy_scope_id":"对应旧scope"}}}`，必要时 `owner.topic_id` 指定该主题。标识全部来自可信绑定及旧catalog映射，不能从待导入文本自证。
 
 输入格式如下（仅虚构示例；sha256填写所选源文件真实哈希，另用CLI参数核对传输文件哈希）：

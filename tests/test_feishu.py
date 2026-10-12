@@ -270,3 +270,28 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         final = next(e['content'] for e in events if e['type'] == 'final_text')
         self.assertIn('prior scoped result', final)  # Fake runtime echoes the actual handoff input.
         self.assertEqual(self.t.store.turn_log('nyarlathotep'), [])
+
+    async def test_converted_bundle_import_and_real_server_handoff(self):
+        from test_feishu_convert import fixture
+        from cthulhu.feishu_convert import convert, write_bundle
+        from cthulhu.feishu_import import import_history
+        config, catalog, home, review = fixture(self.path / 'conversion')
+        review['turns'][0]['reply'] = 'REPLY reviewed continuity receipt'
+        bundle = convert(config, catalog, home, review)
+        digest = write_bundle(self.path / 'continuity.json', bundle)
+        self.assertEqual(import_history(self.t.store, config, bundle)['imported'], 2)
+        self.assertTrue(import_history(self.t.store, config, bundle)['duplicate'])
+        self.assertEqual(self.t.store.q('SELECT * FROM channel_events'), [])
+        with self.assertRaises(Exception):
+            await self.n.link.call('turn_log', scope='feishu:fixture-app:fixture-owner:fixture-chat')
+        events = await self.run_event(prompt='new question', thread='thread-a')
+        thread = next(e['threadId'] for e in events if e['type'] == 'system')
+        self.assertNotIn(thread, ('thread-a', 'thread-b'))
+        final = next(e['content'] for e in events if e['type'] == 'final_text')
+        self.assertIn('reviewed continuity receipt', final)
+        self.assertNotIn('DO_NOT_EXPORT', final)
+        self.assertEqual(self.t.store.turn_log('nyarlathotep'), [])
+        self.assertEqual(len(self.t.store.q('SELECT * FROM channel_events')), 1)
+        print('CONVERT_IMPORT_SERVER ' + json.dumps({'fixture': True, 'source_threads': 2,
+              'imported_turns': 2, 'duplicate_import': False, 'new_thread': thread,
+              'pre_ingress_history_denied': True, 'bundle_sha256': digest}), flush=True)
