@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from cthulhu.protocol import Link, agent_token  # noqa: E402
+from cthulhu.roles import OWNER  # noqa: E402
 from cthulhu.store import Store  # noqa: E402
 from cthulhu.temple import password_hash  # noqa: E402
 
@@ -102,6 +103,26 @@ class HarnessServer(unittest.TestCase):
     def chat(self, to, text):
         msg = self.api("send", {"to": to, "text": text})
         return self.wait(lambda: next(t for t in self.api(f"chat?agent_id={to}") if t["id"] == msg["id"] and t["status"] == "done"))
+
+class GhrothMemorySources(unittest.IsolatedAsyncioTestCase):
+    """Only the owner and Azathoth can grow Ghroth's permanent context; Nyarl, the other sender that reaches it, cannot."""
+    async def distilled_for(self, role):
+        from cthulhu.gods import Ghroth
+        from cthulhu.runtime import TurnResult
+        g = object.__new__(Ghroth)
+        g.last_turn, calls = ("rt", "thread"), []
+        async def distill(*a, **kw):
+            calls.append(kw)
+        g.distill = distill
+        await g.after_turn([{"sender_role": role}], TurnResult("completed"))
+        await asyncio.sleep(0)
+        return calls
+
+    async def test_sources(self):
+        self.assertEqual(await self.distilled_for("azathoth"), [{}])
+        self.assertEqual(await self.distilled_for(OWNER), [{}])
+        self.assertEqual(await self.distilled_for("nyarlathotep"), [])
+
 
 class Universe(HarnessServer):
     def test_owner_chat_and_memory(self):
