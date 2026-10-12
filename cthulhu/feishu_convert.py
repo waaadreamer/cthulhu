@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime
@@ -92,6 +93,96 @@ def message(record, role):
                     and isinstance(c.get('text'), str) for c in content))
 
 
+def bridge_input(record, config):
+    """Read the generated prompt envelope, never tags inside user JSON text."""
+    if not message(record, 'user'):
+        raise ValueError('unsupported input message')
+    p = record['payload']
+    text = p['message'] if record['type'] == 'event_msg' else '\n'.join(c['text'] for c in p['content'])
+    delimiter = '\n\n## user_message\n\n'
+    if text.count(delimiter) != 1:
+        raise ValueError('missing or ambiguous bridge delimiter')
+    prefix, tail = text.split(delimiter)
+    if not prefix.strip():
+        raise ValueError('missing bridge system prefix')
+
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate envelope JSON key')
+            result[key] = value
+        return result
+
+    decoder = json.JSONDecoder(object_pairs_hook=unique_pairs)
+    sections = {}
+    order = ('bridge_context', 'bridge_instructions', 'topic_context', 'quoted_messages',
+             'interactive_cards', 'comment_context', 'user_input')
+    previous = -1
+    while tail.strip():
+        tail = tail.lstrip()
+        match = re.match(r'<([a-z_]+)>', tail)
+        if not match or match[1] not in order or order.index(match[1]) <= previous:
+            raise ValueError('unexpected, nested or duplicate prompt section')
+        tag = match[1]
+        previous = order.index(tag)
+        value, end = decoder.raw_decode(tail[match.end():].lstrip())
+        remainder = tail[match.end():].lstrip()[end:].lstrip()
+        closing = '</' + tag + '>'
+        if not remainder.startswith(closing):
+            raise ValueError('prompt section closing delimiter mismatch')
+        sections[tag] = value
+        tail = remainder[len(closing):]
+    if 'bridge_context' not in sections or 'user_input' not in sections:
+        raise ValueError('required bridge sections missing')
+    ctx, user = sections['bridge_context'], sections['user_input']
+    owner = config['feishu']['owner']
+    if (not isinstance(ctx, dict) or not isinstance(user, dict)
+            or ctx.get('chatId') != owner['chat_id'] or ctx.get('senderId') != owner['sender_id']
+            or (ctx.get('threadId') or '') != (owner.get('topic_id') or '')):
+        raise ValueError('source envelope differs from trusted binding')
+    if not isinstance(user.get('text'), str):
+        raise ValueError('bridge input text required')
+    return user
+
+
+def reviewed_records(path, tid, expected_hash, turns):
+    """Hash the complete source, retaining only explicitly reviewed references.
+
+    Tool-heavy rollouts can exceed the output bound. Limit each JSONL record,
+    rather than truncating the file or retaining unrelated tool/environment data.
+    """
+    wanted = set()
+    for turn in turns:
+        refs = [turn['start_line'], turn['finish_line'], *turn['input_lines'], *turn['reply_lines']]
+        if any(type(n) is not int or n < 1 for n in refs):
+            raise ValueError('invalid source line reference')
+        wanted.update(refs)
+    digest = hashlib.sha256()
+    records, boundaries = {}, []
+    line_number = 0
+    with path.open('rb') as f:
+        while raw := f.readline(feishu_import.MAX_BYTES + 1):
+            if len(raw) > feishu_import.MAX_BYTES:
+                raise ValueError('source JSONL record exceeds size bound')
+            digest.update(raw)
+            line_number += 1
+            record = json.loads(raw)
+            if line_number == 1 and (record.get('type') != 'session_meta'
+                                    or record.get('payload', {}).get('id') != tid):
+                raise ValueError('source session identity mismatch')
+            if line_number in wanted:
+                records[line_number] = record
+            if any(event(record, kind) for kind in
+                   ('task_started', 'task_complete', 'task_failed', 'turn_aborted')):
+                boundaries.append(line_number)
+    if digest.hexdigest() != expected_hash:
+        raise ValueError('source changed after review')
+    if not line_number or set(records) != wanted:
+        raise ValueError('missing source line reference')
+    return records, boundaries, line_number
+
+
 def convert(config, catalog, home, review):
     if (set(review) != {'version', 'reviewed', 'threads', 'turns'}
             or review['version'] != 1 or review['reviewed'] is not True):
@@ -128,25 +219,19 @@ def convert(config, catalog, home, review):
         thread['scope_ids'] = scopes[thread['thread_id']]
     records = {}
     for tid, path in paths.items():
-        raw = read_bytes(path)
-        if hashlib.sha256(raw).hexdigest() != pins[tid]:
-            raise ValueError('source changed after review')
-        lines = [json.loads(line) for line in raw.splitlines()]
-        if (not lines or lines[0].get('type') != 'session_meta'
-                or lines[0].get('payload', {}).get('id') != tid):
-            raise ValueError('source session identity mismatch')
-        records[tid] = lines
+        records[tid] = reviewed_records(path, tid, pins[tid],
+                                       [t for t in review['turns'] if t['source_thread'] == tid])
     used = set()
     for turn in review['turns']:
         if set(turn) != {'source_thread', 'start_line', 'input_lines', 'reply_lines',
                          'finish_line', 'input', 'reply'}:
             raise ValueError('unexpected reviewed turn fields')
         tid = turn['source_thread']
-        lines = records[tid]
+        lines, boundaries, line_count = records[tid]
         start, finish = turn['start_line'], turn['finish_line']
-        if type(start) is not int or type(finish) is not int or not 1 < start < finish <= len(lines):
+        if type(start) is not int or type(finish) is not int or not 1 < start < finish <= line_count:
             raise ValueError('invalid turn boundary')
-        first, last = lines[start - 1], lines[finish - 1]
+        first, last = lines[start], lines[finish]
         if not event(first, 'task_started'):
             raise ValueError('unsupported turn start')
         source_id = first['payload'].get('turn_id')
@@ -156,16 +241,18 @@ def convert(config, catalog, home, review):
                 or last['payload'].get('turn_id') != source_id or (tid, source_id) in used):
             raise ValueError('duplicate or unsupported finished turn')
         used.add((tid, source_id))
-        if any(event(r, name) for r in lines[start:finish - 1]
-               for name in ('task_started', 'task_complete', 'task_failed', 'turn_aborted')):
+        if any(start < n < finish for n in boundaries):
             raise ValueError('overlapping or ambiguous turn')
         for role, field in (('user', 'input_lines'), ('assistant', 'reply_lines')):
             refs = turn[field]
             if (not isinstance(refs, list) or (role == 'user' and not refs)
                     or any(type(n) is not int or not start < n < finish for n in refs)
                     or refs != sorted(set(refs))
-                    or any(not message(lines[n - 1], role) for n in refs)):
+                    or any(not message(lines[n], role) for n in refs)):
                 raise ValueError('unsupported message reference')
+        for line in turn['input_lines']:
+            if bridge_input(lines[line], config).get('attachments'):
+                raise ValueError('attachment-bearing input requires separate supported review')
         if not turn['reply_lines'] and turn['reply'] != '':
             raise ValueError('reply text without assistant provenance')
         if status == 'completed' and not turn['reply_lines']:
