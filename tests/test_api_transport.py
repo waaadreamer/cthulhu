@@ -294,6 +294,50 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone((await asyncio.wait_for(runtime_frame(), 3))["config"])
         self.assertNotIn("old_test", self.temple.store.setting("runtimes"))
 
+    async def test_continuation_authenticated_reminder_and_stall_escalation(self):
+        from cthulhu.protocol import agent_token, CallFailed
+
+        async def ignore(_):
+            pass
+        clients = {}
+        for role in ('azathoth', 'shub', 'yog', 'old_one'):
+            self.temple.store.upsert_agent(role, role, role, 'central')
+            link = Link(self.caller.url, {'kind': 'agent', 'id': role,
+                        'token': agent_token('test-secret', role, 1)}, ignore, ignore)
+            self.links.append(asyncio.create_task(link.run()))
+            await asyncio.wait_for(link.connected.wait(), 3)
+            clients[role] = link
+        task = self.temple.store.add_task('wire continuation')['id']
+        m = self.temple.store.add_message('azathoth', 'shub', 'latest authorized constraints', task_id=task)
+        self.temple.store.mark(m['id'], 'handled')
+        row = await clients['yog'].call('task_state', task_id=task)
+        params = {'task_id': task, 'revision': row['revision'], 'state': 'ready', 'evidence': 'No executor exists.'}
+        with self.assertRaises(CallFailed):
+            await clients['old_one'].call('task_state', task_id=task)
+        with self.assertRaises(CallFailed):
+            await clients['shub'].call('continuation_review', **params)
+        with self.assertRaises(CallFailed):
+            await clients['yog'].call('send', to='shub', text='bypass', task_id=task, kind='continuation')
+        with self.assertRaises(CallFailed):
+            await clients['yog'].call('restart', agent_id='old_one')
+        reminder = await clients['yog'].call('continuation_review', **params)
+        self.assertEqual(reminder['state'], 'reminded')
+        self.assertEqual((await clients['yog'].call('continuation_review', **params))['state'], 'duplicate')
+        row = await clients['shub'].call('task_state', task_id=task)
+        self.assertEqual(row['instruction']['text'], 'latest authorized constraints')
+        self.assertEqual(self.temple.store.message(reminder['message_id'])['task_id'], task)
+        await clients['shub'].call('handled', id=reminder['message_id'])
+        records = self.temple.store.setting('continuations')
+        records[task]['deadline'] = 0
+        self.temple.store.set_setting('continuations', records)
+        # No worker is associated with this task; avoid querying an unrelated fixture RPC.
+        self.temple.store.set_agent('old_one', desired='stopped')
+        await clients['yog'].call('continuation_tasks')
+        await clients['yog'].call('continuation_tasks')
+        escalations = [m for m in self.temple.store.messages(task_id=task)
+                       if m['sender'] == 'yog' and m['receiver'] == 'azathoth']
+        self.assertEqual(len(escalations), 1)
+
     async def test_first_sse_reaches_caller_before_upstream_completion(self):
         import base64
         self.terminal_gate = asyncio.Event()

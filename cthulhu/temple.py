@@ -149,6 +149,8 @@ class Temple:
         self.config = config
         self.secret: str = config["secret"]
         self.store = Store(Path(config["db"]))
+        from .continuation import Continuations
+        self.continuations = Continuations(self)
         self.agents: dict[str, Conn] = {}
         self.galaxies: dict[str, Conn] = {}
         self.maintainers: set[Conn] = set()
@@ -283,6 +285,8 @@ class Temple:
         me = self.store.agent(conn.id)
         role = me["role"]
         if method == "send":
+            if role == Role.YOG and self.role_of(p["to"]) == Role.SHUB:
+                raise Denied("use continuation_review for task-scoped, deduplicated reminders")
             task_id, status = self.task_fields(role, self.role_of(p["to"]), p)
             msg = await self.route(conn.id, p["to"], p["text"], kind=p.get("kind", "message"),
                                    priority=int(p.get("priority", 0)), reply_to=p.get("reply_to"),
@@ -342,6 +346,17 @@ class Temple:
             if role not in roles.LATEST_RESULT:
                 raise Denied("latest_result is reserved for yog")
             return await self.latest_result(p["agent_id"])
+        if method == "task_state":
+            if role not in (Role.YOG, Role.SHUB, Role.AZATHOTH):
+                raise Denied("task state is reserved for supervision and coordination")
+            return await self.continuations.snapshot(p["task_id"])
+        if method in ("continuation_tasks", "continuation_review"):
+            if role != Role.YOG:
+                raise Denied("only yog assesses continuation")
+            if me["galaxy_id"] in self.maintenance:
+                return {"tasks": [], "agents": []} if method == "continuation_tasks" else {"state": "draining"}
+            return (await self.continuations.scan(conn.id) if method == "continuation_tasks"
+                    else await self.continuations.review(conn.id, p))
         if method == "patrol":
             if role != Role.YOG:
                 raise Denied("only yog patrols")
@@ -447,6 +462,10 @@ class Temple:
         if not p.get("task", "").strip():
             raise ValueError("an old_one needs a task")
         spec = {"task": p["task"], "skill": p.get("skill", ""), "cwd": p.get("cwd"), "model": p.get("model")}
+        if p.get("task_id"):
+            if not self.store.task(p["task_id"]):
+                raise ValueError("unknown task")
+            spec["task_id"] = p["task_id"]
         a = self.store.upsert_agent(new_id("old"), p["name"], Role.OLD_ONE, galaxy["id"], creator, spec)
         await self.sync_galaxy(galaxy["id"])
         await self.broadcast({"type": "directory", **self.directory()})

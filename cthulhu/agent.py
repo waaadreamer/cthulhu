@@ -184,6 +184,8 @@ class Agent:
 
     def latest_result(self) -> dict:
         return {"role": self.role.value, "state": self.state, "current": self.current,
+                "active_runs": self.inflight_runs, "draining": self.draining,
+                "background_busy": self.drain_status()["background_busy"],
                 "current_task": self.current_task, "working_since": self.working_since,
                 "queued": len(self.queue), "context_fill": round(self.runtime.context_fill(self.thread_id or ""), 3),
                 "api_result": getattr(self.runtime, "api_result", None), **self.latest}
@@ -335,6 +337,7 @@ class Agent:
                 self.active = None
         if track:
             self.latest = {"last_reply": clip(result.text, 3000), "last_status": result.status,
+                           "last_task": self.current_task,
                            "activity": summarize_items(result.items), "finished_at": time.time(),
                            "model": backends.label(self.backends.active_cfg)}
             if result.error:

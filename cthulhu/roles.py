@@ -35,7 +35,7 @@ SEND = {
     OWNER: {Role.AZATHOTH, Role.GHROTH},
     Role.AZATHOTH: {Role.SHUB, Role.YOG, Role.GHROTH},
     Role.SHUB: {Role.AZATHOTH, Role.OLD_ONE},
-    Role.YOG: {Role.AZATHOTH, Role.OLD_ONE},
+    Role.YOG: {Role.AZATHOTH, Role.OLD_ONE, Role.SHUB},
     Role.GHROTH: set(),
     Role.OLD_ONE: {Role.SHUB, Role.OLD_ONE},
 }

@@ -29,6 +29,7 @@ MEMORY_SCHEMA = {
 }
 
 STR = {"type": "string"}
+TASK_STATE_TOOL = tool("temple_task_state", "读取任务最新指令、关联执行者实际状态和续办记录。", {"task_id": STR}, ["task_id"])
 
 # Permanent memory holds high-level insights and rules only; details live in the temple's message history.
 MEMORY_RULES = ("永久上下文只记录高层次、长期有效的内容，只有五类：主人的目标与关注点、偏好、决定与授权、约束与规则、"
@@ -346,9 +347,19 @@ class Shub(MemoryAgent):
         self.roster_seen = text
         return text
 
+    def take_batch(self, ready=None):
+        # Keep automatically inherited task IDs unambiguous when several tasks wake Shub together.
+        candidates = self.queue if ready is None else ready
+        first = min(candidates, key=lambda m: (-m['priority'], m['created_at']))
+        return super().take_batch([m for m in candidates if m.get('task_id') == first.get('task_id')])
+
     async def receive(self, batch: list[dict]) -> None:
         # The roster is part of shub's permanent context; refresh it whenever it changed.
         text = self.render(batch)
+        for task_id in dict.fromkeys(m.get("task_id") for m in batch if m.get("kind") == "continuation"):
+            if task_id:
+                state = await self.link.call("task_state", task_id=task_id)
+                text += "\n【续办前最新状态，以此为准；已完成、仍在执行或真正待决策时不要重试】\n" + json.dumps(state, ensure_ascii=False)
         roster = await self.roster()
         if roster != self.roster_seen:
             self.roster_seen = roster
@@ -376,11 +387,13 @@ class Shub(MemoryAgent):
                  {"name": STR, "galaxy_id": STR,
                   "task": {"type": "string", "description": "完整任务：目标、边界、验收标准、完成后向谁汇报"},
                   "skill": {"type": "string", "description": "它的职责设定（system prompt），描述它是谁、负责什么领域、工作方式"},
+                  "task_id": STR,
                   "cwd": {"type": "string", "description": "工作目录，可选"}},
                  ["name", "galaxy_id", "task", "skill"]),
             tool("temple_stop", "终止一个旧日支配者。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_restart", "重启一个旧日支配者（保留其上下文）。", {"agent_id": STR}, ["agent_id"]),
             *HISTORY_TOOLS,
+            TASK_STATE_TOOL,
         ]
 
     def send_tool(self, extra: dict | None = None) -> dict:
@@ -390,12 +403,21 @@ class Shub(MemoryAgent):
                        "description": "给阿撒托斯汇报时必填：progress 进行中；blocked 受阻、需要决定；"
                                       "done 整个任务已经完成并验收，不会再有后续"}})
 
+    async def send(self, to, text, priority=0, kind="message", **task):
+        if self.current_task and not task.get("task_id"):
+            task["task_id"] = self.current_task
+        return await super().send(to, text, priority, kind, **task)
+
     async def call_tool(self, name: str, args: dict):
         found = await history_call(self.link, name, args)
         if found is not None:
             return found
         if name == "temple_spawn":
+            if self.current_task and not args.get("task_id"):
+                args = args | {"task_id": self.current_task}
             return await self.link.call("spawn", **args)
+        if name == "temple_task_state":
+            return await self.link.call("task_state", task_id=args["task_id"])
         if name == "temple_stop":
             return await self.link.call("stop", agent_id=args["agent_id"])
         if name == "temple_restart":
@@ -429,7 +451,14 @@ class Yog(MemoryAgent):
     def tools(self) -> list[dict]:
         return super().tools() + [
             tool("temple_latest_result", "远程读取某个 agent 的最新工作状态与产出。", {"agent_id": STR}, ["agent_id"]),
+            TASK_STATE_TOOL,
+            tool("temple_task_continuation", "评估未完成任务：ready 提醒黑山羊续办；waiting 正常等待；owner_blocked 需要主人决定。必须核实外部进程，不能仅凭 agent idle 判断。程序去重并核对最新状态。",
+                 {"task_id": STR, "revision": STR, "state": {"type": "string", "enum": ["ready", "waiting", "owner_blocked"]},
+                  "evidence": STR}, ["task_id", "revision", "state", "evidence"]),
         ]
+
+    def send_tool(self, extra=None):
+        return super().send_tool({"task_id": STR})
 
     async def _on_frame(self, frame: dict):
         if frame.get("type") == "patrol_requested":
@@ -477,21 +506,27 @@ class Yog(MemoryAgent):
     async def call_tool(self, name: str, args: dict):
         if name == "temple_latest_result":
             return await self.link.call("latest_result", agent_id=args["agent_id"])
+        if name == "temple_task_state":
+            return await self.link.call("task_state", task_id=args["task_id"])
+        if name == "temple_task_continuation":
+            return await self.link.call("continuation_review", **args)
         return await super().call_tool(name, args)
 
     async def patrol(self) -> None:
-        snapshot = await self.link.call("patrol")
-        if not snapshot:
+        scan = await self.link.call("continuation_tasks")
+        snapshot, tasks = scan["agents"], scan["tasks"]
+        if not snapshot and not tasks:
             return
         ghroth = next((s for s in snapshot if s.get("role") == Role.GHROTH), None)
         ghroth_busy = bool(ghroth and ghroth.get("state") == "working")
         # Volatile fields excluded so an idle universe does not cost a model call.
         stable = [{k: s.get(k) for k in ("agent_id", "state", "online", "finished_at", "last_status", "queued")}
                   for s in snapshot]
-        fingerprint = hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
+        stable_tasks = [(t['task']['id'], t['revision'], t['continuation']) for t in tasks]
+        fingerprint = hashlib.sha256(json.dumps([stable, stable_tasks], sort_keys=True).encode()).hexdigest()
         busy = any(s.get("state") == "working" for s in snapshot)
         if not ghroth_busy and fingerprint == self.last_fingerprint and \
-                not (busy and time.time() - self.last_patrol > 3 * self.patrol_interval):
+                not ((busy or tasks) and time.time() - self.last_patrol > 3 * self.patrol_interval):
             return
         self.last_fingerprint, self.last_patrol = fingerprint, time.time()
         # Mark turns that finished since the previous patrol, so new results are reported exactly once.
@@ -516,8 +551,11 @@ class Yog(MemoryAgent):
         try:
             prompt = (f"【定时巡检 {time.strftime('%Y-%m-%d %H:%M')}】以下是所有旧日支配者与格赫罗斯的 latest_result：\n"
                       f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=1)}\n```\n"
+                      f"未完成任务（最新指令、关联执行者、续办记录）：\n{json.dumps(tasks, ensure_ascii=False, indent=1)}\n"
                       f"最近的巡检结论：\n{await self.recent_patrols()}\n\n"
-                      "判断每个 agent 是否在正常推进。需要催办就直接 temple_send 给该旧日支配者；需要阿撒托斯决策或纠偏才发给阿撒托斯。"
+                      "判断任务是否具备续办条件。无人执行且确认可推进时，用 temple_task_continuation 标 ready，让黑山羊核实并续办；"
+                      "不直接指挥执行者重启任务。后台下载、评测或服务仍在运行是正常等待，标 waiting；真正需要主人决定标 owner_blocked 并向阿撒托斯报告。"
+                      "未知不能当 ready；等待条件有新证据变化后才重新提醒。程序在提醒后15分钟未验证执行活动时升级给阿撒托斯，不以消息送达算推进。"
                       f"{rule}除此之外一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
             r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
             if r.status == "failed" and getattr(rt, "retry_safe", True) and self.backends.trip():
@@ -593,6 +631,7 @@ class OldOne(Agent):
         if self.thread_id is None:
             # A fresh old_one starts on its task without waiting for a message.
             self.enqueue({"id": f"start-{self.id}", "sender": "system", "sender_name": "中心神殿", "sender_role": "system",
+                          "task_id": self.spec.get("task_id"),
                           "priority": 0, "created_at": time.time(), "text": "你刚被创建。开始执行你的初始任务。"})
 
 
