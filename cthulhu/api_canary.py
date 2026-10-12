@@ -125,10 +125,11 @@ async def run(link, provider="ali", mode="text", models=None):
             "fast": "not verified; no additional tier benchmark"}
 
 
-async def run_native_claude(link, provider, model, mode="full"):
+async def run_native_claude(link, provider, model, mode="full", expected_returned_model=None):
     """Existing native Claude runtime, real SDK tools; no company config here."""
     from .backends import build
     from .runtime import tool
+    expected_returned_model = expected_returned_model or model
     catalog = await link.call("api_catalog", timeout=15)
     if not any(p["id"] == provider and p.get("model_backends", {}).get(model) == "claude" for p in catalog):
         return {"status": "blocked", "reason": "native Claude model not advertised", "generated_requests": 0}
@@ -173,11 +174,14 @@ async def run_native_claude(link, provider, model, mode="full"):
                 f"Call echo exactly once with value {nonce}. Reply with its returned value exactly.",
                 on_event=event, timeout=120)
             native_tool = any(i.get("tool") == "echo" for i in result.items)
+            model_matches = bool(requests) and all(r.get("returned_model") == expected_returned_model for r in requests)
             ok = (result.status == "completed" and len(effects) == 1 and native_tool and
-                  answer in result.text and bool(deltas) and rt.api_result.get("returned_model") == model)
+                  answer in result.text and bool(deltas) and model_matches)
             receipt = {"status": "passed" if ok else "failed", "backend": "claude",
                        "runtime": type(rt).__name__, "results": requests, "native_tool_observed": native_tool,
                        "tool_ledger": effects, "echo_matches": answer in result.text,
+                       "requested_model": model, "expected_returned_model": expected_returned_model,
+                       "returned_model_matches": model_matches,
                        "streaming_observed": bool(deltas), "completed_s": time.monotonic() - started,
                        "error": result.error, "generated_requests": len(requests)}
         finally:
@@ -203,7 +207,8 @@ async def run_native_claude(link, provider, model, mode="full"):
 async def main(args):
     link, task = await connect(args.config)
     try:
-        result = (await run_native_claude(link, args.provider, args.model[0], args.mode) if args.native_claude
+        result = (await run_native_claude(link, args.provider, args.model[0], args.mode,
+                                        args.expected_returned_model) if args.native_claude
                   else await run(link, args.provider, args.mode, args.model))
         Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2))
         print(json.dumps({"status": result["status"], "generated_requests": result["generated_requests"]}))
@@ -219,6 +224,7 @@ if __name__ == "__main__":
     p.add_argument("--mode", choices=["text", "full"], default="text")
     p.add_argument("--model", action="append", help="advertised model to check; repeat for multiple models")
     p.add_argument("--native-claude", action="store_true", help="use existing Claude SDK runtime and its actual echo tool")
+    p.add_argument("--expected-returned-model", help="explicit upstream model ID verified separately from the requested alias")
     p.add_argument("--output", required=True)
     args = p.parse_args()
     if args.native_claude and (not args.model or len(args.model) != 1):

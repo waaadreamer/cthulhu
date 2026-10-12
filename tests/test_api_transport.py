@@ -158,7 +158,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         tool_answer = re.search(r"tool_result_[0-9a-f]{16}", json.dumps(body["messages"]))
         answer = tool_answer.group(0) if tool_answer else "Native Claude received native-echo"
         message = {"id": "msg_native", "type": "message", "role": "assistant", "content": [],
-                   "model": body["model"], "stop_reason": None, "stop_sequence": None,
+                   "model": getattr(self, "messages_returned_model", body["model"]), "stop_reason": None, "stop_sequence": None,
                    "usage": {"input_tokens": 10, "output_tokens": 0}}
         content = ({"type": "tool_use", "id": "toolu_native", "name": name, "input": {}} if use_tool else
                    {"type": "text", "text": ""})
@@ -555,9 +555,10 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_canary_real_cli_and_tool_result_not_in_prompt(self):
         from cthulhu.api_canary import run_native_claude, run
         model = await self.enable_claude()
+        actual = self.messages_returned_model = "Claude-Opus-5.5-P017"
         rejected = await run(self.caller, "ali", "full", [model])
         self.assertEqual(rejected["generated_requests"], 0)
-        result = await run_native_claude(self.caller, "ali", model)
+        result = await run_native_claude(self.caller, "ali", model, expected_returned_model=actual)
         self.assertEqual(result["status"], "passed", result)
         self.assertEqual(result["backend"], "claude")
         self.assertEqual(result["runtime"], "ClaudeRuntime")
@@ -567,7 +568,20 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["streaming_observed"])
         self.assertNotIn("tool_result_", json.dumps(self.requests[0]["messages"]))
         self.assertIn("tool_result_", json.dumps(self.requests[1]["messages"]))
-        self.assertEqual(result["results"][1]["returned_model"], model)
+        self.assertEqual(result["results"][1]["returned_model"], actual)
+        self.assertEqual(result["results"][1]["requested_model"], model)
+        self.assertTrue(result["returned_model_matches"])
+
+    async def test_native_canary_does_not_accept_unexpected_actual_model(self):
+        from cthulhu.api_canary import run_native_claude
+        model = await self.enable_claude()
+        self.messages_returned_model = "unexpected-model"
+        result = await run_native_claude(self.caller, "ali", model, expected_returned_model="Claude-Opus-5.5-P017")
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["returned_model_matches"])
+        self.assertEqual(result["generated_requests"], 2)
+        self.assertTrue(result["echo_matches"])
+        self.assertEqual(result["results"][1]["returned_model"], "unexpected-model")
 
     async def test_native_auth_failure_is_terminal_without_fallback(self):
         from cthulhu import backends

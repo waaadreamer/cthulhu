@@ -167,7 +167,9 @@ venv/bin/python -m cthulhu.api_canary --config /etc/cthulhu/temple.json --provid
 
 此入口实际构建既有 ClaudeRuntime，启动 SDK 原生 CLI，并执行一次无副作用 echo 工具。
 工具返回随机值，提示词不包含该答案；必须观察到原生工具调用、流式文本和准确返回值，
-以及请求/上游返回模型一致，才算通过。推理限制为最多两次上游请求；full 另外发起一次
+以及上游返回模型符合预期，才算通过。请求别名与实际型号分开记录；已独立确认映射时，
+用 `--expected-returned-model Claude-Opus-5.5-P017` 显式指定实际型号，否则默认要求与请求名相同。
+任意一次推理返回非预期型号均失败，不改写上游返回值。推理限制为最多两次上游请求；full 另外发起一次
 Messages 请求并核验定向取消回执。text 模式仍包含原生工具检查，省去最后取消请求。
 报告保留 backend、runtime、provider、请求 ID、requested/returned model 和工具执行次数。
 取消是传输层验收；断连故障与重试使用隔离测试，不能中断生产 provider 来制造错误。
