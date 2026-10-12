@@ -268,6 +268,30 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         bad=self.path/'unreviewed.js';bad.write_text(source.read_text()+'\n// unknown edit')
         with self.assertRaises(ValueError): build(bad,target)
 
+    async def test_generated_bridge_channel_dependencies_execute(self):
+        from integrations.feishu.build import build
+        source = NODE.parents[2] / 'lark-channel-bridge/dist/cli.js'
+        if not NODE.exists() or not source.exists():
+            self.skipTest('bridge deployment dependency not installed')
+        target = self.path / 'bridge.mjs'
+        build(source, target)
+        (self.path / 'node_modules').symlink_to(NODE.parents[2], target_is_directory=True)
+        # Evaluate the complete built module without invoking its CLI/network.
+        # Exercise the same shared bindings used before the channel handshake.
+        script = target.read_text().split('program.parseAsync(process.argv)', 1)[0]
+        script += '''
+          if (typeof createLarkChannel !== 'function') throw Error('channel factory missing');
+          const nonce = new CallbackNonceStore(join21(dirname18(process.argv[1]), 'nonce-fixture.json'));
+          await nonce.load();
+          console.log('channel dependencies ready');
+        '''
+        target.write_text(script)
+        proc = await asyncio.create_subprocess_exec(str(NODE), str(target),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(), 15)
+        self.assertEqual(proc.returncode, 0, err.decode())
+        self.assertIn(b'channel dependencies ready', out)
+
     async def test_imported_history_handoff_on_real_server_without_foreign_resume(self):
         from cthulhu.feishu_import import import_history
         import copy

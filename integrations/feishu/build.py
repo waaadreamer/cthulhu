@@ -49,7 +49,9 @@ def build(source, target):
     b = s.index('// src/runtime/errors.ts', a)
     s = s[:a] + 'var CLAUDE_DEFAULT_PERMISSION_MODE = "bypassPermissions";\n' + s[b:]
     a = s.index('// src/agent/codex/argv.ts')
-    b = s.index('// src/agent/capability.ts', a)
+    # The following channel module owns imports used later by startChannel.
+    # esbuild interleaves modules; capability is already past those imports.
+    b = s.index('// src/bot/channel.ts', a)
     s = s[:a] + s[b:]
     a = s.index('function createRuntimeAgent(')
     b = s.index('async function checkRuntimeAgentAvailability(', a)
