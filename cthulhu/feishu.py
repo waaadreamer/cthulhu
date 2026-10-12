@@ -13,9 +13,14 @@ def binding(temple, agent_id, event):
     cfg = temple.config.get('feishu') or {}
     if not agent or agent['role'] != Role.NYARLATHOTEP or not cfg.get('enabled'):
         raise Denied('Feishu ingress is not enabled for this identity')
+    return owner_scope(cfg, event)
+
+
+def owner_scope(cfg, event):
+    """Resolve provenance from trusted local binding, also before activation."""
     # Provisioning must record trusted owner verification, not an allowlist hit.
     owner = cfg.get('owner') or {}
-    if not owner.get('verified_by') or not owner.get('sender_id') or not owner.get('chat_id'):
+    if not cfg.get('app_id') or not owner.get('verified_by') or not owner.get('sender_id') or not owner.get('chat_id'):
         raise Denied('verified owner binding required')
     if (event.get('app_id') != cfg.get('app_id') or
             event.get('sender_id') != owner['sender_id'] or

@@ -41,4 +41,27 @@ worker的`bin_dir`需要真实Node和官方lark-cli的可执行链接或实际�
 
 ## 验证
 
+### 单会话历史导入
+
+`venv/bin/python -m cthulhu.feishu_import --config TRUSTED_DISABLED_CONFIG --bundle REVIEWED_HISTORY_JSON --sha256 EXPECTED_FILE_SHA256` 默认仅校验，不访问数据库。维护者在切换前备份已有数据库，再追加 `--db TEMPLE_DB --apply` 原子导入；不新增公开RPC或传输入口。配置是 `{"feishu":{"enabled":false,"app_id":"...","owner":{"sender_id":"...","chat_id":"...","verified_by":"可信绑定证据","legacy_scope_id":"对应旧scope"}}}`，必要时 `owner.topic_id` 指定该主题。标识全部来自可信绑定及旧catalog映射，不能从待导入文本自证。
+
+输入格式如下（仅虚构示例；sha256填写所选源文件真实哈希，另用CLI参数核对传输文件哈希）：
+
+```json
+{
+  "version": 1,
+  "event": {"app_id": "fixture-app", "sender_id": "fixture-owner", "chat_id": "fixture-chat"},
+  "source": {"scope_id": "fixture-old-scope", "threads": [
+    {"thread_id": "fixture-thread", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "scope_ids": ["fixture-old-scope"]}
+  ]},
+  "turns": [
+    {"source_id": "turn-1", "source_thread": "fixture-thread", "input": "已处理问题", "reply": "已完成结果", "status": "completed", "created_at": 1700000000}
+  ]
+}
+```
+
+源转换器只选绑定旧scope的codex catalog条目，通过实际CODEX_HOME内受限的选定thread查找导出经审阅的user/assistant正文或摘要。`scope_ids`记录该thread在源catalog中关联的全部scope；跨scope复用的thread必须暂缓，导入器拒绝。不能仅按角色过滤就宣称文本无秘密；不得导出全库、全部rollout、私有lastSummary或网关/密钥配置。多线程可合并按时间升序排列，source_id在各源线程内唯一；时间为Unix秒，status只接受completed/failed/interrupted。
+
+上限32MiB、10000回合，超限拒绝而不截断。源scope/thread/hash、源回合到目标turn_log ID映射与内容摘要保存在已有settings的一次性完成回执；完全重复导入不重复写，不同包不能覆盖已有导入，已开始使用的scope拒绝后补。历史只写该scope的turn_log，backend=imported，不伪造channel_events、消息、身份、catalog或可恢复的旧线程。真正授权的首条平台事件到达后，现有check_scope才允许读取历史，通过现有有界handoff给新Runtime线程，原catalog按真实system事件更新。未激活scope不会因导入而获得权限，也不执行历史工具或发送回复。
+
 `venv/bin/python -m unittest discover -s tests -v`；前端改动后`cd web && npm run build`；浏览器`venv/bin/python tests/ui_workflow.py`。test_feishu使用真实Node/Unix IPC/认证WebSocket/Runtime进程，模型与平台回执为fixture；不冒充真实飞书验收。现场源码收件、OAuth、主人会话与测试文档回执须另记证据。

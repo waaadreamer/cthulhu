@@ -252,3 +252,21 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('new ClaudeAdapter',transformed)
         bad=self.path/'unreviewed.js';bad.write_text(source.read_text()+'\n// unknown edit')
         with self.assertRaises(ValueError): build(bad,target)
+
+    async def test_imported_history_handoff_on_real_server_without_foreign_resume(self):
+        from cthulhu.feishu_import import import_history
+        import copy
+        config = copy.deepcopy(self.t.config)
+        config['feishu']['enabled'] = False
+        config['feishu']['owner']['legacy_scope_id'] = 'old-chat'
+        bundle = {'version': 1, 'event': self.event,
+            'source': {'scope_id': 'old-chat', 'threads': [{'thread_id': 'old-thread', 'sha256': 'a'*64, 'scope_ids': ['old-chat']}]}, 'turns': [
+            {'source_id': 'old1', 'source_thread': 'old-thread', 'input': 'historical question', 'reply': 'REPLY prior scoped result',
+             'status': 'completed', 'created_at': 1}]}
+        import_history(self.t.store, config, bundle)
+        events = await self.run_event(prompt='new question', thread='foreign-old-thread')
+        thread = next(e['threadId'] for e in events if e['type'] == 'system')
+        self.assertNotEqual(thread, 'foreign-old-thread')
+        final = next(e['content'] for e in events if e['type'] == 'final_text')
+        self.assertIn('prior scoped result', final)  # Fake runtime echoes the actual handoff input.
+        self.assertEqual(self.t.store.turn_log('nyarlathotep'), [])
