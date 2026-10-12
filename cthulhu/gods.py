@@ -454,7 +454,9 @@ class Yog(MemoryAgent):
             TASK_STATE_TOOL,
             tool("temple_task_continuation", "评估未完成任务：ready 提醒黑山羊续办；waiting 正常等待；owner_blocked 需要主人决定。必须核实外部进程，不能仅凭 agent idle 判断。程序去重并核对最新状态。",
                  {"task_id": STR, "revision": STR, "state": {"type": "string", "enum": ["ready", "waiting", "owner_blocked"]},
-                  "evidence": STR}, ["task_id", "revision", "state", "evidence"]),
+                  "evidence": STR, "check_after_seconds": {"type": "integer", "minimum": 300, "maximum": 3600,
+                    "description": "waiting 的只读复查间隔，默认900秒；到期请黑山羊收取新证据，不重跑工作"}},
+                 ["task_id", "revision", "state", "evidence"]),
         ]
 
     def send_tool(self, extra=None):
@@ -556,6 +558,7 @@ class Yog(MemoryAgent):
                       "判断任务是否具备续办条件。无人执行且确认可推进时，用 temple_task_continuation 标 ready，让黑山羊核实并续办；"
                       "不直接指挥执行者重启任务。后台下载、评测或服务仍在运行是正常等待，标 waiting；真正需要主人决定标 owner_blocked 并向阿撒托斯报告。"
                       "未知不能当 ready；等待条件有新证据变化后才重新提醒。程序在提醒后15分钟未验证执行活动时升级给阿撒托斯，不以消息送达算推进。"
+                      "waiting 有只读复查期限，默认15分钟；重复旧证据不会延长期限。到期由程序请黑山羊核验现有工作并收集完成结果，不重跑评测。"
                       f"{rule}除此之外一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
             r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
             if r.status == "failed" and getattr(rt, "retry_safe", True) and self.backends.trip():

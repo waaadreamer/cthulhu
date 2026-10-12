@@ -40,6 +40,16 @@ def with_task(args, text):
 
 def continuation_fixture(body, instructions):
     """Deterministic model decisions only for the isolated continuation scenario."""
+    if 'Automatic waiting-state inspection' in body and 'LEGACY_WAIT_TEST' in body and '定时巡检' not in body:
+        row = json.loads(body.split('【续办前最新状态，以此为准；已完成、仍在执行或真正待决策时不要重试】\n')[-1])
+        worker = re.search(r'EXISTING_EXECUTOR=(old_\w+)', row['instruction']['text']).group(1)
+        return 'temple_send', {'to': worker, 'task_id': row['task']['id'], 'text': 'READONLY_WAIT_COLLECTION: inspect existing completed fixture; do not restart.'}
+    if 'READONLY_WAIT_COLLECTION' in body and '定时巡检' not in body and 'LEGACY_WAIT_WORKER' in json.dumps(instructions):
+        task = re.search(r'任务 (task_\w+)', body).group(1)
+        return 'temple_send', {'to': 'sh', 'task_id': task, 'text': 'WAIT_COLLECTION_COMPLETE: existing result collected; no workload launched.'}
+    if 'WAIT_COLLECTION_COMPLETE' in body and '定时巡检' not in body:
+        task = re.search(r'任务 (task_\w+)', body).group(1)
+        return 'temple_send', {'to': 'az', 'task_id': task, 'status': 'done', 'text': 'Existing fixture completion collected and verified.'}
     if 'AUTO_CONTINUATION_TEST' in body and '定时巡检' in body:
         match = re.search(r'未完成任务[^\n]*\n', body)
         tasks = json.JSONDecoder().raw_decode(body[match.end():])[0] if match else []

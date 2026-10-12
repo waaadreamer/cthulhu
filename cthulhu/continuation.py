@@ -12,6 +12,37 @@ class Continuations:
         self.temple = temple
         self.lock = asyncio.Lock()
 
+    async def remind(self, yog_id, row, evidence, purpose='resume'):
+        t = self.temple
+        shub = t.god(Role.SHUB)
+        if not shub or shub['desired'] != 'running' or shub['galaxy_id'] in t.maintenance:
+            return None
+        from .store import new_id
+        now, mid = time.time(), new_id('continuation')
+        if purpose == 'inspect':
+            text = ('[Automatic waiting-state inspection] The evidence for this unfinished task is due for refresh. '
+                    'This is NOT evidence that its background workload stopped and NOT authorization to restart it. '
+                    'Read temple_task_state/latest instructions, reuse any collection already in flight, and ask the '
+                    'existing executor for one read-only check of the current process/job, progress, last update and '
+                    'completion/observer result. If legacy executor associations are empty, use your roster/history '
+                    'to locate the existing executor and include task_id in the request; do not create a duplicate workload. '
+                    'Collect/finalize only if the existing work actually finished and the latest instructions authorize it. ')
+        else:
+            text = ('[Automatic continuation review] This task is unfinished and assessed ready with no active executor. '
+                    'Read temple_task_state and the latest owner instructions; inspect actual workload state. '
+                    'Resume, retry, or reassign only authorized work; preserve active downloads/evaluations/policies. ')
+        text += ('Verify executor activity, not delivery; report genuine owner-decision blockers. '
+                 f"Evidence: {evidence}\nLatest delegated instruction:\n{(row['instruction'] or {}).get('text', '')}")
+        rec = {'phase': 'reminded', 'purpose': purpose, 'revision': row['revision'],
+               'instruction_id': (row['instruction'] or {}).get('id'), 'at': now, 'deadline': now + 900,
+               'message_id': mid, 'evidence': evidence, 'text': text}
+        records = t.store.setting('continuations') or {}
+        records[row['task']['id']] = rec
+        t.store.set_setting('continuations', records)
+        await t.route(yog_id, shub['id'], text, task_id=row['task']['id'],
+                      kind='continuation', message_id=mid)
+        return rec
+
     async def snapshot(self, task_id, results=None):
         t, store = self.temple, self.temple.store
         task = store.task(task_id)
@@ -64,6 +95,14 @@ class Continuations:
                     continue
                 records = t.store.setting('continuations') or {}
                 rec = records.get(task['id'], {})
+                if (rec.get('phase') == 'waiting' and
+                        time.time() >= rec.get('check_at', rec.get('at', time.time()) + 900) and
+                        not row['owner_blocked'] and not row['active'] and not row['pending'] and
+                        not any(r.get('draining') for r in row['executors'])):
+                    updated = await self.remind(yog_id, row, rec.get('evidence', ''), purpose='inspect')
+                    if updated:
+                        rec = updated
+                        records[task['id']] = rec
                 if rec.get('phase') == 'reminded' and rec.get('instruction_id') != (row['instruction'] or {}).get('id'):
                     rec = rec | {'phase': 'changed'}
                     records[task['id']] = rec
@@ -124,6 +163,11 @@ class Continuations:
                     return {'state': 'duplicate'}
                 rec = {'phase': state, 'revision': row['revision'], 'evidence': p['evidence'], 'at': time.time(),
                        'instruction_id': (row['instruction'] or {}).get('id')}
+                if state == 'waiting':
+                    delay = p.get('check_after_seconds', 900)
+                    if not isinstance(delay, (int, float)) or not 300 <= delay <= 3600:
+                        raise ValueError('check_after_seconds must be between 300 and 3600')
+                    rec['check_at'] = rec['at'] + delay
             else:
                 if row['owner_blocked'] or row['active'] or row['pending'] or row['unavailable']:
                     return {'state': 'guarded', 'active': row['active'], 'pending': row['pending'],
@@ -133,25 +177,9 @@ class Continuations:
                     return {'state': 'duplicate'}
                 if rec.get('phase') == 'waiting' and rec.get('revision') == row['revision'] and rec.get('evidence') == p['evidence']:
                     return {'state': 'waiting', 'reason': 'no observed readiness change'}
-                shub = t.god(Role.SHUB)
-                if not shub or shub['desired'] != 'running' or shub['galaxy_id'] in t.maintenance:
+                rec = await self.remind(yog_id, row, p['evidence'])
+                if rec is None:
                     return {'state': 'unavailable'}
-                now = time.time()
-                # Reserve durable identity before delivery: retries/restarts cannot duplicate the reminder.
-                from .store import new_id
-                mid = new_id('continuation')
-                text = (
-                    '[Automatic continuation review] This task is unfinished and assessed ready with no active executor. '
-                    'Read temple_task_state and the latest owner instructions; inspect actual workload state. '
-                    'Resume, retry, or reassign only authorized work; preserve active downloads/evaluations/policies. '
-                    'Verify executor activity, not delivery; report genuine owner-decision blockers. '
-                    f"Evidence: {p['evidence']}\nLatest delegated instruction:\n{(row['instruction'] or {}).get('text', '')}")
-                rec = {'phase': 'reminded', 'revision': row['revision'], 'instruction_id': instruction_id,
-                       'at': now, 'deadline': now + 900, 'message_id': mid, 'evidence': p['evidence'], 'text': text}
-                records[p['task_id']] = rec
-                t.store.set_setting('continuations', records)
-                await t.route(yog_id, shub['id'], text,
-                    task_id=p['task_id'], kind='continuation', message_id=mid)
             records[p['task_id']] = rec
             t.store.set_setting('continuations', records)
             return {'state': rec['phase'], 'task_id': p['task_id'], 'message_id': rec.get('message_id')}

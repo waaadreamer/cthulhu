@@ -13,6 +13,45 @@ from cthulhu.store import Store
 from test_universe import HarnessServer
 
 
+class LegacyWaitServer(HarnessServer):
+    patrol_interval = 1
+
+    def test_legacy_wait_expiry_collects_existing_worker_without_owner_wake(self):
+        spawn = 'CALL temple_spawn ' + json.dumps({'name': 'legacy wait worker', 'galaxy_id': 'g1',
+                  'task': 'Keep existing completed fixture available', 'skill': 'LEGACY_WAIT_WORKER'})
+        self.chat('az', 'CALL temple_send ' + json.dumps({'to': 'sh', 'title': 'Prepare legacy worker', 'text': spawn}))
+        store = Store(self.dir / 'temple.db')
+        worker = self.wait(lambda: next(a for a in store.agents() if a['name'] == 'legacy wait worker'))
+        self.wait(lambda: store.turn_log(worker['id']))
+        task = store.add_task('LEGACY_WAIT_TEST')
+        msg = store.add_message('az', 'sh', 'LATEST_WAIT_INSTRUCTION EXISTING_EXECUTOR=' + worker['id'], task_id=task['id'])
+        store.mark(msg['id'], 'handled')
+        # The historical delegation omitted task_id; do not manufacture an association.
+        old = store.add_message('sh', worker['id'], 'Existing background fixture work', task_id=None)
+        store.mark(old['id'], 'handled')
+        records = store.setting('continuations') or {}
+        records[task['id']] = {'phase': 'waiting', 'at': time.time()-901, 'revision': 'legacy',
+                             'evidence': 'Old background observer evidence; completion unknown.', 'instruction_id': msg['id']}
+        store.set_setting('continuations', records)
+        owners = len(store.q("SELECT id FROM messages WHERE sender='owner'"))
+        done = self.wait(lambda: store.task(task['id'])['state'] == 'done', 20)
+        messages = store.messages(task_id=task['id'])
+        reminders = [m for m in messages if m['sender'] == 'yo' and m['receiver'] == 'sh']
+        self.assertEqual(len(reminders), 1)
+        self.assertIn('NOT authorization to restart', reminders[0]['text'])
+        requests = [m for m in messages if m['receiver'] == worker['id']]
+        self.assertEqual(len(requests), 1)
+        self.assertIn('READONLY_WAIT_COLLECTION', requests[0]['text'])
+        shub_turn = next(r for r in store.turn_log('sh') if 'Automatic waiting-state inspection' in r['input'])
+        self.assertIn('"executors": []', shub_turn['input'])
+        self.assertIn('LATEST_WAIT_INSTRUCTION', shub_turn['input'])
+        self.assertEqual(len(store.q("SELECT id FROM messages WHERE sender='owner'")), owners)
+        self.assertEqual(len([a for a in store.agents() if a['name'] == 'legacy wait worker']), 1)
+        print('LEGACY_WAIT_SERVER ' + json.dumps({'task_id': task['id'], 'executor': worker['id'],
+              'reminder': reminders[0]['id'], 'state': 'done', 'new_owner_messages': 0,
+              'new_workloads': 0, 'readonly_requests': 1}), flush=True)
+        store.db.close()
+
 class ContinuationServer(HarnessServer):
     patrol_interval = 1
 
@@ -144,6 +183,54 @@ class ContinuationGuards(unittest.IsolatedAsyncioTestCase):
         r = await self.review()
         self.assertIn('newest boundary', self.t.store.message(r['message_id'])['text'])
         self.assertEqual((await self.review())['state'], 'duplicate')
+
+    async def test_wait_expiry_legacy_default_dedup_and_escalation(self):
+        await self.review('waiting')
+        records = self.records()
+        records[self.task].pop('check_at')  # Already-deployed waiting records have no deadline.
+        records[self.task]['at'] = time.time()-901
+        self.t.store.set_setting('continuations', records)
+        await self.c.scan('yog')
+        rec = self.records()[self.task]
+        self.assertEqual(rec['purpose'], 'inspect')
+        self.assertIn('NOT authorization to restart', self.t.store.message(rec['message_id'])['text'])
+        await self.c.scan('yog')
+        self.assertEqual(self.records()[self.task]['message_id'], rec['message_id'])
+        self.expire()
+        await self.c.scan('yog')
+        self.assertEqual(self.records()[self.task]['phase'], 'escalated')
+
+    async def test_wait_reinspection_guards_and_same_evidence_does_not_extend(self):
+        await self.review('waiting', check_after_seconds=300)
+        first = self.records()[self.task]['check_at']
+        await self.review('waiting', check_after_seconds=3600)
+        self.assertEqual(self.records()[self.task]['check_at'], first)
+        records = self.records();records[self.task]['check_at'] = 0
+        self.t.store.set_setting('continuations', records)
+        self.result.update(state='working', current_task=self.task)
+        await self.c.scan('yog')
+        self.assertEqual(self.records()[self.task]['phase'], 'waiting')
+        self.result['state'] = 'idle'
+        msg = self.t.store.add_message('shub', 'old', 'collection already in flight', task_id=self.task)
+        await self.c.scan('yog')
+        self.assertEqual(self.records()[self.task]['phase'], 'waiting')
+        self.t.store.mark(msg['id'], 'handled')
+        block = self.t.store.add_message('shub', 'azathoth', 'needs owner', task_id=self.task, status='blocked')
+        await self.c.scan('yog')
+        self.assertEqual(self.records()[self.task]['phase'], 'waiting')
+        self.instruction('Owner resolved blocker')
+        self.t.store.set_task(self.task, 'done')
+        await self.c.scan('yog')
+        self.assertEqual(self.records()[self.task]['phase'], 'waiting')
+
+    async def test_predeploy_explicit_message_association_without_spec(self):
+        self.t.store.set_agent('old', spec='{}')
+        before = await self.c.snapshot(self.task)
+        self.assertEqual(before['executors'], [])
+        msg = self.t.store.add_message('shub', 'old', 'explicit later dispatch', task_id=self.task)
+        self.t.store.mark(msg['id'], 'handled')
+        after = await self.c.snapshot(self.task)
+        self.assertEqual([r['agent_id'] for r in after['executors']], ['old'])
 
     async def test_wait_can_resume_on_new_external_evidence_without_message(self):
         await self.review('waiting', evidence='Download PID 123 is alive; checkpoint incomplete.')
