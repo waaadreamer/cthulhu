@@ -85,7 +85,8 @@ export interface Patrol { id: number; summary: string; created_at: number }
 export class Unauthorized extends Error {}
 
 export async function api<T>(path: string, body?: unknown): Promise<T> {
-  const r = await fetch(`/api/${path}`, {
+  // Relative, so the UI works both at / and under a path prefix such as /cthulhu/.
+  const r = await fetch(`api/${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'content-type': 'application/json', 'x-cthulhu': '1' },
     body: body === undefined ? undefined : JSON.stringify(body),

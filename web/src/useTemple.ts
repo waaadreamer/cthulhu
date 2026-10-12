@@ -25,8 +25,9 @@ export function useTemple(handlers: Handlers) {
     api<Directory>('directory').then(setDir).catch(() => {})
 
     const connect = () => {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      ws = new WebSocket(`${proto}://${location.host}/api/events`)
+      const url = new URL('api/events', location.href)
+      url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+      ws = new WebSocket(url)
       ws.onopen = () => { setConnected(true); delay = 500 }
       ws.onclose = () => {
         setConnected(false)

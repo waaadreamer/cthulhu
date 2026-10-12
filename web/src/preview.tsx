@@ -10,7 +10,7 @@ export function rawUrl(path: string, galaxy?: string, download = false) {
   const q = new URLSearchParams({ path })
   if (galaxy) q.set('galaxy', galaxy)
   if (download) q.set('download', '1')
-  return `/api/raw?${q}`
+  return `api/raw?${q}`
 }
 
 const IMAGE = /\.(png|jpe?g|gif|webp|svg|bmp|avif)(\?.*)?$/i
