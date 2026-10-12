@@ -223,3 +223,32 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         events=await self.run_event()
         self.assertTrue(any(e['type']=='duplicate' for e in events))
         self.assertEqual(self.t.store.q('select * from turn_log'),[])
+
+    async def test_reviewed_custom_bridge_keeps_blocklist_and_central_authority(self):
+        from integrations.feishu.build import build
+        source=NODE.parents[2]/'lark-channel-bridge/dist/cli.js'
+        if not NODE.exists() or not source.exists(): self.skipTest('bridge deployment dependency not installed')
+        target=self.path/'bridge.mjs'
+        build(source,target)
+        transformed=target.read_text()
+        policy=transformed.split('// src/policy/access.ts\n',1)[1].split('// src/config/config-ops.ts',1)[0]
+        script=policy+'''
+          const profile={mode:'team',access:{blockedUsers:['blocked'],allowedUsers:['blocked'],admins:['blocked'],allowedChats:['chat']}};
+          const controls={ownerRefreshState:'unknown'};
+          console.log(JSON.stringify([
+            canUseDm(profile,controls,'blocked'),canUseGroup(profile,controls,'chat','blocked'),
+            canRunAdminCommand(profile,controls,'blocked'),canUseComment(profile,controls,'blocked'),
+            canUseDm(profile,controls,'external')
+          ]));'''
+        proc=await asyncio.create_subprocess_exec(str(NODE),'--input-type=module','-e',script,stdout=asyncio.subprocess.PIPE)
+        out,_=await proc.communicate()
+        self.assertEqual(proc.returncode,0)
+        policies=json.loads(out)
+        self.assertTrue(all(not p['ok'] for p in policies[:4]))
+        self.assertTrue(policies[4]['ok']) # Old team policy alone is insufficient authority.
+        with self.assertRaises(Exception):
+            await self.n.link.call('channel_authorize',**(self.event|{'sender_id':'external'}))
+        self.assertNotIn('buildCodexArgs',transformed)
+        self.assertNotIn('new ClaudeAdapter',transformed)
+        bad=self.path/'unreviewed.js';bad.write_text(source.read_text()+'\n// unknown edit')
+        with self.assertRaises(ValueError): build(bad,target)

@@ -4,9 +4,11 @@
 
 ## 软件与生命周期
 
-使用 Node >=20.12、官方 @larksuite/cli 1.0.82 和已核验的现有 bridge 源码。package-lock 固定公开依赖；现场 custom 源码以交接hash为准。公开包能安装并不表示custom内容已合并。
+使用 Node >=20.12、官方 @larksuite/cli 1.0.82 和已核验的现有 bridge 源码。package-lock 固定公开依赖；`upstream/manifest.json`固定公开基线、经审查定制补丁及结果hash，构建时离线应用补丁。未知源码拒绝构建。
 
 `python3 integrations/feishu/build.py SOURCE/dist/cli.js TARGET/bridge.mjs` 保留上游 transport、catalog、publishers，将 CodexAdapter 的执行边界改为本地Unix IPC；生成物移除本地Codex/Claude model adapters和旧argv/stream翻译，不伪造CLI。源布局不匹配即拒绝构建。生成路径必须能解析原包依赖（例如依赖安装前缀下的nyarl目录）。
+
+经审查的定制差异保留blockedUsers配置与过滤；旧team/admin/app-creator策略不授予中央权限，所有输入仍须通过已核验的主人绑定。旧管理命令不恢复本地模型控制权。生成的独立bridge Web UI、开发生命周期元数据及展示文案不迁入运行路径；上游MIT声明见`upstream/LICENSE.bridge`。公开CLI内置skill继续复用，不复刻未安装的私有skill。
 
 奈亚agent拥有Node子进程、0600 Unix socket及对应Runtime。worker使用foreground `run`，不运行`start`/daemon或独立systemd服务。scope→thread只存上游catalog；scope日志复用Store.turn_log，未知/跨scope旧thread不能直接恢复。变更后重启agent时重新从固定source构建。没有worker配置时角色可测试主人网页对话，绝不自行订阅飞书。
 
@@ -27,7 +29,9 @@ worker的`bin_dir`需要真实Node和官方lark-cli的可执行链接或实际�
 
 官方内置`lark-cli skills read lark-shared`及业务skill是当前帮助来源，奈亚只增加短角色说明。首次OAuth用官方`auth login --domain docs --domain drive --domain im --no-wait --json`，具体域应对齐原授权范围/本次验证需要；输出中的授权URL原样展示并用官方`auth qrcode`生成二维码。device_code不公开，完成后由维护者调用官方poll。OAuth subject再核对可信主人绑定，不用OAuth结果自封主人。没有AppSecret/绑定时不执行授权或启动另一个监听。
 
-46条旧catalog/14个scope的保存不授予激活权。私有catalog和符合范围的历史需单独受控交接；当前软件包不带私人历史。中央只能导入明确授权scope的历史到同scope日志/对应catalog；不能把所有旧记录混进一个新thread。实际历史未交接前不得宣称连续性验收完成。
+旧catalog的保存不授予激活权。私有catalog和符合范围的历史需单独受控交接；当前软件包不带私人历史。中央只能导入明确授权scope的历史到同scope日志/对应catalog；不能把所有旧记录混进一个新thread。实际历史未交接前不得宣称连续性验收完成。
+
+公开Git仅交接经审查的通用上游源码差异和脱敏契约/示例。原始内部交接归档、内部路径与运行清单、身份、授权、历史、配对随机值、网关信息及运行时二进制不得进入公开分支。私有配置与证据另走明确可用的私有机制或主人本地操作。
 
 目标端源码、依赖、身份、OAuth、入口隔离验证完成后，经阿撒托斯/Shub协调旧桥排空并停止监听和refresh。确认旧端退出后才开启中央worker；训练、评测和Ali模型provider不动。先在已核验主人会话收发，用一次性测试文档验证读写，核对平台messageId回执。禁止向无关联系人发送或编辑任意文档。
 

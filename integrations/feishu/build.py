@@ -4,8 +4,12 @@ The generated artifact retains upstream transport/catalog/publishers and removes
 both local model adapters. Unknown source layouts fail closed, not approximate.
 """
 import argparse
+import hashlib
+import json
 from pathlib import Path
 import shutil
+import subprocess
+import tempfile
 
 
 def replace_once(s, before, after):
@@ -14,8 +18,33 @@ def replace_once(s, before, after):
     return s.replace(before, after, 1)
 
 
+def custom_source(source):
+    """Apply only the reviewed delta to the exact public dependency, offline."""
+    upstream = Path(__file__).with_name('upstream')
+    manifest = json.loads((upstream / 'manifest.json').read_text())
+    data = source.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if digest == manifest['patched_cli_sha256']:
+        return data.decode()
+    if digest != manifest['base_cli_sha256']:
+        raise ValueError('bridge source does not match the reviewed manifest')
+    patch = upstream / 'bridge-runtime.patch'
+    if hashlib.sha256(patch.read_bytes()).hexdigest() != manifest['patch_sha256']:
+        raise ValueError('bridge delta does not match the reviewed manifest')
+    with tempfile.TemporaryDirectory() as tmp:
+        dist = Path(tmp) / 'dist'
+        dist.mkdir()
+        (dist / 'cli.js').write_bytes(data)
+        subprocess.run(['git', 'apply', str(patch.resolve())], cwd=tmp,
+                       check=True, capture_output=True)
+        data = (dist / 'cli.js').read_bytes()
+    if hashlib.sha256(data).hexdigest() != manifest['patched_cli_sha256']:
+        raise ValueError('patched bridge does not match the reviewed manifest')
+    return data.decode()
+
+
 def build(source, target):
-    s = source.read_text()
+    s = custom_source(source)
     a = s.index('// src/agent/claude/adapter.ts')
     b = s.index('// src/runtime/errors.ts', a)
     s = s[:a] + 'var CLAUDE_DEFAULT_PERMISSION_MODE = "bypassPermissions";\n' + s[b:]
