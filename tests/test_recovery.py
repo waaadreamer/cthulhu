@@ -57,6 +57,24 @@ class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status,'completed')
         self.assertTrue(pair.using_fallback)
 
+    async def test_cancel_during_status_publish_does_not_dispatch(self):
+        pair=self.pair(); cancel=asyncio.Event(); attempt=AsyncMock()
+        async def report(s):
+            if s['phase']=='running': cancel.set()
+        result=await pair.recover(attempt,report=report,cancel=cancel)
+        self.assertEqual(result.status,'interrupted')
+        attempt.assert_not_awaited()
+
+    async def test_success_arriving_during_timeout_settlement_is_preserved(self):
+        rt=CodexRuntime('unused','.')
+        rt.request=AsyncMock(return_value={'turn':{'id':'turn'}})
+        async def interrupt(thread, turn):
+            rt.turns[turn].set_result(TurnResult('completed','already completed'))
+        rt.interrupt=interrupt
+        result=await rt.run_turn('thread','task',timeout=.001)
+        self.assertEqual(result.status,'completed')
+        self.assertEqual(result.text,'already completed')
+
     async def test_nonretryable_and_exhaustion_are_explicit(self):
         for error in ['401 unauthorized','403 forbidden','invalid argument','permission denied']:
             pair=self.pair(); attempt=AsyncMock(return_value=TurnResult('failed',error=error))

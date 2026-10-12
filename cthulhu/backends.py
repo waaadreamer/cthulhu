@@ -158,6 +158,9 @@ class Backends:
                     total += 1
                     await publish('running', attempt=total, retry=retry, retries=5,
                                   source=label(cfg), fallback=rt is self.fallback)
+                    if cancel.is_set():
+                        await publish('interrupted')
+                        return TurnResult('interrupted', error='Recovery cancelled')
                     try:
                         result = await attempt(rt, note)
                     except asyncio.CancelledError:

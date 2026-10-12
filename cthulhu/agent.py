@@ -302,7 +302,7 @@ class Agent:
     async def recover(self, attempt, *, cancel=None, background=False):
         cancel = cancel or asyncio.Event()
         self.recoveries.add(cancel)
-        context = {'thread': None, 'terminal': False, 'events': []}
+        context = {'thread': None, 'terminal': False, 'events': [], 'cancel': cancel}
         token = RECOVERY.set(context)
         async def execute(rt, note):
             context.update(thread=None, terminal=False, events=[])
@@ -379,6 +379,8 @@ class Agent:
         rt = runtime or self.runtime
         recovery = RECOVERY.get()
         if recovery is not None:
+            if recovery['cancel'].is_set():
+                return TurnResult('interrupted', error='Recovery cancelled')
             recovery.update(thread=thread, terminal=False)
         live: list[str] = []
         last_activity_at = None
@@ -401,6 +403,8 @@ class Agent:
         def started(turn_id: str) -> None:
             if track:
                 self.active = (rt, thread, turn_id)
+            if recovery is not None and recovery['cancel'].is_set():
+                asyncio.create_task(rt.interrupt(thread, turn_id))
             if on_start:
                 on_start(turn_id)
         self.inflight_runs += 1

@@ -274,6 +274,8 @@ class CodexRuntime:
             except asyncio.TimeoutError:
                 await self.interrupt(thread_id, turn_id)
                 result = await asyncio.wait_for(asyncio.shield(fut), 60)
+                if result.status == 'completed':
+                    return result
                 return TurnResult('failed', result.text, 'turn timeout (execution settled)', result.items)
             finally:
                 self.turns.pop(turn_id, None)
