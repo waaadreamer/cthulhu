@@ -457,6 +457,10 @@ class Yog(MemoryAgent):
                   "evidence": STR, "check_after_seconds": {"type": "integer", "minimum": 300, "maximum": 3600,
                     "description": "waiting 的只读复查间隔，默认900秒；到期请黑山羊收取新证据，不重跑工作"}},
                  ["task_id", "revision", "state", "evidence"]),
+            tool("temple_worker_review", "执行中任务的具体执行者监督：healthy表示真实进展正常；stalled须有停滞证据，直接向该执行者发送任务内提醒。不得仅凭agent空闲判断后台工作停止；不得用此工具重跑工作。",
+                 {"task_id": STR, "agent_id": STR, "revision": STR,
+                  "state": {"type": "string", "enum": ["healthy", "stalled"]}, "evidence": STR},
+                 ["task_id", "agent_id", "revision", "state", "evidence"]),
         ]
 
     def send_tool(self, extra=None):
@@ -512,6 +516,8 @@ class Yog(MemoryAgent):
             return await self.link.call("task_state", task_id=args["task_id"])
         if name == "temple_task_continuation":
             return await self.link.call("continuation_review", **args)
+        if name == "temple_worker_review":
+            return await self.link.call("worker_review", **args)
         return await super().call_tool(name, args)
 
     async def patrol(self) -> None:
@@ -524,7 +530,7 @@ class Yog(MemoryAgent):
         # Volatile fields excluded so an idle universe does not cost a model call.
         stable = [{k: s.get(k) for k in ("agent_id", "state", "online", "finished_at", "last_status", "queued")}
                   for s in snapshot]
-        stable_tasks = [(t['task']['id'], t['revision'], t['continuation']) for t in tasks]
+        stable_tasks = [(t['task']['id'], t['revision'], t['continuation'], t['worker_nudges']) for t in tasks]
         fingerprint = hashlib.sha256(json.dumps([stable, stable_tasks], sort_keys=True).encode()).hexdigest()
         busy = any(s.get("state") == "working" for s in snapshot)
         if not ghroth_busy and fingerprint == self.last_fingerprint and \
@@ -559,6 +565,8 @@ class Yog(MemoryAgent):
                       "不直接指挥执行者重启任务。后台下载、评测或服务仍在运行是正常等待，标 waiting；真正需要主人决定标 owner_blocked 并向阿撒托斯报告。"
                       "未知不能当 ready；等待条件有新证据变化后才重新提醒。程序在提醒后15分钟未验证执行活动时升级给阿撒托斯，不以消息送达算推进。"
                       "waiting 有只读复查期限，默认15分钟；重复旧证据不会延长期限。到期由程序请黑山羊核验现有工作并收集完成结果，不重跑评测。"
+                      "另一条路径：执行中任务若具体责任执行者有明确停滞证据，用temple_worker_review标stalled直接提醒该执行者，带task_id与最新范围；"
+                      "正常后台进展标healthy，不例行催办或转交黑山羊。停滞提醒不授予新工作或重启权限；15分钟无新活动则升级阿撒托斯。"
                       f"{rule}除此之外一切正常就什么都不发。发给其他 agent 的消息用英文。最后用一两句中文写下本次巡检结论。")
             r = await self.run(thread, prompt, track=False, timeout=1800, runtime=rt)
             if r.status == "failed" and getattr(rt, "retry_safe", True) and self.backends.trip():

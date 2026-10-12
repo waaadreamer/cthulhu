@@ -77,12 +77,99 @@ class Continuations:
         revision = hashlib.sha256(json.dumps([task['state'], instruction and instruction['id'],
             [(m['id'], m['state']) for m in messages if t.role_of(m['sender']) != Role.YOG],
             [{k: r.get(k) for k in ('agent_id', 'online', 'state', 'current_task', 'last_task',
-                                  'finished_at', 'active_runs', 'background_busy', 'draining')} for r in executors]],
+                                  'finished_at', 'active_runs', 'background_busy', 'draining',
+                                  'last_activity_at', 'activity_task')} for r in executors]],
             sort_keys=True).encode()).hexdigest()
         return {'task': task, 'instruction': instruction, 'messages': messages, 'executors': executors,
                 'active': active, 'pending': bool(pending), 'unavailable': unavailable,
                 'owner_blocked': owner_blocked, 'revision': revision,
+                'worker_nudges': {aid: rec for aid, rec in (store.setting('worker_nudges') or {}).get(task_id, {}).items()},
                 'continuation': (store.setting('continuations') or {}).get(task_id, {})}
+
+    async def worker_review(self, yog_id, p):
+        """A scoped observation/nudge, never a restart or a new assignment."""
+        async with self.lock:
+            t = self.temple
+            row = await self.snapshot(p['task_id'])
+            if row['revision'] != p['revision']:
+                return {'state': 'changed'}
+            aid = p['agent_id']
+            worker = next((r for r in row['executors'] if r['agent_id'] == aid), None)
+            if not worker or t.role_of(aid) != Role.OLD_ONE:
+                raise ValueError('an associated old_one is required')
+            if p['state'] not in ('healthy', 'stalled') or not p.get('evidence', '').strip():
+                raise ValueError('healthy/stalled assessment with concrete evidence is required')
+            records = t.store.setting('worker_nudges') or {}
+            by_agent = records.setdefault(p['task_id'], {})
+            rec = by_agent.get(aid, {})
+            if p['state'] == 'healthy':
+                # Healthy background progress can be established independently of agent tool activity.
+                if rec.get('phase') == 'healthy' and rec.get('revision') == row['revision']:
+                    return {'state': 'healthy'}
+                by_agent[aid] = {'phase': 'healthy', 'evidence': p['evidence'], 'at': time.time(),
+                                 'revision': row['revision']}
+                t.store.set_setting('worker_nudges', records)
+                return {'state': 'healthy'}
+            if (row['task']['state'] != 'open' or row['owner_blocked'] or
+                    row['continuation'].get('phase') in ('waiting', 'owner_blocked') or
+                    not worker.get('online') or not worker.get('state') or worker.get('draining') or
+                    t.store.agent(aid)['galaxy_id'] in t.maintenance or
+                    worker.get('current_task') not in (None, p['task_id'])):
+                return {'state': 'guarded'}
+            now = time.time()
+            if worker.get('activity_task') == p['task_id'] and now - (worker.get('last_activity_at') or 0) < 300:
+                return {'state': 'recent_activity'}
+            instruction_id = (row['instruction'] or {}).get('id')
+            if rec.get('phase') in ('nudged', 'escalated') and rec.get('instruction_id') == instruction_id:
+                return {'state': 'duplicate'}
+            if rec.get('phase') == 'healthy' and rec.get('revision') == row['revision']:
+                return {'state': 'healthy', 'reason': 'no observed change since healthy assessment'}
+            from .store import new_id
+            text = ('[Task-scoped worker nudge] Yog observed possible stalled progress in your existing assignment. '
+                    'Check the specific issue and report concrete current activity/results or the blocker to Shub with task_id. '
+                    'Preserve healthy background evaluation/download/training/policies. This message does not create work, '
+                    'authorize workload restart, or override owner instructions. If already progressing, report fresh evidence; '
+                    'otherwise proceed only within your current authorized assignment. '
+                    f"Evidence: {p['evidence']}\nLatest delegated instruction:\n{(row['instruction'] or {}).get('text', '')}")
+            rec = {'phase': 'nudged', 'at': now, 'deadline': now + 900, 'instruction_id': instruction_id,
+                   'message_id': new_id('worker_nudge'), 'text': text, 'evidence': p['evidence']}
+            by_agent[aid] = rec
+            t.store.set_setting('worker_nudges', records)
+            await t.route(yog_id, aid, text, kind='worker_nudge', task_id=p['task_id'], message_id=rec['message_id'])
+            return {'state': 'nudged', 'message_id': rec['message_id']}
+
+    async def check_worker_nudges(self, yog_id, row):
+        t = self.temple
+        records = t.store.setting('worker_nudges') or {}
+        for aid, rec in records.get(row['task']['id'], {}).items():
+            if rec['phase'] != 'nudged':
+                continue
+            if row['owner_blocked'] or row['continuation'].get('phase') in ('waiting', 'owner_blocked'):
+                rec['phase'] = 'waiting'
+                continue
+            if rec['instruction_id'] != (row['instruction'] or {}).get('id'):
+                rec['phase'] = 'changed'
+                continue
+            # Recover a crash between reservation and message persistence without duplication.
+            if not t.store.message(rec['message_id']):
+                a = t.store.agent(aid)
+                if a and a['desired'] == 'running':
+                    await t.route(yog_id, aid, rec['text'], kind='worker_nudge', task_id=row['task']['id'], message_id=rec['message_id'])
+            worker = next((r for r in row['executors'] if r['agent_id'] == aid), {})
+            if worker.get('activity_task') == row['task']['id'] and (worker.get('last_activity_at') or 0) > rec['at']:
+                rec['phase'] = 'responding'
+            elif time.time() >= rec['deadline']:
+                # A still-working flag or handled receipt alone is not evidence of a response.
+                az = t.god(Role.AZATHOTH)
+                if az:
+                    mid = 'worker_escalation_' + rec['message_id']
+                    if not t.store.message(mid):
+                        await t.route(yog_id, az['id'],
+                            f"Worker {aid} has no verified new activity after task-scoped nudge {rec['message_id']}. "
+                            'Inspect its current evidence and involve Shub for coordination if needed; do not restart a healthy workload.',
+                            task_id=row['task']['id'], status='progress', message_id=mid)
+                    rec['phase'] = 'escalated'
+        t.store.set_setting('worker_nudges', records)
 
     async def scan(self, yog_id):
         t = self.temple
@@ -93,6 +180,8 @@ class Continuations:
             async with self.lock:
                 if t.store.task(task['id'])['state'] != 'open':
                     continue
+                await self.check_worker_nudges(yog_id, row)
+                row['worker_nudges'] = (t.store.setting('worker_nudges') or {}).get(task['id'], {})
                 records = t.store.setting('continuations') or {}
                 rec = records.get(task['id'], {})
                 if (rec.get('phase') == 'waiting' and

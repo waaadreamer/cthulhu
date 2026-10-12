@@ -40,6 +40,17 @@ def with_task(args, text):
 
 def continuation_fixture(body, instructions):
     """Deterministic model decisions only for the isolated continuation scenario."""
+    if 'DIRECT_NUDGE_TEST' in body and '定时巡检' in body:
+        match = re.search(r'未完成任务[^\n]*\n', body)
+        tasks = json.JSONDecoder().raw_decode(body[match.end():])[0] if match else []
+        for row in tasks:
+            if row['task']['title'] == 'DIRECT_NUDGE_TEST' and not row.get('worker_nudges'):
+                return 'temple_worker_review', {'task_id': row['task']['id'], 'revision': row['revision'],
+                     'agent_id': row['executors'][0]['agent_id'], 'state': 'stalled',
+                     'evidence': 'Isolated fixture confirms existing assignment made no progress; no external workload is running.'}
+        return None
+    if 'Task-scoped worker nudge' in body and 'DIRECT_NUDGE_WORKER' in json.dumps(instructions) and '定时巡检' not in body:
+        return 'temple_agents', {}
     if 'Automatic waiting-state inspection' in body and 'LEGACY_WAIT_TEST' in body and '定时巡检' not in body:
         row = json.loads(body.split('【续办前最新状态，以此为准；已完成、仍在执行或真正待决策时不要重试】\n')[-1])
         worker = re.search(r'EXISTING_EXECUTOR=(old_\w+)', row['instruction']['text']).group(1)

@@ -317,6 +317,10 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CallFailed):
             await clients['shub'].call('continuation_review', **params)
         with self.assertRaises(CallFailed):
+            await clients['shub'].call('worker_review', **params, agent_id='old_one')
+        with self.assertRaises(CallFailed):
+            await clients['old_one'].call('worker_review', **params, agent_id='old_one')
+        with self.assertRaises(CallFailed):
             await clients['yog'].call('send', to='shub', text='bypass', task_id=task, kind='continuation')
         with self.assertRaises(CallFailed):
             await clients['yog'].call('restart', agent_id='old_one')

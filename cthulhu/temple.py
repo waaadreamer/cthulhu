@@ -350,11 +350,13 @@ class Temple:
             if role not in (Role.YOG, Role.SHUB, Role.AZATHOTH):
                 raise Denied("task state is reserved for supervision and coordination")
             return await self.continuations.snapshot(p["task_id"])
-        if method in ("continuation_tasks", "continuation_review"):
+        if method in ("continuation_tasks", "continuation_review", "worker_review"):
             if role != Role.YOG:
                 raise Denied("only yog assesses continuation")
             if me["galaxy_id"] in self.maintenance:
                 return {"tasks": [], "agents": []} if method == "continuation_tasks" else {"state": "draining"}
+            if method == "worker_review":
+                return await self.continuations.worker_review(conn.id, p)
             return (await self.continuations.scan(conn.id) if method == "continuation_tasks"
                     else await self.continuations.review(conn.id, p))
         if method == "patrol":

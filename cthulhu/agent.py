@@ -317,10 +317,17 @@ class Agent:
         """Run one turn on an explicit thread. Tracked turns are interruptible and feed latest_result."""
         rt = runtime or self.runtime
         live: list[str] = []
+        last_activity_at = None
 
         def events(method: str, p: dict) -> None:
+            nonlocal last_activity_at
             if method == "item/completed":
-                live.extend(summarize_items([p["item"]]))
+                activity = summarize_items([p["item"]])
+                live.extend(activity)
+                if track and activity:
+                    last_activity_at = time.time()
+                    self.latest["last_activity_at"] = last_activity_at
+                    self.latest["activity_task"] = self.current_task
                 self.latest["live"] = live[-8:]
             if on_event:
                 on_event(method, p)
@@ -338,6 +345,7 @@ class Agent:
         if track:
             self.latest = {"last_reply": clip(result.text, 3000), "last_status": result.status,
                            "last_task": self.current_task,
+                           "last_activity_at": last_activity_at, "activity_task": self.current_task,
                            "activity": summarize_items(result.items), "finished_at": time.time(),
                            "model": backends.label(self.backends.active_cfg)}
             if result.error:
