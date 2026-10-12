@@ -257,6 +257,43 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             await self.caller.call("api_open", provider="ali", body={"model": "gpt-6-astra", "input": "must not send"})
 
 
+    async def test_maintenance_runtime_updates_only_existing_old_one(self):
+        from cthulhu.protocol import maintenance_token, agent_token, CallFailed
+
+        async def ignore(_):
+            pass
+
+        frames = asyncio.Queue()
+        self.temple.store.upsert_agent("old_test", "test", "old_one", "central")
+        agent = Link(self.caller.url, {"kind": "agent", "id": "old_test",
+                     "token": agent_token("test-secret", "old_test", 1),
+                     "capabilities": ["galaxy_api_v1"]}, ignore, frames.put)
+        maint = Link(self.caller.url, {"kind": "maintenance", "token": maintenance_token("test-secret")},
+                     ignore, ignore)
+        for link in (agent, maint):
+            self.links.append(asyncio.create_task(link.run()))
+            await asyncio.wait_for(link.connected.wait(), 3)
+        cfg = {"backend": "galaxy_api", "provider": "ali", "model": "gpt-6-astra", "effort": "medium"}
+        result = await maint.call("maintenance_runtime", agent_id="old_test", config=cfg)
+        self.assertEqual(result["config"], cfg)
+        async def runtime_frame():
+            while True:
+                frame = await frames.get()
+                if frame.get("type") == "runtime":
+                    return frame
+        self.assertEqual((await asyncio.wait_for(runtime_frame(), 3))["config"], cfg)
+        self.assertEqual(self.temple.store.setting("runtimes")["old_test"], cfg)
+        for aid, bad in (("missing", cfg), ("old_one", cfg),
+                         ("old_test", cfg | {"provider": "unavailable"})):
+            with self.assertRaises(CallFailed):
+                await maint.call("maintenance_runtime", agent_id=aid, config=bad)
+        self.assertEqual(self.temple.store.setting("runtimes")["old_test"], cfg)
+        with self.assertRaises(CallFailed):
+            await agent.call("maintenance_runtime", agent_id="old_test", config=cfg)
+        await maint.call("maintenance_runtime", agent_id="old_test", config=None)
+        self.assertIsNone((await asyncio.wait_for(runtime_frame(), 3))["config"])
+        self.assertNotIn("old_test", self.temple.store.setting("runtimes"))
+
     async def test_first_sse_reaches_caller_before_upstream_completion(self):
         import base64
         self.terminal_gate = asyncio.Event()

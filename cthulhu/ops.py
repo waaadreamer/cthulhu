@@ -25,6 +25,9 @@ async def main(args):
     try:
         if args.action == "status":
             result = await link.call("maintenance_snapshot", timeout=15)
+        elif args.action == "runtime":
+            result = await link.call("maintenance_runtime", agent_id=args.agent_id,
+                                     config=json.loads(args.runtime_json), timeout=15)
         else:
             result = await link.call("maintenance_drain", galaxy=args.galaxy,
                                      **({"enabled": args.action == "drain"} if args.action != "check" else {}),
@@ -38,9 +41,13 @@ async def main(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True, help="local temple config; never copied")
-    p.add_argument("action", choices=["status", "drain", "check", "resume"])
+    p.add_argument("action", choices=["status", "drain", "check", "resume", "runtime"])
     p.add_argument("--galaxy")
+    p.add_argument("--agent-id")
+    p.add_argument("--runtime-json", help="runtime config JSON, or null to restore the default")
     args = p.parse_args()
-    if args.action != "status" and not args.galaxy:
+    if args.action in ("drain", "check", "resume") and not args.galaxy:
         p.error("--galaxy is required")
+    if args.action == "runtime" and (not args.agent_id or args.runtime_json is None):
+        p.error("runtime requires --agent-id and --runtime-json")
     asyncio.run(main(args))

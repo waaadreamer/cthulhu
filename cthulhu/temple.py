@@ -704,6 +704,12 @@ class Temple:
         if method == "maintenance_snapshot":
             return {"version": BUILD, **self.directory(), "providers": self.api_broker.catalog(),
                     "active_streams": len(self.api_broker.streams)}
+        if method == "maintenance_runtime":
+            agent = self.store.agent(p["agent_id"])
+            if not agent or agent["role"] != Role.OLD_ONE:
+                raise ValueError("maintenance runtime requires an existing old_one agent")
+            await self.set_runtime(agent["id"], p["config"])
+            return {"agent_id": agent["id"], "config": self.runtime_for(agent)}
         if method == "maintenance_canary":
             galaxy = self.galaxies.get(p["galaxy"])
             if not galaxy or "galaxy_api_v1" not in galaxy.capabilities:
