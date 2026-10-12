@@ -45,9 +45,11 @@ def custom_source(source):
 
 def build(source, target):
     s = custom_source(source)
-    a = s.index('// src/agent/claude/adapter.ts')
+    # Shared prompt/types modules are interleaved before the model implementation.
+    # Retain them: message intake and capability policy use these at runtime.
+    a = s.index('// src/agent/claude/stream-json.ts')
     b = s.index('// src/runtime/errors.ts', a)
-    s = s[:a] + 'var CLAUDE_DEFAULT_PERMISSION_MODE = "bypassPermissions";\n' + s[b:]
+    s = s[:a] + s[b:]
     a = s.index('// src/agent/codex/argv.ts')
     # The following channel module owns imports used later by startChannel.
     # esbuild interleaves modules; capability is already past those imports.

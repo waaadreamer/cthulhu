@@ -283,6 +283,11 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
           if (typeof createLarkChannel !== 'function') throw Error('channel factory missing');
           const nonce = new CallbackNonceStore(join21(dirname18(process.argv[1]), 'nonce-fixture.json'));
           await nonce.load();
+          const capability = codexCapability({permissions: {maxAccess: 'full'}});
+          if (!capability.systemPrompt || capability.permissions.maxAccess !== 'full')
+            throw Error('shared capability prompt missing');
+          if (!prefixBridgeSystemPrompt('fixture input').includes('fixture input'))
+            throw Error('shared prompt composer missing');
           console.log('channel dependencies ready');
         '''
         target.write_text(script)
