@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { Check, Loader2, RotateCcw } from 'lucide-react'
 import { Agent, api, Directory, Role, ROLE_META, RuntimeCfg } from '../api'
 import { Avatar } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 
 type Models = Record<RuntimeCfg['backend'], string[]>
-type Provider = { id: string; models: string[] }
+type Provider = { id: string; models: string[]; model_backends: Record<string, 'claude' | 'codex'> }
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max']
 
 export function Settings({ dir }: { dir: Directory }) {
@@ -127,26 +127,40 @@ function RuntimeEditor({ agent, keyName, override, models, providers, onSaved }:
 }
 
 function BackendFields({ cfg, models, providers, onChange }: { cfg: RuntimeCfg; models: Models; providers: Provider[]; onChange: (c: RuntimeCfg) => void }) {
+  const source = cfg.provider ? 'galaxy_api' : cfg.backend
+  const provider = providers.find(p => p.id === cfg.provider)
+  const selectAPIModel = (p: Provider | undefined, model: string) => {
+    const backend = p?.model_backends[model] === 'claude' ? 'claude' : 'galaxy_api'
+    onChange({ ...cfg, provider: p?.id ?? cfg.provider, backend, model,
+      service_tier: backend === 'claude' ? undefined : cfg.service_tier,
+      effort: model === 'gpt-6-astra' && !cfg.effort ? 'medium' : cfg.effort })
+  }
   return (
     <div className="space-y-3">
       <div className="flex gap-1 rounded-xl bg-black/30 p-1">
         {(['claude', 'codex', 'galaxy_api'] as const).filter((b) => models[b]).map((b) => (
-          <button key={b} onClick={() => b !== cfg.backend && onChange({ ...cfg, backend: b, model: models[b]?.[0] ?? '', service_tier: undefined, provider: b === 'galaxy_api' ? providers[0]?.id : undefined })}
-            className={`flex-1 rounded-lg py-1.5 text-sm transition ${cfg.backend === b
+          <button key={b} aria-pressed={source === b} onClick={() => {
+            if (b === source) return
+            if (b === 'galaxy_api') selectAPIModel(providers[0], providers[0]?.models[0] ?? '')
+            else onChange({ ...cfg, backend: b, model: models[b]?.[0] ?? '', service_tier: undefined, provider: undefined })
+          }}
+            className={`flex-1 rounded-lg py-1.5 text-sm transition ${source === b
               ? b === 'claude' ? 'bg-orange-400/20 text-orange-100' : 'bg-sky-400/20 text-sky-100'
               : 'text-slate-500 hover:text-slate-300'}`}>
             {b === 'claude' ? 'Claude Code' : b === 'galaxy_api' ? '星系 API' : '个人 Codex'}
           </button>
         ))}
       </div>
-      {(cfg.backend === 'galaxy_api' || cfg.provider) && (
+      {source === 'galaxy_api' && (
         <Field label="在线 API 星系">
           <Select value={cfg.provider ?? ''} options={providers.map(p => p.id)}
-            onChange={(v) => onChange({ ...cfg, provider: v, model: providers.find(p => p.id === v)?.models[0] ?? '' })} />
+            onChange={(v) => { const p = providers.find(p => p.id === v); selectAPIModel(p, p?.models[0] ?? '') }} />
         </Field>
       )}
       <Field label="模型">
-        <ModelInput value={cfg.model} options={cfg.provider ? providers.find(p => p.id === cfg.provider)?.models ?? [] : models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />
+        {source === 'galaxy_api'
+          ? <Select value={cfg.model} options={Array.from(new Set([...(provider?.models ?? []), cfg.model].filter(Boolean)))} onChange={(v) => selectAPIModel(provider, v)} />
+          : <ModelInput value={cfg.model} options={models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />}
       </Field>
       <Field label="effort">
         <Select value={cfg.effort ?? ''} options={EFFORTS} onChange={(v) => onChange({ ...cfg, effort: v || undefined })} />
@@ -177,7 +191,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 const INPUT = 'w-full rounded-lg border border-white/10 bg-black/30 px-3 py-1.5 text-sm text-white outline-none focus:border-violet-400/60'
 
 function ModelInput({ value, options, onChange, placeholder }: { value: string; options: string[]; onChange: (v: string) => void; placeholder?: string }) {
-  const id = `models-${options.join('-').length}-${options[0] ?? ''}`
+  const id = useId()
   return (
     <>
       <input list={id} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value.trim())} className={INPUT + ' font-mono'} />
