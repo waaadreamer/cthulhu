@@ -120,6 +120,11 @@ class Universe(HarnessServer):
         self.assertEqual(msgs[0]["receiver"], "sh")
         self.wait(lambda: self.api("memory?agent_id=sh"))
 
+    def test_ghroth_memory_from_azathoth(self):
+        self.chat("az", 'CALL temple_send {"to": "gh", "text": "长期规则：只读任务不做改动"}')
+        self.wait(lambda: [m for m in self.api("messages?agent_id=gh") if m["sender"] == "az" and m["state"] == "handled"])
+        self.wait(lambda: self.api("memory?agent_id=gh"))
+
     @staticmethod
     def via_shub(report: dict) -> str:
         """An owner prompt that makes azathoth send shub a task, and shub answer with `report` (tagged with that task)."""
