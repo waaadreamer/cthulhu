@@ -1,4 +1,4 @@
-export type Role = 'azathoth' | 'shub' | 'yog' | 'ghroth' | 'old_one'
+export type Role = 'azathoth' | 'shub' | 'yog' | 'ghroth' | 'nyarlathotep' | 'old_one'
 
 export interface Agent {
   id: string
@@ -52,6 +52,7 @@ export interface DeployStatus { temple: { revision: string; host: string }; jobs
 export interface Directory { agents: Agent[]; galaxies: Galaxy[]; gods?: Record<string, string | null> }
 
 export interface Turn {
+  channel_receipt?: { state?: 'sending' | 'sent' | 'ambiguous' | 'failed'; message_id?: string } | null
   id: string
   agent_id: string
   user_text: string
@@ -107,6 +108,7 @@ export const ROLE_META: Record<Role, { label: string; glyph: string; color: stri
   shub:     { label: '黑山羊',   glyph: '❦', color: 'bg-emerald-500', ring: 'focus-within:ring-emerald-500/15', text: 'text-emerald-300', grad: 'from-emerald-500 to-teal-500' },
   yog:      { label: '尤格索托斯', glyph: '◉', color: 'bg-amber-500', ring: 'focus-within:ring-amber-500/15', text: 'text-amber-300', grad: 'from-amber-400 to-orange-500' },
   ghroth:   { label: '格赫罗斯', glyph: '☄', color: 'bg-rose-500', ring: 'focus-within:ring-rose-500/15', text: 'text-rose-300', grad: 'from-rose-500 to-pink-500' },
+  nyarlathotep: { label: '奈亚拉托提普', glyph: '✧', color: 'bg-indigo-500', ring: 'focus-within:ring-indigo-500/15', text: 'text-indigo-300', grad: 'from-indigo-500 to-cyan-500' },
   old_one:  { label: '旧日支配者', glyph: '◈', color: 'bg-cyan-500', ring: 'focus-within:ring-cyan-500/15', text: 'text-cyan-300', grad: 'from-cyan-500 to-sky-500' },
 }
 

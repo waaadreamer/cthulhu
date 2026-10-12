@@ -315,7 +315,7 @@ class Agent:
             return result
         return result
 
-    async def run(self, thread: str, text: str, on_event=None, track=True, runtime=None, **kw) -> TurnResult:
+    async def run(self, thread: str, text: str, on_event=None, track=True, runtime=None, on_start=None, **kw) -> TurnResult:
         """Run one turn on an explicit thread. Tracked turns are interruptible and feed latest_result."""
         rt = runtime or self.runtime
         live: list[str] = []
@@ -337,6 +337,8 @@ class Agent:
         def started(turn_id: str) -> None:
             if track:
                 self.active = (rt, thread, turn_id)
+            if on_start:
+                on_start(turn_id)
         self.inflight_runs += 1
         try:
             result = await rt.run_turn(thread, text, on_start=started, on_event=events, **kw)

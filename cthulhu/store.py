@@ -89,6 +89,16 @@ CREATE TABLE IF NOT EXISTS turn_log (       -- backend-neutral record of every a
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS turn_log_agent ON turn_log(agent_id, id);
+CREATE TABLE IF NOT EXISTS channel_events (
+    agent_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    message_id TEXT NOT NULL UNIQUE,
+    payload TEXT NOT NULL,
+    receipt TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (agent_id, app_id, event_id)
+);
 CREATE TABLE IF NOT EXISTS accounts (
     username TEXT PRIMARY KEY,
     salt TEXT NOT NULL,
@@ -127,7 +137,8 @@ class Store:
         for ddl in ("ALTER TABLE chat_turns ADD COLUMN model TEXT", "ALTER TABLE chat_turns ADD COLUMN origin TEXT",
                     "ALTER TABLE memory ADD COLUMN updated_at REAL", "ALTER TABLE messages ADD COLUMN task_id TEXT",
                     "ALTER TABLE messages ADD COLUMN status TEXT", "ALTER TABLE chat_turns ADD COLUMN task_id TEXT",
-                    "ALTER TABLE chat_turns ADD COLUMN kind TEXT"):
+                    "ALTER TABLE chat_turns ADD COLUMN kind TEXT",
+                    "ALTER TABLE turn_log ADD COLUMN scope TEXT NOT NULL DEFAULT ''"):
             try:
                 self.db.execute(ddl)
             except sqlite3.OperationalError:
@@ -306,13 +317,14 @@ class Store:
                (turn_id, agent_id, user_text, now, now))
         return self.turn(turn_id)
 
-    TURN_SQL = ("SELECT c.*, t.title AS task_title, t.state AS task_state FROM chat_turns c"
-                " LEFT JOIN tasks t ON t.id = c.task_id")
+    TURN_SQL = ("SELECT c.*, t.title AS task_title, t.state AS task_state, e.receipt AS channel_receipt FROM chat_turns c"
+                " LEFT JOIN tasks t ON t.id = c.task_id LEFT JOIN channel_events e ON e.message_id=c.id")
 
     def turn(self, turn_id: str) -> dict | None:
         t = self.one(self.TURN_SQL + " WHERE c.id=?", (turn_id,))
         if t:
             t["activity"] = json.loads(t["activity"])
+            t['channel_receipt'] = json.loads(t['channel_receipt']) if t['channel_receipt'] is not None else None
         return t
 
     def update_turn(self, turn_id: str, **fields) -> None:
@@ -332,6 +344,7 @@ class Store:
         rows = self.q(sql + " ORDER BY c.created_at DESC LIMIT ?", (*args, limit))
         for t in rows:
             t["activity"] = json.loads(t["activity"])
+            t['channel_receipt'] = json.loads(t['channel_receipt']) if t['channel_receipt'] is not None else None
         return rows[::-1]
 
     # settings
@@ -346,16 +359,42 @@ class Store:
     # turn log
 
     def log_turn(self, agent_id: str, backend: str, model: str | None, thread: str, input: str, reply: str,
-                 status: str) -> int:
+                 status: str, scope: str = "") -> int:
         with self.lock:
-            cur = self.db.execute("INSERT INTO turn_log (agent_id, backend, model, thread, input, reply, status, created_at)"
-                                  " VALUES (?,?,?,?,?,?,?,?)",
-                                  (agent_id, backend, model, thread, input, reply, status, time.time()))
+            cur = self.db.execute("INSERT INTO turn_log (agent_id, backend, model, thread, input, reply, status, created_at, scope)"
+                                  " VALUES (?,?,?,?,?,?,?,?,?)",
+                                  (agent_id, backend, model, thread, input, reply, status, time.time(), scope))
             return cur.lastrowid
 
-    def turn_log(self, agent_id: str, after: int = 0, limit: int = 20) -> list[dict]:
-        rows = self.q("SELECT * FROM turn_log WHERE agent_id=? AND id>? ORDER BY id DESC LIMIT ?", (agent_id, after, limit))
+    def turn_log(self, agent_id: str, after: int = 0, limit: int = 20, scope: str = "") -> list[dict]:
+        rows = self.q("SELECT * FROM turn_log WHERE agent_id=? AND scope=? AND id>? ORDER BY id DESC LIMIT ?", (agent_id, scope, after, limit))
         return rows[::-1]
+
+    def channel_accept(self, agent_id: str, app_id: str, event_id: str, scope: str, payload: dict) -> tuple[dict, bool]:
+        """One transaction: external event -> existing message/chat, never a second queue."""
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.db.execute("SELECT * FROM channel_events WHERE agent_id=? AND app_id=? AND event_id=?",
+                                      (agent_id, app_id, event_id)).fetchone()
+                if row:
+                    if row['scope'] != scope:
+                        raise ValueError('event scope mismatch')
+                    self.db.execute("COMMIT")
+                    return row, False
+                mid, now = new_id('msg'), time.time()
+                self.db.execute("INSERT INTO messages (id,sender,receiver,kind,text,created_at) VALUES (?,?,?,?,?,?)",
+                                (mid, 'owner', agent_id, 'channel', payload['prompt'], now))
+                self.db.execute("INSERT INTO chat_turns (id,agent_id,user_text,origin,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                                (mid, agent_id, payload['text'], '飞书', now, now))
+                self.db.execute("INSERT INTO channel_events (agent_id,app_id,event_id,scope,message_id,payload) VALUES (?,?,?,?,?,?)",
+                                (agent_id, app_id, event_id, scope, mid, json.dumps(payload, ensure_ascii=False)))
+                row = self.db.execute("SELECT * FROM channel_events WHERE message_id=?", (mid,)).fetchone()
+                self.db.execute("COMMIT")
+                return row, True
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
 
     # yog patrols
 

@@ -170,6 +170,10 @@ class Temple:
         for a in self.config.get("gods", []):
             self.store.upsert_agent(a["id"], a.get("name") or roles.DISPLAY[Role(a["role"])], a["role"],
                                     a["galaxy"], spec=a.get("spec") or {})
+        channel = self.config.get('feishu')
+        if channel:
+            self.store.upsert_agent('nyarlathotep', roles.DISPLAY[Role.NYARLATHOTEP], Role.NYARLATHOTEP,
+                                    channel['galaxy'], spec={'feishu_worker': channel.get('worker', {})})
 
     # lookups
 
@@ -225,6 +229,20 @@ class Temple:
             pass                                 # ghroth's only channel: asking azathoth to approve a deploy
         else:
             roles.require_send(sender_role, receiver_role)
+        if Role.NYARLATHOTEP in (sender_role, receiver_role):
+            other = receiver if sender_role == Role.NYARLATHOTEP else sender
+            other_role = self.role_of(other)
+            if other_role not in (OWNER, Role.AZATHOTH, Role.SHUB, SYSTEM):
+                if not task_id or not self.store.task(task_id):
+                    raise Denied('Nyarl peer communication requires a task')
+                links = self.store.q("SELECT sender,receiver FROM messages WHERE task_id=? AND kind!='deploy_request'", (task_id,))
+                linked = {m[k] for m in links for k in ('sender', 'receiver')}
+                associated = self.store.agent(other)
+                if other_role != Role.YOG and other not in linked and (associated or {}).get('spec', {}).get('task_id') != task_id:
+                    raise Denied('peer is not associated with this task')
+                nyarl = sender if sender_role == Role.NYARLATHOTEP else receiver
+                if nyarl not in linked:
+                    raise Denied('Nyarl has not been delegated this task')
         if not text.strip():
             raise ValueError("empty message")
         msg = self.store.add_message(sender, receiver, text, kind, priority, reply_to, message_id, task_id, status)
@@ -280,12 +298,15 @@ class Temple:
     # agent calls: (conn, params) -> result
 
     async def handle_agent_call(self, conn: Conn, method: str, p: dict) -> Any:
+        if method.startswith('channel_'):
+            from .feishu import channel_call
+            return await channel_call(self, conn, method, p)
         if method.startswith("api_"):
             return await self.handle_api_call(conn, method, p)
         me = self.store.agent(conn.id)
         role = me["role"]
         if method == "send":
-            if role == Role.YOG and self.role_of(p["to"]) in (Role.SHUB, Role.OLD_ONE):
+            if role == Role.YOG and self.role_of(p["to"]) in (Role.SHUB, Role.OLD_ONE, Role.NYARLATHOTEP):
                 return await self.continuations.send(conn.id, p)
             task_id, status = self.task_fields(role, self.role_of(p["to"]), p)
             msg = await self.route(conn.id, p["to"], p["text"], kind=p.get("kind", "message"),
@@ -313,7 +334,9 @@ class Temple:
             self.store.set_agent(conn.id, thread_id=p["thread_id"])
             return True
         if method == "log_turn":
-            result = self.store.log_turn(conn.id, p["backend"], p.get("model"), p["thread"], p["input"], p["reply"], p["status"])
+            from .feishu import check_scope
+            scope = check_scope(self, conn.id, p.get('scope', ''))
+            result = self.store.log_turn(conn.id, p["backend"], p.get("model"), p["thread"], p["input"], p["reply"], p["status"], scope)
             # Completion is authenticated and persisted before waking supervision. This is
             # a scheduling hint, not a new agent message or a grant of messaging authority.
             if role == Role.GHROTH:
@@ -323,7 +346,9 @@ class Temple:
                     await target.send({"type": "patrol_requested"})
             return result
         if method == "turn_log":
-            return self.store.turn_log(conn.id, limit=min(int(p.get("limit", 20)), 100))
+            from .feishu import check_scope
+            scope = check_scope(self, conn.id, p.get('scope', ''))
+            return self.store.turn_log(conn.id, limit=min(int(p.get("limit", 20)), 100), scope=scope)
         if method == "remember":
             return self.store.remember(conn.id, p["text"], p.get("source"))
         if method == "revise":
@@ -506,7 +531,8 @@ class Temple:
 
     def runtime_for(self, a: dict) -> dict | None:
         overrides = self.store.setting("runtimes") or {}
-        return overrides.get(a["id"]) or overrides.get(a["role"])
+        default = (self.config.get('feishu') or {}).get('runtime') if a['role'] == Role.NYARLATHOTEP else None
+        return overrides.get(a["id"]) or overrides.get(a["role"]) or default
 
     async def set_runtime(self, key: str, cfg: dict | None) -> None:
         if cfg is not None:
@@ -861,7 +887,7 @@ class Temple:
                                                      search=q.get("search") or None))
             if path == "send":
                 if self.role_of(body["to"]) not in roles.SEND[OWNER]:
-                    raise Denied("you may only talk to azathoth and ghroth")
+                    raise Denied("this role does not accept owner chat")
                 return JSONResponse(await self.owner_send(body["to"], body["text"]))
             if path == "stop":
                 return JSONResponse({"ok": await self.owner_stop(body["agent_id"])})

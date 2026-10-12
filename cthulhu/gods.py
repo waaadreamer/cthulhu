@@ -627,8 +627,9 @@ class Ghroth(OwnerChat, MemoryAgent):
     memory_brief = "刚才是你和主人的对话。提取主人对 harness 维护的要求、决定、约束和偏好，以及你们达成的结论。"
 
     def tools(self) -> list[dict]:
-        # Ghroth talks to no one; its only channel is asking azathoth to approve a deploy.
+        # Maintenance can answer Nyarl only within an explicitly associated task.
         return [
+            self.send_tool({'task_id': STR}),
             tool("temple_deploy_request", "请求阿撒托斯批准一键部署：把仓库 main 分支最新版本部署到中心神殿和各星系。"
                  "先把修改提交并 push 到 GitHub。阿撒托斯批准后由神殿执行（排空、更新、重启、确认、失败回滚）。",
                  {"galaxies": {"type": "array", "items": STR, "description": "星系 ID；不填表示全部"},
@@ -670,4 +671,10 @@ class OldOne(Agent):
                           "priority": 0, "created_at": time.time(), "text": "你刚被创建。开始执行你的初始任务。"})
 
 
-CLASSES = {c.role: c for c in (Azathoth, Shub, Yog, Ghroth, OldOne)}
+from .nyarl import NyarlBridge
+
+
+class Nyarlathotep(NyarlBridge, OwnerChat, MemoryAgent):
+    pass
+
+CLASSES = {c.role: c for c in (Azathoth, Shub, Yog, Ghroth, OldOne, Nyarlathotep)}

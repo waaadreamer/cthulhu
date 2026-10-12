@@ -56,7 +56,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
     onDeploy: () => setDeployTick((x) => x + 1),
   })
 
-  const chatAgents = ['azathoth', 'ghroth'].map((r) => dir.agents.find((a) => a.role === r)).filter(Boolean) as Agent[]
+  const chatAgents = ['azathoth', 'ghroth', 'nyarlathotep'].map((r) => dir.agents.find((a) => a.role === r)).filter(Boolean) as Agent[]
   useEffect(() => {
     if (view.kind === 'chat' && !view.agent && chatAgents[0]) setView({ kind: 'chat', agent: chatAgents[0].id })
   }, [chatAgents, view])

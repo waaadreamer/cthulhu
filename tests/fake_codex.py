@@ -16,6 +16,7 @@ from pathlib import Path
 ids = itertools.count(1)
 threads = {}
 pending = {}
+interruptible = {}
 cycle_count = 0
 
 
@@ -146,6 +147,8 @@ for line in sys.stdin:
             pending[cid] = (p["threadId"], turn)
             out({"id": cid, "method": "item/tool/call", "params": {"threadId": p["threadId"], "turnId": turn,
                  "callId": "c", "tool": name, "arguments": json.loads(args.strip().splitlines()[0])}})
+        elif body.strip() == 'WAIT_INTERRUPT_FIXTURE':
+            interruptible[turn] = p['threadId']
         elif "SLEEP " in body and "定时巡检" not in body:   # yog's patrol prompt quotes it; only the target sleeps
             time.sleep(float(body.split("SLEEP ", 1)[1].split()[0]))
             finish(p["threadId"], turn, "slept")
@@ -153,5 +156,11 @@ for line in sys.stdin:
             finish(p["threadId"], turn, body.split("REPLY ", 1)[1].strip())
         else:
             finish(p["threadId"], turn, "echo[codex]: " + text)
+    elif m == 'turn/interrupt':
+        thread = interruptible.pop(p['turnId'], None)
+        out({'id':rid,'result':{}})
+        if thread:
+            out({'method':'turn/completed','params':{'threadId':thread,'turn':{
+                'id':p['turnId'],'status':'interrupted','error':None,'items':[]}}})
     else:
         out({"id": rid, "result": {}})

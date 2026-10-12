@@ -160,7 +160,11 @@ class EndToEnd(unittest.TestCase):
     def tearDownClass(cls):
         import signal
         for p in cls.procs:
-            os.killpg(p.pid, signal.SIGKILL)
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait(timeout=10)
         shutil.rmtree(cls.dir, ignore_errors=True)
 
     @classmethod

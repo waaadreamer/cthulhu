@@ -330,6 +330,10 @@ function Footer({ turn }: { turn: Turn }) {
   const [copied, setCopied] = useState(false)
   return (
     <div className="mt-1.5 flex items-center gap-2 text-[11px] text-slate-600">
+      {turn.channel_receipt != null && <span className="text-slate-400" title={turn.channel_receipt.message_id}>
+        飞书：{turn.channel_receipt.state === 'sent' ? '已送达' : turn.channel_receipt.state === 'ambiguous' ? '送达待核验'
+          : turn.channel_receipt.state === 'failed' ? '未发送' : turn.channel_receipt.state === 'sending' ? '发送中' : '待发送'}
+      </span>}
       {turn.status === 'interrupted' && <span className="chip bg-slate-500/15 text-slate-400">已停止</span>}
       {turn.status === 'failed' && <span className="chip bg-rose-500/15 text-rose-300">失败</span>}
       {turn.reply && (

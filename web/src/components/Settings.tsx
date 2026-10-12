@@ -16,7 +16,7 @@ export function Settings({ dir }: { dir: Directory }) {
     .then((r) => { setOverrides(r.overrides); setModels(r.models); setProviders(r.providers ?? []) })
   useEffect(() => { load() }, [])
 
-  const roles: Role[] = ['azathoth', 'shub', 'yog', 'ghroth']
+  const roles: Role[] = ['azathoth', 'shub', 'yog', 'ghroth', 'nyarlathotep']
   const gods = roles.map((r) => dir.agents.find((a) => a.role === r)).filter(Boolean) as Agent[]
   const olds = dir.agents.filter((a) => a.role === 'old_one' && a.desired === 'running')
 
@@ -96,7 +96,7 @@ function RuntimeEditor({ agent, keyName, override, models, providers, onSaved }:
         </Group>
       </div>
 
-      {['azathoth', 'shub', 'yog', 'ghroth'].includes(agent.role) && cfg.backend === 'claude' && (
+      {['azathoth', 'shub', 'yog', 'ghroth', 'nyarlathotep'].includes(agent.role) && cfg.backend === 'claude' && (
         <Group title="记忆提炼（在主会话分叉上运行，共享缓存）" className="mt-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="模型">

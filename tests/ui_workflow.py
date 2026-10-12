@@ -19,7 +19,11 @@ async def main():
         port = free_port()
         t = Temple({'secret': secrets.token_hex(16), 'db': tmp + '/db',
                     'galaxies': [{'id': 'test', 'name': 'Test', 'token': secrets.token_hex(16)}],
-                    'gods': [{'id': 'az', 'role': 'azathoth', 'galaxy': 'test'}]})
+                    'gods': [{'id': 'az', 'role': 'azathoth', 'galaxy': 'test'}, {'id': 'nyarlathotep', 'role': 'nyarlathotep', 'galaxy': 'test'}]})
+        channel_row, _ = t.store.channel_accept('nyarlathotep', 'fixture-app', 'fixture-event', 'fixture-scope', {'prompt': '迁移后的飞书入口', 'text': '迁移后的飞书入口'})
+        channel_mid = channel_row['message_id']
+        t.store.update_turn(channel_mid, reply='奈亚接入测试回复', status='done')
+        t.store.x('UPDATE channel_events SET receipt=? WHERE message_id=?', (json.dumps({'state':'sending'}),channel_mid))
         salt = secrets.token_hex(16)
         t.store.set_account('owner', salt, password_hash('test-password', salt))
         for tid, title in [('task_a', '分组任务甲'), ('task_b', '分组任务乙')]:
@@ -50,6 +54,9 @@ async def main():
             async for line in proc.stdout:
                 text=line.decode().strip()
                 print(text,flush=True)
+                if text == 'FEISHU_RECEIPT':
+                    t.store.x('UPDATE channel_events SET receipt=? WHERE message_id=?', (json.dumps({'state':'sent','message_id':'fixture-platform-receipt'}),channel_mid))
+                    await t.broadcast({'type':'chat','turn':t.store.turn(channel_mid)})
                 if text == 'STREAM_REQUEST':
                     turn('b2','task_b','',40)
                     t.store.update_turn('b2',status='running')

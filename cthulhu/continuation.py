@@ -49,7 +49,7 @@ class Continuations:
         # Use all explicit associations, including older delegations; never parse prose IDs.
         links = store.q("SELECT DISTINCT sender, receiver FROM messages WHERE task_id=? AND kind!='deploy_request'", (task_id,))
         ids = {m[k] for m in links for k in ('sender', 'receiver')}
-        agents = [a for a in store.agents(include_stopped=False) if a['role'] in (Role.OLD_ONE, Role.GHROTH)
+        agents = [a for a in store.agents(include_stopped=False) if a['role'] in (Role.OLD_ONE, Role.GHROTH, Role.NYARLATHOTEP)
                   and (a['id'] in ids or a['spec'].get('task_id') == task_id)]
         if results is None:
             results = await asyncio.gather(*(t.latest_result(a['id']) for a in agents))
@@ -69,7 +69,7 @@ class Continuations:
                         (r.get('state') == 'working' or r.get('active_runs') or r.get('background_busy')))
         active = any(task_active(r) for r in executors)
         pending = store.q("SELECT id FROM messages WHERE task_id=? AND state!='handled' AND receiver IN "
-                          "(SELECT id FROM agents WHERE role IN ('shub','old_one','ghroth')) AND sender NOT IN "
+                          "(SELECT id FROM agents WHERE role IN ('shub','old_one','ghroth','nyarlathotep')) AND sender NOT IN "
                           "(SELECT id FROM agents WHERE role='yog')", (task_id,))
         # A missing/offline/unknown runtime is not proof that restarting its workload is safe.
         unavailable = any(not r.get('online') or not r.get('state') or r.get('draining') for r in executors)
@@ -87,7 +87,7 @@ class Continuations:
         async with self.lock:
             # Fresh store facts after network awaits, without holding a global lock during remote reads.
             row = await self.snapshot(task_id, row['executors'])
-            direct = t.role_of(target) == Role.OLD_ONE
+            direct = t.role_of(target) in (Role.OLD_ONE, Role.NYARLATHOTEP)
             worker = next((r for r in row['executors'] if r['agent_id'] == target), None)
             if direct and not worker:
                 raise Denied('worker is not associated with this task')
