@@ -1,0 +1,20 @@
+{
+  "base_package": "lark-channel-bridge",
+  "base_version": "0.7.0",
+  "base_tarball_url": "https://registry.npmjs.org/lark-channel-bridge/-/lark-channel-bridge-0.7.0.tgz",
+  "base_tarball_sha256": "17562791379c2d7b278f58221b6ae58308b2332286bc8d88f77ffb95a64dd1ff",
+  "base_cli_sha256": "448243111b761f61ed647bbb2440809d8b05590d6debdbfb7a9f1d8b7abf88e3",
+  "patched_cli_sha256": "a3be83956a19449406f426442ba655579185fbad67d1ecac0fdb8fc344257e9a",
+  "patch_sha256": "828cea23fac8dba60f89c638d4c5610a4f97dbdb8a97ad5251f04845ac4a6b26",
+  "patch_bytes": 13478,
+  "excluded_custom_changes": [
+    "embedded generated web UI HTML",
+    "package-manager/development lifecycle metadata",
+    "README presentation changes"
+  ],
+  "requirements": {
+    "node": ">=20.12.0",
+    "official_cli": "@larksuite/cli@1.0.82"
+  },
+  "private_runtime_state_included": false
+}

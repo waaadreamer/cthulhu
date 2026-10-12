@@ -1,0 +1,284 @@
+--- a/dist/cli.js
++++ b/dist/cli.js
+@@ -668,6 +668,7 @@
+     allowedUsers: stringArray(access3?.allowedUsers),
+     allowedChats: stringArray(access3?.allowedChats),
+     admins: stringArray(access3?.admins),
++    blockedUsers: stringArray(access3?.blockedUsers),
+     requireMentionInGroup: access3?.requireMentionInGroup ?? legacyRequireMentionInGroup ?? true,
+     // Omit when empty so configs without per-chat overrides stay clean.
+     ...Object.keys(chatRequireMention).length > 0 ? { chatRequireMention } : {}
+@@ -7157,7 +7158,7 @@
+     ...teamMode ? [
+       {
+         tag: "markdown",
+-        content: "_\u26A0\uFE0F **\u56E2\u961F\u7248\u5DF2\u5F00\u542F**\uFF1A\u8BBF\u95EE\u63A7\u5236\u6682\u4E0D\u751F\u6548 \u2014\u2014 \u4EFB\u4F55\u4EBA @ bot \u90FD\u80FD\u4F7F\u7528\uFF08\u7BA1\u7406\u547D\u4EE4\u4ECD\u9650 owner/\u7BA1\u7406\u5458\uFF09\u3002\u5207\u56DE\u4E2A\u4EBA\u7248\u540E\u4EE5\u4E0B\u767D\u540D\u5355\u6062\u590D\u751F\u6548\u3002_"
++        content: "_\u26A0\uFE0F **\u56E2\u961F\u7248\u5DF2\u5F00\u542F**\uFF1A\u767D\u540D\u5355\u6682\u4E0D\u751F\u6548 \u2014\u2014 \u9664\u9ED1\u540D\u5355\u7528\u6237\u5916\uFF0C\u4EFB\u4F55\u4EBA @ bot \u90FD\u80FD\u4F7F\u7528\uFF08\u7BA1\u7406\u547D\u4EE4\u4ECD\u9650 owner/\u7BA1\u7406\u5458\uFF09\u3002\u5207\u56DE\u4E2A\u4EBA\u7248\u540E\u767D\u540D\u5355\u6062\u590D\u751F\u6548\u3002_"
+       },
+       { tag: "hr" }
+     ] : [],
+@@ -7168,6 +7169,16 @@
+     { tag: "hr" },
+     {
+       tag: "markdown",
++      content: `**\u7981\u6B62\u4F7F\u7528\u7684\u7528\u6237**\uFF08\u5171 ${opts.blockedUsers.length} \u4EBA\uFF09
++${atMentionLine(opts.blockedUsers)}
++
++_\u9ED1\u540D\u5355\u4F18\u5148\u4E8E\u56E2\u961F\u6A21\u5F0F\u3001\u7BA1\u7406\u5458\u548C\u6240\u6709\u767D\u540D\u5355\uFF0C\u5E76\u8986\u76D6\u79C1\u804A\u3001\u7FA4\u804A\u3001\u5361\u7247\u53CA\u4E91\u6587\u6863\u8BC4\u8BBA\uFF1B\u8FD0\u884C\u65F6 Owner \u4E0D\u53EF\u88AB\u9501\u5B9A\u3002_
++
++_\u52A0 / \u5220\uFF1A_ \`/block @\u67D0\u4EBA\`  \`/unblock @\u67D0\u4EBA\``
++    },
++    { tag: "hr" },
++    {
++      tag: "markdown",
+       content: `**\u5141\u8BB8\u79C1\u804A\u7684\u7528\u6237**\uFF08\u5171 ${opts.allowedUsers.length} \u4EBA\uFF09
+ ${atMentionLine(opts.allowedUsers)}
+
+@@ -7188,7 +7199,7 @@
+       content: `**\u7BA1\u7406\u5458**\uFF08\u5171 ${opts.admins.length} \u4EBA\uFF09
+ ${atMentionLine(opts.admins)}
+
+-_\u53EF\u4EE5\u8DD1\u654F\u611F\u547D\u4EE4\uFF1A\`/account\` \`/config\` \`/exit\` \`/reconnect\` \`/doctor\` \`/cd\` \`/ws\` \`/invite\` \`/remove\`\u3002\u7BA1\u7406\u5458\u4E5F\u81EA\u52A8\u83B7\u5F97\u79C1\u804A\u6743\u9650\uFF0C\u5E76\u53EF\u5728\u672A\u767D\u540D\u5355\u7FA4\u91CC\u7BA1\u7406\u8BBF\u95EE\u63A7\u5236\u3002_
++_\u53EF\u4EE5\u8DD1\u654F\u611F\u547D\u4EE4\uFF1A\`/account\` \`/config\` \`/exit\` \`/reconnect\` \`/doctor\` \`/cd\` \`/ws\` \`/invite\` \`/remove\` \`/block\` \`/unblock\`\u3002\u7BA1\u7406\u5458\u4E5F\u81EA\u52A8\u83B7\u5F97\u79C1\u804A\u6743\u9650\uFF0C\u5E76\u53EF\u5728\u672A\u767D\u540D\u5355\u7FA4\u91CC\u7BA1\u7406\u8BBF\u95EE\u63A7\u5236\uFF0C\u4F46\u4ECD\u53D7\u9ED1\u540D\u5355\u9650\u5236\u3002_
+
+ _\u52A0 / \u5220\uFF1A_ \`/invite admin @\u67D0\u4EBA\`  \`/remove admin @\u67D0\u4EBA\``
+     }
+@@ -7399,10 +7410,12 @@
+
+ **lark-cli \u8EAB\u4EFD\u7B56\u7565**:\`${opts.mode === "team" ? "\u53EA\u5141\u8BB8\u5E94\u7528\u8EAB\u4EFD(\u56E2\u961F\u7248\u5F3A\u5236)" : opts.larkCliIdentity === "user-default" ? "\u5141\u8BB8\u7528\u6237\u8EAB\u4EFD" : "\u53EA\u5141\u8BB8\u5E94\u7528\u8EAB\u4EFD"}\`
+
+-\u{1F512} **\u8BBF\u95EE\u63A7\u5236**` + (opts.mode === "team" ? "\uFF08_\u56E2\u961F\u7248\u4E0B\u4E0D\u751F\u6548,\u4EFB\u4F55\u4EBA\u53EF\u7528_\uFF09" : "") + `
++\u{1F512} **\u8BBF\u95EE\u63A7\u5236**` + (opts.mode === "team" ? "\uFF08_\u56E2\u961F\u7248\u4E0B\u4EC5\u9ED1\u540D\u5355\u751F\u6548_\uFF09" : "") + `
+ **\u5141\u8BB8\u79C1\u804A\u7684\u7528\u6237**:${summarize2(opts.allowedUsers)}
+ **\u5141\u8BB8\u54CD\u5E94\u7684\u7FA4**:${summarize2(opts.allowedChats)}
+ **\u7BA1\u7406\u5458**:${summarize2(opts.admins)}
++
++**\u7981\u6B62\u4F7F\u7528\u7684\u7528\u6237**:${summarize2(opts.blockedUsers)}
+
+ \u4E0B\u6761\u6D88\u606F\u5F00\u59CB\u751F\u6548\u3002`
+         }
+@@ -7743,6 +7756,7 @@
+ function accessPolicyDigest(access3) {
+   return digestCanonical({
+     admins: [...access3.admins].sort(),
++    blockedUsers: [...access3.blockedUsers].sort(),
+     allowedChats: [...access3.allowedChats].sort(),
+     allowedUsers: [...access3.allowedUsers].sort(),
+     requireMentionInGroup: access3.requireMentionInGroup
+@@ -7776,6 +7790,7 @@
+ }
+ function canUseDm(profile2, controls, senderId) {
+   if (isCreator(controls, senderId)) return allow("owner");
++  if (profile2.access.blockedUsers.includes(senderId)) return deny("denied-blocked-user");
+   if (profile2.mode === "team") return allow("allowed-team");
+   if (profile2.access.allowedUsers.includes(senderId)) return allow("allowed-user");
+   if (profile2.access.admins.includes(senderId)) return allow("allowed-admin");
+@@ -7783,6 +7798,7 @@
+ }
+ function canUseGroup(profile2, controls, chatId, senderId) {
+   if (isCreator(controls, senderId)) return allow("owner");
++  if (profile2.access.blockedUsers.includes(senderId)) return deny("denied-blocked-user");
+   if (profile2.mode === "team") return allow("allowed-team");
+   if (profile2.access.admins.includes(senderId)) return allow("allowed-admin");
+   if (profile2.access.allowedChats.includes(chatId)) return allow("allowed-chat");
+@@ -7794,8 +7810,14 @@
+ }
+ function canRunAdminCommand(profile2, controls, senderId) {
+   if (isCreator(controls, senderId)) return allow("owner");
++  if (profile2.access.blockedUsers.includes(senderId)) return deny("denied-blocked-user");
+   if (profile2.access.admins.includes(senderId)) return allow("allowed-admin");
+   return deny("denied-admin");
++}
++function canUseComment(profile2, controls, senderId) {
++  if (isCreator(controls, senderId)) return allow("owner");
++  if (profile2.access.blockedUsers.includes(senderId)) return deny("denied-blocked-user");
++  return allow("comment-mention");
+ }
+ function allow(reason) {
+   return { ok: true, reason };
+@@ -7845,6 +7867,7 @@
+             allowedUsers: access4.allowedUsers,
+             allowedChats: access4.allowedChats,
+             admins: access4.admins,
++            blockedUsers: access4.blockedUsers,
+             ...access4.chatRequireMention && Object.keys(access4.chatRequireMention).length > 0 ? { chatRequireMention: access4.chatRequireMention } : {}
+           },
+           requireMentionInGroup: access4.requireMentionInGroup
+@@ -7865,7 +7888,8 @@
+       log.info("config-ops", "access-mutated", {
+         allowedUsers: access3.allowedUsers.length,
+         allowedChats: access3.allowedChats.length,
+-        admins: access3.admins.length
++        admins: access3.admins.length,
++        blockedUsers: access3.blockedUsers.length
+       });
+       return access3;
+     });
+@@ -9805,6 +9829,8 @@
+   "/doc": handleDoc,
+   "/invite": handleInvite,
+   "/remove": handleRemove,
++  "/block": handleBlock,
++  "/unblock": handleUnblock,
+   "/meeting": handleMeeting
+ };
+ var ADMIN_COMMANDS = /* @__PURE__ */ new Set([
+@@ -9818,6 +9844,8 @@
+   "/ws",
+   "/invite",
+   "/remove",
++  "/block",
++  "/unblock",
+   // Joining a meeting makes the bot visible to every participant and exposes
+   // meeting content to the agent — owner/admin only.
+   "/meeting"
+@@ -11016,6 +11044,61 @@
+   if (notThere.length > 0) parts.push(`${notThere.join("\u3001")} \u672C\u6765\u5C31\u4E0D\u5728${label}\u91CC\uFF0C\u65E0\u9700\u79FB\u9664\u3002`);
+   await reply(ctx, parts.join("\n"));
+ }
++async function handleBlock(_args, ctx) {
++  const targets = mentionTargets(ctx);
++  if (targets.length === 0) {
++    await reply(ctx, "\u8BF7 @ \u4E0A\u8981\u52A0\u5165\u9ED1\u540D\u5355\u7684\u4EBA\uFF0C\u4F8B\u5982\uFF1A`/block @\u67D0\u4EBA`\u3002");
++    return;
++  }
++  await ctx.controls.refreshOwner(ctx.channel).catch(() => {
++  });
++  const ownerId = ctx.controls.botOwnerId;
++  const blockable = targets.filter((target) => target.openId !== ownerId);
++  const ownerTargets = targets.filter((target) => target.openId === ownerId);
++  const added = [];
++  const already = [];
++  await saveAccessConfig2(ctx, (current) => {
++    const list = new Set(current.blockedUsers);
++    for (const target of blockable) {
++      if (list.has(target.openId)) already.push(target.name ?? target.openId);
++      else {
++        list.add(target.openId);
++        added.push(target.name ?? target.openId);
++      }
++    }
++    return { ...current, blockedUsers: [...list] };
++  });
++  const parts = [];
++  if (added.length > 0) {
++    parts.push(`\u2705 \u5DF2\u628A ${added.join("\u3001")} \u52A0\u5165\u9ED1\u540D\u5355\uFF1B\u79C1\u804A\u3001\u7FA4\u804A\u3001\u5361\u7247\u3001\u4E91\u6587\u6863\u8BC4\u8BBA\u53CA\u7BA1\u7406\u547D\u4EE4\u5747\u4F1A\u88AB\u62E6\u622A\u3002`);
++  }
++  if (already.length > 0) parts.push(`${already.join("\u3001")} \u5DF2\u5728\u9ED1\u540D\u5355\u91CC\u3002`);
++  if (ownerTargets.length > 0) {
++    parts.push(`\u274C ${ownerTargets.map((target) => target.name ?? target.openId).join("\u3001")} \u662F\u8FD0\u884C\u65F6 Owner\uFF0C\u4E0D\u80FD\u88AB\u9501\u5B9A\u3002`);
++  }
++  await reply(ctx, parts.join("\n"));
++}
++async function handleUnblock(_args, ctx) {
++  const targets = mentionTargets(ctx);
++  if (targets.length === 0) {
++    await reply(ctx, "\u8BF7 @ \u4E0A\u8981\u79FB\u51FA\u9ED1\u540D\u5355\u7684\u4EBA\uFF0C\u4F8B\u5982\uFF1A`/unblock @\u67D0\u4EBA`\u3002");
++    return;
++  }
++  const removed = [];
++  const notThere = [];
++  await saveAccessConfig2(ctx, (current) => {
++    const list = new Set(current.blockedUsers);
++    for (const target of targets) {
++      if (list.delete(target.openId)) removed.push(target.name ?? target.openId);
++      else notThere.push(target.name ?? target.openId);
++    }
++    return { ...current, blockedUsers: [...list] };
++  });
++  const parts = [];
++  if (removed.length > 0) parts.push(`\u2705 \u5DF2\u628A ${removed.join("\u3001")} \u79FB\u51FA\u9ED1\u540D\u5355\u3002`);
++  if (notThere.length > 0) parts.push(`${notThere.join("\u3001")} \u672C\u6765\u5C31\u4E0D\u5728\u9ED1\u540D\u5355\u91CC\u3002`);
++  await reply(ctx, parts.join("\n"));
++}
+ function mentionTargets(ctx) {
+   return (ctx.msg.mentions ?? []).filter((mention) => !mention.isBot && typeof mention.openId === "string" && mention.openId).map((mention) => ({
+     openId: mention.openId,
+@@ -11068,6 +11151,7 @@
+     allowedUsers: access3.allowedUsers,
+     allowedChats: access3.allowedChats,
+     admins: access3.admins,
++    blockedUsers: access3.blockedUsers,
+     knownChats: ctx.controls.knownChats ?? [],
+     ...consoleUrl ? { consoleUrl } : {}
+   });
+@@ -11211,7 +11295,8 @@
+       larkCliIdentity,
+       allowedUsersCount: access3.allowedUsers.length,
+       allowedChatsCount: access3.allowedChats.length,
+-      adminsCount: access3.admins.length
++      adminsCount: access3.admins.length,
++      blockedUsersCount: access3.blockedUsers.length
+     });
+     await waitForSettle();
+     await showResultCardInPlace(
+@@ -11231,6 +11316,7 @@
+         allowedUsers: access3.allowedUsers,
+         allowedChats: access3.allowedChats,
+         admins: access3.admins,
++        blockedUsers: access3.blockedUsers,
+         knownChats: ctx.controls.knownChats ?? []
+       })
+     );
+@@ -12618,6 +12704,15 @@
+     log.info("comment", "skip", { reason: "not-mentioned" });
+     return;
+   }
++  const commentAccess = canUseComment(
++    controls.profileConfig,
++    controls,
++    evt.operator.openId
++  );
++  if (!commentAccess.ok) {
++    log.info("comment", "skip", { reason: commentAccess.reason });
++    return;
++  }
+   if (!SUPPORTED_FILE_TYPES.has(evt.fileType)) {
+     log.info("comment", "skip", { reason: "unsupported-fileType", fileType: evt.fileType });
+     return;
+@@ -12708,7 +12803,7 @@
+       prompt,
+       requestedCwd,
+       cwdRealpath,
+-      access: { ok: true, reason: "comment-mention" },
++      access: commentAccess,
+       capability,
+       profileConfig: controls.profileConfig,
+       now: Date.now(),
+@@ -15689,6 +15784,7 @@
+       allowedUsers: state.profileConfig.access.allowedUsers,
+       allowedChats: state.profileConfig.access.allowedChats,
+       admins: state.profileConfig.access.admins,
++      blockedUsers: state.profileConfig.access.blockedUsers,
+       chatRequireMention: state.profileConfig.access.chatRequireMention ?? {}
+     },
+     live
+@@ -15830,7 +15926,8 @@
+ var ACCESS_LIST = {
+   user: "allowedUsers",
+   admin: "admins",
+-  chat: "allowedChats"
++  chat: "allowedChats",
++  blocked: "blockedUsers"
+ };
+ async function mutateAccess(state, body) {
+   const fv = asRecord3(body);
+@@ -15854,8 +15951,8 @@
+   if (action !== "add" && action !== "remove") {
+     throw new ApiError(400, "action must be add|remove|set-mention");
+   }
+-  if (kind !== "user" && kind !== "admin" && kind !== "chat") {
+-    throw new ApiError(400, "kind must be user|admin|chat");
++  if (kind !== "user" && kind !== "admin" && kind !== "chat" && kind !== "blocked") {
++    throw new ApiError(400, "kind must be user|admin|chat|blocked");
+   }
+   if (!id) throw new ApiError(400, "id is required");
+   const listKey = ACCESS_LIST[kind];
+@@ -15878,6 +15975,7 @@
+     allowedUsers: access3.allowedUsers,
+     allowedChats: access3.allowedChats,
+     admins: access3.admins,
++    blockedUsers: access3.blockedUsers,
+     chatRequireMention: access3.chatRequireMention ?? {}
+   };
+ }

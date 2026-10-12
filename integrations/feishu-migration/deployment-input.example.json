@@ -1,0 +1,15 @@
+{
+  "purpose": "implementation input, not runnable bridge configuration",
+  "migration": "continuity of the existing bot and eligible scoped history",
+  "change_external_bot_display_name": false,
+  "rename_other_agents": false,
+  "consumer_enabled": false,
+  "refresh_owner_enabled": false,
+  "verified_owner_binding": null,
+  "authorized_routes": [],
+  "unverified_routes": "dormant",
+  "private_state_transfer": "separate trusted channel; never Git",
+  "model_execution": "existing harness runtime/provider",
+  "history": "explicitly authorized scopes only",
+  "cutover_requires_target_readiness": true
+}
