@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Check, Loader2, RotateCcw } from 'lucide-react'
 import { Agent, api, Directory, Role, ROLE_META, RuntimeCfg } from '../api'
 import { Avatar } from './Avatar'
@@ -100,7 +100,7 @@ function RuntimeEditor({ agent, keyName, override, models, providers, onSaved }:
         <Group title="记忆提炼（在主会话分叉上运行，共享缓存）" className="mt-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="模型">
-              <ModelInput value={cfg.memory_model ?? ''} options={models.claude} placeholder="同主模型" onChange={(v) => setCfg({ ...cfg, memory_model: v || undefined })} />
+              <Select value={cfg.memory_model ?? ''} options={withValue(['', ...models.claude], cfg.memory_model)} onChange={(v) => setCfg({ ...cfg, memory_model: v || undefined })} />
             </Field>
             <Field label="effort">
               <Select value={cfg.memory_effort ?? ''} options={EFFORTS} onChange={(v) => setCfg({ ...cfg, memory_effort: v || undefined })} />
@@ -159,8 +159,8 @@ function BackendFields({ cfg, models, providers, onChange }: { cfg: RuntimeCfg; 
       )}
       <Field label="模型">
         {source === 'galaxy_api'
-          ? <Select value={cfg.model} options={Array.from(new Set([...(provider?.models ?? []), cfg.model].filter(Boolean)))} onChange={(v) => selectAPIModel(provider, v)} />
-          : <ModelInput value={cfg.model} options={models[cfg.backend]} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />}
+          ? <Select value={cfg.model} options={withValue(provider?.models ?? [], cfg.model)} onChange={(v) => selectAPIModel(provider, v)} />
+          : <Select value={cfg.model} options={withValue(models[cfg.backend] ?? [], cfg.model)} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />}
       </Field>
       <Field label="effort">
         <Select value={cfg.effort ?? ''} options={EFFORTS} onChange={(v) => onChange({ ...cfg, effort: v || undefined })} />
@@ -190,15 +190,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 const INPUT = 'w-full rounded-lg border border-white/10 bg-black/30 px-3 py-1.5 text-sm text-white outline-none focus:border-violet-400/60'
 
-function ModelInput({ value, options, onChange, placeholder }: { value: string; options: string[]; onChange: (v: string) => void; placeholder?: string }) {
-  const id = useId()
-  return (
-    <>
-      <input list={id} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value.trim())} className={INPUT + ' font-mono'} />
-      <datalist id={id}>{options.map((o) => <option key={o} value={o} />)}</datalist>
-    </>
-  )
-}
+// Full option list plus the saved value, so an existing (possibly unlisted) choice is never silently changed.
+const withValue = (options: string[], value?: string) => Array.from(new Set([...options, ...(value ? [value] : [])]))
 
 function Select({ value, options, onChange }: { value: string; options: string[]; onChange: (v: string) => void }) {
   return (
