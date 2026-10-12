@@ -25,6 +25,8 @@ worker的`bin_dir`需要真实Node和官方lark-cli的可执行链接或实际�
 
 ## 身份、授权、历史与切换
 
+旧机器人停止后，可用同一安装中的 `pair.mjs` 进行一次性前台配对。它复用官方 `@larksuite/channel` 和 bridge `secrets get`，不启动模型、回复或正常入口；详见 [PAIRING.md](PAIRING.md)。先核实旧listener/refresh停机回执与原应用秘密，握手成功后才向当前控制台发布全新的60分钟短语，不能让主人向已停机接收端发送或复用过期短语。
+
 复用旧应用ID。官方bridge `secrets set --app-id <原app_id> --profile <profile>`支持不回显输入；在目标服务账号、中央专用root下执行，不能复制旧主机加密密文假装可用。官方CLI `config init --app-id ... --app-secret-stdin`也支持安全标准输入；不要把秘密放命令行、环境日志或普通聊天。所需AppSecret输入或受控转移须走明确的私有交接。
 
 官方内置`lark-cli skills read lark-shared`及业务skill是当前帮助来源，奈亚只增加短角色说明。首次OAuth用官方`auth login --domain docs --domain drive --domain im --no-wait --json`，具体域应对齐原授权范围/本次验证需要；输出中的授权URL原样展示并用官方`auth qrcode`生成二维码。device_code不公开，完成后由维护者调用官方poll。OAuth subject再核对可信主人绑定，不用OAuth结果自封主人。没有AppSecret/绑定时不执行授权或启动另一个监听。
