@@ -7,6 +7,7 @@ export interface Agent {
   galaxy_id: string
   parent_id: string | null
   desired: 'running' | 'stopped'
+  stopped_by?: string | null
   task: string
   online: boolean
   state: string

@@ -5,6 +5,7 @@ import { Stream } from '../useTemple'
 import { Avatar, stateOf } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 import { Markdown } from './Markdown'
+import { ForceStop } from './ForceStop'
 
 interface Props {
   agent: Agent
@@ -106,9 +107,10 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
             <RuntimeBadge runtime={agent.runtime} />
           </div>
           <p className="truncate text-xs text-slate-500">
-            {agent.state === 'working' && agent.current ? `正在处理：${agent.current}` : agent.role === 'azathoth' ? '你意志的化身' : '独立维护者 · 只听你和阿撒托斯的'}
+            {agent.desired === 'stopped' ? '已停止：拒收消息，恢复后才能对话' : agent.state === 'working' && agent.current ? `正在处理：${agent.current}` : agent.role === 'azathoth' ? '你意志的化身' : '独立维护者 · 只听你和阿撒托斯的'}
           </p>
         </div>
+        <ForceStop agent={agent} />
         {search === null ? (
           <button className="btn-icon" onClick={() => setSearch('')} aria-label="搜索"><Search className="h-4 w-4" /></button>
         ) : (

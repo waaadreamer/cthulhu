@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -159,6 +160,17 @@ class EndToEnd(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         import signal
+        # Freeze the supervisor loops, then SIGTERM so the galaxy stops its agents (each in its own session).
+        for p in cls.procs:
+            try:
+                os.killpg(p.pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                pass
+        subprocess.run(["pkill", "-TERM", "-f", f"cthulhu (temple|galaxy) --config {cls.dir}/"])
+        deadline = time.time() + 20
+        while time.time() < deadline and subprocess.run(["pgrep", "-f", f"{cls.dir}/"], capture_output=True).stdout:
+            time.sleep(0.5)
+        subprocess.run(["pkill", "-KILL", "-f", f"{cls.dir}/"])
         for p in cls.procs:
             try:
                 os.killpg(p.pid, signal.SIGKILL)
