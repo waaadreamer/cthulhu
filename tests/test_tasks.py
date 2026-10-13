@@ -159,6 +159,80 @@ class Discipline(unittest.IsolatedAsyncioTestCase):
 
     # contract
 
+    async def test_cancel_active_preserves_history_and_retires_only_its_inputs(self):
+        await self.probe('10')
+        await self.checkpoint('10')
+        unrelated = await self.call('shub', 'task_create', executor='old_a', title='other history',
+                                    text='unrelated', acceptance='other result')
+        before = self.task()
+        stale = self.d.get(self.tid)
+        await self.call('shub', 'task_cancel', task_id=self.tid, reason='owner cancellation')
+        task = self.task()
+        self.assertEqual(task['state'], 'failed')
+        self.assertEqual(task['deadline'], before['deadline'])
+        self.assertEqual(task['probe'], before['probe'])
+        self.assertEqual(task['data']['samples'], before['data']['samples'])
+        self.assertEqual(task['data']['events'][:len(before['data']['events'])], before['data']['events'])
+        self.assertEqual(self.t.store.agent('old_a')['desired'], 'running')
+        self.assertEqual(self.t.store.task(unrelated['task_id'])['state'], 'active')
+        self.assertTrue(any(m['task_id'] == unrelated['task_id'] for m in self.t.store.pending_for('old_a')))
+        self.assertFalse(any(m['task_id'] == self.tid for m in self.t.store.pending_for('old_a')))
+        calls, messages = len(self.galaxy.calls), len(self.t.store.messages(task_id=self.tid))
+        await self.d.checkpoint(stale)  # A sweep already holding an old snapshot cannot sample it again.
+        await self.d.sweep()
+        self.assertEqual(len(self.galaxy.calls), calls)
+        self.assertEqual(len(self.t.store.messages(task_id=self.tid)), messages)
+        repeated = await self.call('shub', 'task_cancel', task_id=self.tid, reason='repeat')
+        self.assertEqual(repeated['cancellation'], task['data']['cancellation'])
+        self.assertEqual(self.task()['data']['events'], task['data']['events'])
+        with self.assertRaises(Denied):
+            await self.t.route('shub', 'old_a', 'resume stale work', task_id=self.tid)
+        with self.assertRaises(ValueError):
+            await self.call('old_a', 'task_probe', task_id=self.tid, command='echo 99')
+
+    async def test_cancel_submitted_and_authority(self):
+        await self.call('old_a', 'task_submit', task_id=self.tid, evidence='partial out.json 86/100, stage2 absent')
+        before = self.task()
+        for caller in ('old_a', 'yog', 'ghroth'):
+            with self.assertRaises(Denied):
+                await self.call(caller, 'task_cancel', task_id=self.tid, reason='unauthorized')
+        await self.call('azathoth', 'task_cancel', task_id=self.tid, reason='owner cancellation')
+        self.assertEqual(self.task()['data']['submissions'], before['data']['submissions'])
+        self.assertEqual(self.task()['data']['cancellation']['previous_state'], 'submitted')
+        with self.assertRaises(ValueError):
+            await self.call('yog', 'task_verdict', task_id=self.tid, passed=False, reason='must not reactivate')
+        self.assertEqual(self.task()['state'], 'failed')
+        task = self.d.get(self.tid)
+        task.data['verdict_due'] = time.time() - 1
+        task.save(self.t.store)
+        notes = len(self.owner_notes())
+        await self.d.sweep()
+        self.assertEqual(len(self.owner_notes()), notes)
+
+    async def test_execution_guard_preserves_foreign_message_labels_without_read_authority(self):
+        self.t.store.upsert_agent('old_b', 'b', Role.OLD_ONE, 'g1', 'shub', {'task': 'other history'})
+        msg = await self.t.route('old_a', 'old_b', 'associated result', task_id=self.tid)
+        self.assertTrue((await self.call('old_b', 'task_input_guard', task_id=self.tid, message_ids=[msg['id']]))['allowed'])
+        with self.assertRaises(Denied):
+            await self.call('old_b', 'task_get', task_id=self.tid)
+        await self.call('shub', 'task_cancel', task_id=self.tid, reason='owner cancellation')
+        self.assertFalse((await self.call('old_b', 'task_input_guard', task_id=self.tid, message_ids=[msg['id']]))['allowed'])
+        note = next(m for m in self.inbox('shub') if m['kind'] == 'task_cancelled')
+        self.assertTrue((await self.call('shub', 'task_input_guard', task_id=self.tid, message_ids=[note['id']]))['allowed'])
+
+    async def test_owner_cancel_manager_does_not_stop_other_contract(self):
+        cancelled = await self.call('azathoth', 'task_create', executor='shub', title='cancelled business',
+                                    text='business', acceptance='business result')
+        retrospective = await self.call('azathoth', 'task_create', executor='shub', title='retrospective',
+                                        text='retrospective', acceptance='report')
+        with self.assertRaises(Denied):
+            await self.call('shub', 'task_cancel', task_id=cancelled['task_id'], reason='self cancellation')
+        result = await self.d.owner({'action': 'cancel', 'task_id': cancelled['task_id'], 'reason': 'owner cancellation'})
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(self.t.store.agent('shub')['desired'], 'running')
+        self.assertEqual(self.t.store.task(retrospective['task_id'])['state'], 'active')
+        self.assertTrue(any(m['task_id'] == retrospective['task_id'] for m in self.t.store.pending_for('shub')))
+
     async def test_contract_validation(self):
         t = self.task()
         self.assertEqual((t["creator"], t["manager"], t["executor"], t["state"]), ("shub", "shub", "old_a", "active"))

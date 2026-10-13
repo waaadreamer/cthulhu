@@ -223,6 +223,9 @@ class Temple:
 
     async def route(self, sender: str, receiver: str, text: str, *, kind="message",
                     priority=0, reply_to=None, message_id=None, task_id=None, status=None) -> dict:
+        task = self.store.task(task_id) if task_id else None
+        if task and task['data'].get('cancellation') and receiver == task['executor']:
+            raise Denied('cancelled task cannot receive new executor input')
         sender_role, receiver_role = self.role_of(sender), self.role_of(receiver)
         if receiver_role is None:
             raise Denied(f"unknown agent {receiver}")
@@ -271,6 +274,9 @@ class Temple:
         return task_id, None
 
     async def deliver(self, msg: dict) -> None:
+        current = self.store.message(msg['id'])
+        if not current or current['state'] == 'cancelled':
+            return
         recipient = self.store.agent(msg["receiver"])
         # The owner never waits for a deploy: their messages go through a drain (the deploy waits for them instead).
         if recipient and recipient["galaxy_id"] in self.maintenance and msg["sender"] != OWNER:

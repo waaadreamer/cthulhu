@@ -59,6 +59,8 @@ TASK = {
                           {"task_id": STR, "ok": BOOL, "reason": STR}, ["task_id", "ok", "reason"]),
     "unblock": tool("task_unblock", "解除任务的主人阻塞并恢复计时（程序抄送主人）。", {"task_id": STR, "note": STR}, ["task_id", "note"]),
     "replace": tool("task_replace", "命令换人；manager可填executor绑定已有worker，须先清算原执行者。", {"task_id": STR, "reason": STR, "executor": STR}, ["task_id", "reason"]),
+    "cancel": tool("task_cancel", "取消有权管理的任务，保留部分证据与历史；仅清理该任务的队列和回合，不停止其他任务或分离进程。",
+                   {"task_id": STR, "reason": STR}, ["task_id", "reason"]),
 }
 EXECUTOR_TOOLS = [TASK[k] for k in ("get", "probe", "extend", "block", "submit")]
 
@@ -274,7 +276,7 @@ class Azathoth(OwnerChat, MemoryAgent):
             self.send_tool({"task_id": {"type": "string", "description": "跟进已有任务时填它的任务 ID；新工作用 task_create"}}),
             *super().tools()[1:],
             *HISTORY_TOOLS,
-            *(TASK[k] for k in ("create", "get", "verdict", "extension", "unblock", "replace")),
+            *(TASK[k] for k in ("create", "get", "verdict", "extension", "unblock", "replace", "cancel")),
             tool("temple_agent", "读取某个 agent 的完整注册信息（含初始化参数）。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_owner_history", "检索你和主人的历史聊天。", {"search": STR, "limit": {"type": "integer"}}),
             tool("temple_deploy", "一键部署：把仓库 main 分支的最新版本部署到中心神殿和各星系。程序会先排空（等正在进行的回合结束）、"
@@ -406,7 +408,7 @@ class Manager:
             tool("temple_stop", "终止你自己的一个旧日支配者。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_restart", "重启你自己的一个旧日支配者（保留其上下文）。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_delete", "删除一个已终止的旧日支配者（历史保留）。", {"agent_id": STR}, ["agent_id"]),
-            *(TASK[k] for k in ("create", "extension", "replace")), *EXECUTOR_TOOLS,
+            *(TASK[k] for k in ("create", "extension", "replace", "cancel")), *EXECUTOR_TOOLS,
         ]
 
     async def send(self, to, text, priority=0, kind="message", **task):

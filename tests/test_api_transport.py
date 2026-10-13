@@ -30,6 +30,123 @@ def no_signals():
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_task_cancellation_real_shub_claude_keeps_unrelated_turn_and_retires_stale_input(self):
+        from unittest.mock import AsyncMock
+        from cthulhu.gods import Shub
+        from cthulhu.claude_runtime import ClaudeRuntime
+        from cthulhu.galaxy_api_runtime import GalaxyAPITransport
+        from cthulhu.protocol import agent_token, CallFailed
+        model = await self.enable_claude()
+        clients = {}
+        async def ignore(frame):
+            pass
+        for aid, role in [('az', 'azathoth'), ('shub', 'shub'), ('yog', 'yog')]:
+            self.temple.store.upsert_agent(aid, aid, role, 'central')
+            link = Link(self.caller.url, {'kind': 'agent', 'id': aid,
+                        'token': agent_token('test-secret', aid, 1),
+                        'capabilities': ['galaxy_api_v1', 'galaxy_api_claude_v1']}, ignore, ignore)
+            self.links.append(asyncio.create_task(link.run()))
+            await asyncio.wait_for(link.connected.wait(), 3)
+            clients[aid] = link
+        self.rt = ClaudeRuntime(self.tmp.name, model=model, api_transport=GalaxyAPITransport(
+            link=clients['shub'], provider='ali', state_dir=Path(self.tmp.name) / 'api', model=model, protocol='messages'))
+        with patch('cthulhu.agent.Link', return_value=clients['shub']), patch('cthulhu.backends.build', return_value=self.rt):
+            actor = Shub('unused', {'id': 'shub', 'name': 'shub', 'token': 'unused', 'spec': {}},
+                         'unused', self.tmp.name, Path(self.tmp.name),
+                         runtime={'backend': 'claude', 'provider': 'ali', 'model': model})
+        clients['shub'].on_frame = actor._on_frame
+        actor.after_turn = AsyncMock()  # Memory summarization is outside task-local cancellation.
+        original_tools, original_call = actor.tools, actor.call_tool
+        actor.tools = lambda: original_tools() + [tool('echo', 'bounded result', {'value': {'type': 'string'}}, ['value'])]
+        started, release = asyncio.Event(), asyncio.Event()
+        effects = []
+        async def call_tool(name, args):
+            if name != 'echo':
+                return await original_call(name, args)
+            started.set()
+            await release.wait()
+            effects.append(actor.current_task)
+            return 'bounded result completed once'
+        actor.call_tool = call_tool
+        async def make(title):
+            return (await clients['az'].call('task_create', executor='shub', title=title,
+                    text='Use echo once, then reply. ' + title, acceptance='bounded result', deadline='20'))['task_id']
+        queued = await make('cancel queued business')
+        live = await make('unrelated retrospective')
+        with self.assertRaises(CallFailed):
+            await clients['yog'].call('task_cancel', task_id=queued, reason='unauthorized')
+        first = await clients['az'].call('task_cancel', task_id=queued, reason='owner cancellation')
+        self.assertEqual(first['state'], 'failed')
+        self.assertFalse(first['cancellation']['runtime']['matching_main_turn'])
+        loop = asyncio.create_task(actor.loop())
+        try:
+            await asyncio.wait_for(started.wait(), 10)
+            self.assertEqual(actor.current_task, live)
+            active = actor.active
+            submitted = await make('cancel submitted partial')
+            await clients['shub'].call('task_submit', task_id=submitted, evidence='partial result 86/100; stage2 absent')
+            before = self.temple.store.task(submitted)
+            result = await clients['az'].call('task_cancel', task_id=submitted, reason='owner cancellation')
+            self.assertEqual(result['cancellation']['previous_state'], 'submitted')
+            self.assertFalse(result['cancellation']['runtime']['matching_main_turn'])
+            self.assertEqual(self.temple.store.task(submitted)['data']['submissions'], before['data']['submissions'])
+            self.assertEqual(actor.active, active)
+            self.assertFalse(actor.main_cancel.is_set())
+            self.assertFalse(actor.halted)
+            self.assertEqual(self.temple.store.task(live)['state'], 'active')
+            # Repeated cancel is stable; a terminal task cannot accept future input or be QA-reactivated.
+            repeat = await clients['az'].call('task_cancel', task_id=submitted, reason='repeated instruction')
+            self.assertEqual(repeat, result)
+            with self.assertRaises(CallFailed):
+                await clients['az'].call('send', to='shub', text='resume stale business', task_id=queued)
+            with self.assertRaises(CallFailed):
+                await clients['az'].call('task_verdict', task_id=submitted, passed=False, reason='must stay terminal')
+            release.set()
+            for _ in range(250):
+                if actor.current_task is None:
+                    break
+                await asyncio.sleep(.02)
+            self.assertIsNone(actor.current_task)
+            self.assertEqual(effects, [live])
+            # Simulate a stale frame already in flight across cancellation/reconnect: central guard suppresses it.
+            actor.enqueue({'id': 'stale-input', 'task_id': queued, 'sender': 'az', 'kind': 'message',
+                           'priority': 9, 'created_at': 1, 'text': 'Use echo once. stale cancelled input'})
+            await asyncio.sleep(.1)
+            self.assertEqual(effects, [live])
+            self.messages_hold = True  # A later native model request is held open; same context stays loaded.
+            previous_requests = len(self.requests)
+            running = await make('cancel matching running task')
+            for _ in range(250):
+                if actor.current_task == running and actor.active and len(self.requests) > previous_requests:
+                    break
+                await asyncio.sleep(.02)
+            self.assertEqual(actor.current_task, running)
+            self.assertGreater(len(self.requests), previous_requests)
+            result = await clients['az'].call('task_cancel', task_id=running, reason='owner cancellation')
+            receipt = result['cancellation']['runtime']
+            self.assertTrue(receipt['acknowledged'])
+            self.assertTrue(receipt['matching_main_turn'])
+            self.assertTrue(receipt['main_recovery_cancelled'])
+            self.assertTrue(receipt['interrupt_requested'])
+            self.assertFalse(receipt['agent_stopped'])
+            self.assertFalse(receipt['detached_workloads_stopped'])
+            self.messages_hold = False
+            for _ in range(250):
+                if actor.current_task is None:
+                    break
+                await asyncio.sleep(.02)
+            self.assertIsNone(actor.current_task)
+            self.assertFalse(actor.halted)
+            self.assertEqual(self.temple.store.agent('shub')['desired'], 'running')
+            self.assertEqual(self.temple.store.task(live)['state'], 'active')
+            self.assertFalse(any(m['task_id'] in (queued, submitted, running)
+                                 for m in self.temple.store.pending_for('shub')))
+            print('TASK_CANCEL_SERVER queued/submitted/running/idempotent/authority/shub_retrospective_preserved/native_interrupt/no_stale_restart', flush=True)
+        finally:
+            release.set()
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+
     async def test_native_claude_checkpoint_reaches_model_after_active_tool_without_interrupt(self):
         from cthulhu.claude_runtime import ClaudeRuntime
         from cthulhu.galaxy_api_runtime import GalaxyAPITransport

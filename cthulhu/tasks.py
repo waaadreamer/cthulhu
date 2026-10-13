@@ -15,7 +15,7 @@ import math
 import time
 from dataclasses import dataclass, fields
 
-from .roles import OWNER, Denied, Role
+from .roles import OWNER, Denied, Role, can_cancel_task
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +127,8 @@ class Discipline:
     # notifications: program-written, never waiting on a model
 
     async def tell(self, to: str | None, text: str, task: Task, *, kind="discipline", status=None) -> None:
+        if self.get(task.id).data.get('cancellation') and kind != 'task_cancelled':
+            return
         if not to or to == OWNER:
             return
         try:
@@ -135,6 +137,8 @@ class Discipline:
             log.warning("task %s: could not notify %s: %s", task.id, to, e)
 
     async def tell_owner(self, text: str, task: Task, kind="blocked") -> None:
+        if self.get(task.id).data.get('cancellation') and kind != 'cancelled':
+            return
         try:
             await self.t.note_owner(text, task_id=task.id, kind=kind, origin=task.title)
         except Exception:
@@ -238,6 +242,8 @@ class Discipline:
             raise ValueError(f"probe output must be a single number ({note}); e.g. `stat -c %s out.jsonl 2>/dev/null || echo 0`")
         async with self.lock:
             fresh = self.get(task_id)
+            if fresh.state not in OPEN or caller != fresh.executor:
+                raise ValueError(f'task changed during probe: {fresh.state}')
             if fresh.probe != task.probe:
                 fresh.log('probe_stage', '更换验收阶段探针，重新登记基线；历史保留', by=caller,
                           previous_probe=fresh.probe)
@@ -442,6 +448,62 @@ class Discipline:
 
     # azathoth's interventions (each copied to the owner)
 
+    async def cancel(self, caller: str, task_id: str, reason: str) -> dict:
+        """Terminal cancellation uses failed, with a distinct audit reason; never accepts partial work."""
+        async with self.lock:
+            task = self.get(task_id)
+            if not can_cancel_task(caller, self.role(caller), task.manager, self.role(task.executor)):
+                raise Denied('only the owner, azathoth or the rightful old_one manager may cancel')
+            if task.data.get('cancellation'):
+                return {'state': task.state, 'cancellation': task.data['cancellation']}
+            if task.state not in OPEN or not str(reason or '').strip():
+                raise ValueError('an open task and explicit cancellation reason are required')
+            task.data['cancellation'] = {'at': time.time(), 'by': caller, 'reason': reason,
+                                         'previous_state': task.state}
+            task.state = 'failed'
+            for ext in task.extensions:
+                if ext['state'] == 'pending':
+                    ext.update(state='denied', decision='task cancelled', decided_at=time.time())
+            task.log('cancel', f'任务取消：{reason}；保留截止、探针、提交和历史', by=caller)
+            task.save(self.store)
+            # Retain every message as evidence, but retire input for all participants (including queued QA).
+            ids = [m['id'] for m in self.store.q(
+                "SELECT id FROM messages WHERE task_id=? AND state IN ('queued','delivered')", (task.id,))]
+            for mid in ids:
+                self.store.mark(mid, 'cancelled')
+        runtime = {'acknowledged': False, 'reason': 'executor offline; durable input retired'}
+        conn = self.t.agents.get(task.executor)
+        if conn:
+            try:
+                receipt = await conn.rpc('task_cancel', timeout=15, task_id=task.id)
+                if not isinstance(receipt, dict) or receipt.get('task_id') != task.id or receipt.get('acknowledged') is not True:
+                    raise ValueError('executor does not support scoped task cancellation')
+                runtime = receipt
+            except Exception as e:
+                runtime = {'acknowledged': False, 'reason': f'scoped cleanup unconfirmed: {e}'}
+        # Retire locally delivered input on other connected participants without interrupting their turns.
+        for aid, participant in list(self.t.agents.items()):
+            if aid != task.executor:
+                try:
+                    await participant.send({'type': 'task_input_retired', 'task_id': task.id})
+                except Exception:
+                    log.warning('task %s: input retirement notification to %s failed', task.id, aid)
+        async with self.lock:
+            task = self.get(task.id)
+            task.data['cancellation'].update(retired_messages=len(ids), runtime=runtime,
+                                             detached_workloads='not stopped or verified by task cancellation')
+            task.log('cancel_cleanup', '仅清理本任务；独立进程停止未核实', by=caller, receipt=runtime)
+            task.save(self.store)
+        await self.tell_owner(f'【任务取消】「{task.title}」：{reason}。部分证据和历史保留；'
+                              '该角色其他任务保留，分离进程停止未核实。', task, kind='cancelled')
+        for to in dict.fromkeys((self.superior(task), task.creator, task.manager)):
+            if to != task.executor:
+                await self.tell(to, f'[task cancelled] {task.brief()}\nReason: {reason}. '
+                                f'Partial evidence retained; scoped runtime receipt: {runtime}. Detached workloads unverified.',
+                                task, kind='task_cancelled')
+        await self.changed(task)
+        return {'state': task.state, 'cancellation': task.data['cancellation']}
+
     async def prepare_handover(self, caller: str, task_id: str) -> dict:
         task = self.get(task_id)
         if task.manager != caller or self.role(task.executor) != Role.OLD_ONE or task.state not in ('active', 'blocked_on_owner'):
@@ -527,6 +589,8 @@ class Discipline:
                 await self.changed(task)
 
     async def sample(self, task: Task) -> tuple[float | None, str]:
+        if self.get(task.id).data.get('cancellation'):
+            return None, 'task cancelled'
         agent = self.store.agent(task.executor) if task.executor else None
         conn = agent and self.t.galaxies.get(agent["galaxy_id"])
         if not conn:
@@ -550,11 +614,16 @@ class Discipline:
         return None, f"exit {r.get('code')}, output {clip(out or r.get('stderr'), 120)!r} is not a number"
 
     async def checkpoint(self, task: Task) -> None:
+        task = self.get(task.id)
+        if task.state != 'active':
+            return
         agent = self.store.agent(task.executor) if task.executor else None
         waiting = 'execution_started_at' in task.data and not task.data['execution_started_at']
         if not waiting and agent and (agent["galaxy_id"] in self.t.maintenance or agent["galaxy_id"] not in self.t.galaxies):
             async with self.lock:       # a deploy drain or an offline galaxy is not the executor's stall
                 fresh = self.get(task.id)
+                if fresh.state != 'active':
+                    return
                 fresh.data["next_check"] = time.time() + self.interval
                 fresh.save(self.store)
             return
@@ -700,6 +769,18 @@ class Discipline:
             return self.view(task.id)
         if method == "task_create":
             return await self.create(caller, p)
+        if method == 'task_input_guard':
+            task = self.get(p['task_id'])
+            # Internal runtime gate, not task_get authority: foreign message labels grant no contract access.
+            linked = self.store.one('SELECT id FROM messages WHERE receiver=? AND task_id=?', (caller, task.id))
+            if caller != task.executor and not linked:
+                raise Denied('not a participant in this task input')
+            receipts = [self.store.message(mid) for mid in p.get('message_ids', [])]
+            terminal_receipt = bool(receipts) and all(m and m['receiver'] == caller and m['sender'] == SYSTEM
+                and m['task_id'] == task.id and m['kind'] == 'task_cancelled' and m['state'] != 'cancelled' for m in receipts)
+            return {'allowed': not task.data.get('cancellation') or terminal_receipt}
+        if method == 'task_cancel':
+            return await self.cancel(caller, p['task_id'], p.get('reason', ''))
         if method == 'task_started':
             return await self.started(caller, p['task_id'], p.get('turn_id', ''))
         if method == "task_probe":
@@ -734,6 +815,8 @@ class Discipline:
     async def owner(self, p: dict) -> dict:
         """The owner's buttons: extension decisions, verdicts, blocker resolution, pausing escalation."""
         action, task_id = p["action"], p["task_id"]
+        if action == 'cancel':
+            return await self.cancel(OWNER, task_id, p.get('reason', '主人取消任务'))
         if action == "extension":
             return await self.decide_extension(OWNER, task_id, bool(p["approve"]), p.get("reason", ""))
         if action == "verdict":

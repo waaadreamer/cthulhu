@@ -362,6 +362,13 @@ class Agent:
             RECOVERY.reset(token)
             self.recoveries.discard(cancel)
 
+    async def current_task_cancelled(self) -> bool:
+        if not self.current_task:
+            return False
+        guard = await self.link.call('task_input_guard', task_id=self.current_task,
+                                     message_ids=[m['id'] for m in self.batch or []])
+        return guard.get('allowed') is False
+
     async def run_main(self, text: str, on_event=None, **kw) -> TurnResult:
         if self.preempted:
             return TurnResult("interrupted", error=PREEMPTED)
@@ -371,6 +378,8 @@ class Agent:
             added = batch[original_size:] if batch is not None else []
             return text + ("\n\n" + self.render(added) if added else "")
         async def attempt(rt, note):
+            if await self.current_task_cancelled():
+                return TurnResult('interrupted', error='Task cancelled')
             thread = await self.ensure_thread()
             bridge = await self.handoff_context(thread) + await self.memory_delta(thread)
             # Accepted inputs remain in the batch for retries and backend handoff.
@@ -532,6 +541,25 @@ class Agent:
         asyncio.create_task(self.backends.close())
         return True
 
+    async def cancel_task(self, task_id: str) -> dict:
+        """Retire one contract's input/recovery; keep the agent and unrelated turns alive."""
+        queued = [m for m in self.queue if m.get('task_id') == task_id]
+        self.queue = [m for m in self.queue if m.get('task_id') != task_id]
+        matching = bool(self.in_batch and self.current_task == task_id and self.batch
+                        and all(m.get('task_id') == task_id for m in self.batch))
+        requested = False
+        if matching:
+            self.finished.update(m['id'] for m in self.batch)
+            if self.main_cancel is not None:
+                self.main_cancel.set()
+                if self.active:
+                    await self.active[0].interrupt(*self.active[1:])
+                    requested = True
+        return {'task_id': task_id, 'acknowledged': True, 'retired_queued': len(queued),
+                'matching_main_turn': matching, 'interrupt_requested': requested,
+                'main_recovery_cancelled': matching and self.main_cancel is not None,
+                'agent_stopped': False, 'detached_workloads_stopped': False}
+
     async def preempt(self) -> None:
         """An urgent message arrived: abort the running batch. Its unfinished messages are requeued
         behind the urgent one; background turns (memory) are left alone."""
@@ -618,7 +646,8 @@ class Agent:
             self.in_batch = True
             await self.report("working")
             try:
-                await self.receive(batch)
+                if not await self.current_task_cancelled():
+                    await self.receive(batch)
             except Exception as e:
                 log.exception("%s failed to handle a batch", self.name)
                 self.latest = {"error": str(e), "at": time.time()}
@@ -724,6 +753,8 @@ class Agent:
         elif t == 'task_reminders_refresh':
             ids = set(frame['ids'])
             self.queue = [m for m in self.queue if m['id'] not in ids or m.get('kind') != 'checkpoint']
+        elif t == 'task_input_retired':
+            self.queue = [m for m in self.queue if m.get('task_id') != frame['task_id']]
         elif t == "runtime":
             # Owner changed this role's backend; applied before the next turn.
             self.pending_runtime = frame["config"] or self.default_runtime
@@ -742,6 +773,8 @@ class Agent:
                 return await self.interrupt()
             if frame["method"] == "halt":
                 return await self.halt()
+            if frame['method'] == 'task_cancel':
+                return await self.cancel_task(frame['params']['task_id'])
             raise ValueError(f"unknown rpc {frame['method']}")
 
 

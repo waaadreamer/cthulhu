@@ -51,6 +51,11 @@ DEPLOY = {Role.AZATHOTH}                  # start deploys (the owner can too, fr
 DEPLOY_REQUEST = {Role.GHROTH}            # ask azathoth to deploy
 
 
+def can_cancel_task(caller: str, role: str | None, manager: str, executor_role: str | None) -> bool:
+    return (caller == OWNER or role == Role.AZATHOTH or
+            (role in MANAGERS and caller == manager and executor_role == Role.OLD_ONE))
+
+
 # Message priority: 0..URGENT, handled high to low. URGENT interrupts the receiver's running turn.
 URGENT = 10
 NO_URGENT = {Role.OLD_ONE}
