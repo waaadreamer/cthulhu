@@ -106,6 +106,9 @@ MODEL_CHOICES["galaxy_api"] = []
 # Effort used when a runtime names one of these models without an explicit effort.
 DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
 EFFORTS = {None, "low", "medium", "high", "xhigh", "max"}
+# Runtime recorded as the per-agent override of every newly spawned old_one (existing ones keep theirs).
+OLD_ONE_RUNTIME = {"backend": "claude", "provider": "ali", "model": "claude-opus-5-5", "effort": "xhigh",
+                   "fallback": {"backend": "codex", "model": "gpt-6.1-sol", "effort": "xhigh"}}
 
 
 def validate_runtime(cfg: dict, nested: bool = False) -> dict:
@@ -487,6 +490,10 @@ class Temple:
                 raise ValueError("unknown task")
             spec["task_id"] = p["task_id"]
         a = self.store.upsert_agent(new_id("old"), p["name"], Role.OLD_ONE, galaxy["id"], creator, spec)
+        # Recorded before the galaxy launches it, so its first welcome already carries this runtime.
+        overrides = self.store.setting("runtimes") or {}
+        overrides[a["id"]] = validate_runtime(OLD_ONE_RUNTIME)
+        self.store.set_setting("runtimes", overrides)
         await self.sync_galaxy(galaxy["id"])
         await self.broadcast({"type": "directory", **self.directory()})
         return {"id": a["id"], "name": a["name"], "galaxy_id": galaxy["id"]}
