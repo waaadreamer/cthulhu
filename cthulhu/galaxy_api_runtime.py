@@ -9,6 +9,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import secrets
 import socket
 from pathlib import Path
@@ -20,7 +21,11 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .api_provider import MAX_REQUEST, IDLE_TIMEOUT, request_body
+from .protocol import CallFailed
+from .roles import Denied
 from .runtime import CodexRuntime, RuntimeError_
+
+log = logging.getLogger(__name__)
 
 
 class GalaxyAPITransport:
@@ -81,9 +86,16 @@ class GalaxyAPITransport:
             body = request_body(json.loads(data), [self.model], self.protocol)
             opened = await self.link.call("api_open", provider=self.provider, body=body, protocol=self.protocol,
                                           beta=request.headers.get("anthropic-beta", "") if self.protocol == "messages" else "",
-                                          timeout=20)
-        except Exception:
-            return JSONResponse({"error": {"message": "Galaxy API route unavailable"}}, status_code=503)
+                                          timeout=45)
+        except Exception as e:
+            # Name the real local cause; only a missing route/link is a 503.
+            reason = str(e) or type(e).__name__
+            status = (429 if "capacity" in reason else
+                      400 if isinstance(e, (ValueError, Denied)) or any(k in reason for k in ("not offered", "unsupported", "invalid")) else 503)
+            log.warning("Galaxy API request rejected locally (%s): %s", status, reason)
+            return JSONResponse({"type": "error", "error": {"type": "rate_limit_error" if status == 429 else "api_error"
+                                 if status == 503 else "invalid_request_error", "message": "Galaxy API: " + reason}},
+                                status_code=status)
         sid = opened["id"]
         self.stream_ids.add(sid)
         self.api_result = {k: v for k, v in opened.items() if k != "id"} | {"request_id": sid, "request_dispatched": True}
