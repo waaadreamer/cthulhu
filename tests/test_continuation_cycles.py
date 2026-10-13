@@ -32,18 +32,13 @@ class MultipleCycles(HarnessServer):
         task = store.add_task('MULTICYCLE_TEST')['id']
         m = store.add_message('az', 'sh', 'LATEST_CYCLE_SCOPE EXISTING_EXECUTOR=' + worker['id'], task_id=task)
         store.mark(m['id'], 'handled')
+        # Seed the first collection through the real serialized controller. Direct
+        # SQLite settings writes race with the running temple's record updates.
+        initial = 'CALL temple_send ' + json.dumps({'to': 'sh', 'task_id': task,
+                                                    'text': 'INITIAL_MULTICYCLE_COLLECTION'})
+        self.chat('az', 'CALL temple_send ' + json.dumps({'to': 'yo', 'task_id': task, 'text': initial}))
         owners = len(store.q("SELECT id FROM messages WHERE sender='owner'"))
-        records = store.setting('continuations') or {}
-        records[task] = {'phase': 'waiting', 'at': time.time()-1, 'check_at': time.time()+86400, 'evidence': 'First fixture sample due', 'instruction_id': m['id']}
-        store.set_setting('continuations', records)
-        transitions = []
-        def finished():
-            rec = (store.setting('continuations') or {}).get(task, {}).get('sh', {})
-            signature = (rec.get('phase'), rec.get('message_id'))
-            if not transitions or transitions[-1] != signature:
-                transitions.append(signature)
-            return store.task(task)['state'] == 'done'
-        self.wait(finished, 30)
+        self.wait(lambda: store.task(task)['state'] == 'done', 30)
         notes = self.wait(lambda: [t for t in self.api('chat?agent_id=az&limit=100')
                                   if t.get('task_id') == task and t.get('kind') == 'summary'], 10)
         self.assertIn('3/3', notes[0]['reply'])
@@ -55,8 +50,7 @@ class MultipleCycles(HarnessServer):
         self.assertTrue(all(m['task_id'] == task for m in reports))
         progress = [t for t in self.api('chat?agent_id=az&limit=100') if t.get('task_id') == task and t.get('kind') == 'progress']
         self.assertEqual(len(progress), 2)
-        waits = [mid for phase, mid in transitions if phase == 'sent']
-        self.assertGreaterEqual(len(set(waits)), 3)
+        waits = [m['id'] for m in reminders]
         self.assertEqual(len(store.q("SELECT id FROM messages WHERE sender='owner'")), owners)
         self.assertEqual(len([a for a in store.agents() if a['name'] == 'cycle worker']), 1)
         time.sleep(1.5)

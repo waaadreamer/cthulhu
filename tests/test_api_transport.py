@@ -240,6 +240,32 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests[0]["service_tier"], "priority")
 
 
+    @unittest.skipUnless(CODEX.exists(), "bundled Codex is unavailable")
+    async def test_real_codex_accepts_steered_input_into_running_turn(self):
+        self.codex_mode = True
+        self.rt = GalaxyAPIRuntime(str(CODEX), self.tmp.name, link=self.caller, provider="ali",
+                                   state_dir=Path(self.tmp.name), model="gpt-6-astra")
+        started, release = asyncio.Event(), asyncio.Event()
+        turn = {}
+        async def handler(name, args):
+            started.set()
+            await release.wait()
+            return "echoed"
+        await self.rt.start()
+        thread = await self.rt.start_thread("Use echo when asked.", [tool("echo", "Echo a value",
+                                            {"value": {"type": "string"}}, ["value"])], handler)
+        run = asyncio.create_task(self.rt.run_turn(thread, "Call echo once, then answer.", timeout=30,
+                                                   on_start=lambda t: turn.setdefault("id", t)))
+        await asyncio.wait_for(started.wait(), 20)
+        self.assertTrue(await self.rt.steer(thread, turn["id"], "STEERED_NOTE from a new message"))
+        self.assertFalse(await self.rt.steer(thread, "not-the-active-turn", "ignored"))
+        release.set()
+        result = await run
+        self.assertEqual(result.status, "completed", str(result.error))
+        later = json.dumps(self.requests[1:])
+        self.assertIn("STEERED_NOTE from a new message", later)
+        self.assertNotIn("ignored", later)
+
     async def test_upstream_error_is_sanitized(self):
         self.upstream_status = 401
         opened = await self.caller.call("api_open", provider="ali", body={"model": "gpt-6-astra", "input": "hello"})

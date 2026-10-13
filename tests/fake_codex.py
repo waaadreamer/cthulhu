@@ -17,6 +17,7 @@ ids = itertools.count(1)
 threads = {}
 pending = {}
 interruptible = {}
+steerable = {}
 cycle_count = 0
 
 
@@ -52,7 +53,8 @@ def continuation_fixture(body, instructions):
     global cycle_count
     if 'MULTICYCLE_TEST' in body and '定时巡检' in body:
         return None  # Deliberately never call waiting: program must rearm after collection.
-    if 'Automatic waiting-state inspection' in body and 'MULTICYCLE_TEST' in body:
+    if ('Automatic waiting-state inspection' in body or 'INITIAL_MULTICYCLE_COLLECTION' in body) \
+            and 'MULTICYCLE_TEST' in body and '【续办前最新状态，以此为准；已完成、仍在执行或真正待决策时不要重试】\n' in body:
         row = json.loads(body.split('【续办前最新状态，以此为准；已完成、仍在执行或真正待决策时不要重试】\n')[-1])
         worker = re.search(r'EXISTING_EXECUTOR=(old_\w+)', row['instruction']['text']).group(1)
         return 'temple_send', {'to': worker, 'task_id': row['task']['id'], 'text': 'CYCLIC_COLLECTION: read existing result; never restart.'}
@@ -186,6 +188,8 @@ for line in sys.stdin:
             finish(p['threadId'], turn, json.dumps({'tools': [t['name'] for t in start.get('dynamicTools') or []],
                                                     'instructions': start.get('developerInstructions', ''),
                                                     'input': text}, ensure_ascii=False))
+        elif 'WAIT_STEER_FIXTURE' in body and '定时巡检' not in body:
+            steerable[turn] = p['threadId']   # finishes when input is steered into it
         elif body.strip() == 'WAIT_INTERRUPT_FIXTURE':
             interruptible[turn] = p['threadId']
         elif "SLEEP " in body and "定时巡检" not in body:   # yog's patrol prompt quotes it; only the target sleeps
@@ -195,6 +199,13 @@ for line in sys.stdin:
             finish(p["threadId"], turn, body.split("REPLY ", 1)[1].strip())
         else:
             finish(p["threadId"], turn, "echo[codex]: " + text)
+    elif m == 'turn/steer':
+        thread = steerable.pop(p['expectedTurnId'], None)
+        if thread != p['threadId']:
+            out({'id': rid, 'error': {'code': -32600, 'message': 'expectedTurnId is not the active turn'}})
+        else:
+            out({'id': rid, 'result': {'turnId': p['expectedTurnId']}})
+            finish(thread, p['expectedTurnId'], 'steered: ' + p['input'][0]['text'])
     elif m == 'turn/interrupt':
         thread = interruptible.pop(p['turnId'], None)
         out({'id':rid,'result':{}})

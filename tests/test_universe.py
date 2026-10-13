@@ -125,6 +125,20 @@ class Universe(HarnessServer):
         self.wait(lambda: [m for m in self.api("messages?agent_id=gh") if m["sender"] == "az" and m["state"] == "handled"])
         self.wait(lambda: self.api("memory?agent_id=gh"))
 
+    def test_message_arriving_mid_turn_is_steered_into_it(self):
+        self.chat("az", 'CALL temple_send {"to": "sh", "text": "WAIT_STEER_FIXTURE first"}')
+        first = self.wait(lambda: next((m for m in self.api("messages?agent_id=sh")
+                                       if m['text'] == 'WAIT_STEER_FIXTURE first'), None))
+        self.wait(lambda: next(a for a in self.api("directory")["agents"] if a["id"] == "sh")["state"] == "working")
+        self.chat("az", 'CALL temple_send ' + json.dumps({'to': 'sh', 'task_id': first['task_id'],
+                                                        'priority': 5, 'text': 'STEER_SECOND'}))
+        msgs = self.wait(lambda: [m for m in self.api("messages?agent_id=sh") if m["sender"] == "az" and m["receiver"] == "sh"
+                                  and m["state"] == "handled" and ("WAIT_STEER_FIXTURE" in m["text"] or "STEER_SECOND" in m["text"])])
+        latest = self.wait(lambda: (r := self.api("latest?agent_id=sh")).get("last_reply", "").startswith("steered:") and r)
+        self.assertIn("STEER_SECOND", latest["last_reply"])      # the running turn received it
+        self.wait(lambda: len([m for m in self.api("messages?agent_id=sh") if m["sender"] == "az" and m["state"] == "handled"
+                               and ("WAIT_STEER_FIXTURE" in m["text"] or "STEER_SECOND" in m["text"])]) == 2)
+
     @staticmethod
     def via_shub(report: dict) -> str:
         """An owner prompt that makes azathoth send shub a task, and shub answer with `report` (tagged with that task)."""
