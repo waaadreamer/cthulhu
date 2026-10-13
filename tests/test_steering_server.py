@@ -12,12 +12,11 @@ class SteeringServer(HarnessServer):
         return next(a for a in self.api('directory')['agents'] if a['id'] == 'sh')['runtime']
 
     def send(self, text, task_id=None):
-        args = {'to': 'sh', 'text': text, 'priority': 5}
         if task_id:
-            args['task_id'] = task_id
+            self.chat('az', 'CALL temple_send ' + json.dumps({'to': 'sh', 'text': text, 'priority': 5, 'task_id': task_id}))
         else:
-            args['title'] = 'STEERING_ACCEPTANCE'
-        self.chat('az', 'CALL temple_send ' + json.dumps(args))
+            self.chat('az', 'CALL task_create ' + json.dumps({'executor': 'sh', 'title': 'STEERING_ACCEPTANCE',
+                                                              'text': text, 'acceptance': 'fixture'}))
         return self.wait(lambda: next((m for m in self.api('messages?agent_id=sh')
                                       if m['text'] == text), None))
 
