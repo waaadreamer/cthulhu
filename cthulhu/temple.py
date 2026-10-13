@@ -287,9 +287,7 @@ class Temple:
         conn = self.agents.get(msg["receiver"])
         if conn is None:
             return
-        sender = self.store.agent(msg["sender"])
-        envelope = msg | {"sender_name": sender["name"] if sender else ("中心神殿" if msg["sender"] == SYSTEM else "主人"),
-                          "sender_role": sender["role"] if sender else (SYSTEM if msg["sender"] == SYSTEM else OWNER)}
+        envelope = msg | self.sender_meta(msg["sender"])
         if msg.get("task_id"):
             task = self.store.task(msg["task_id"])
             envelope["task_title"] = task and task["title"]
@@ -716,13 +714,18 @@ class Temple:
         return [m for m in pending if m["sender"] == OWNER] if a["galaxy_id"] in self.maintenance else pending
 
     def _envelopes(self, msgs: list[dict]) -> list[dict]:
-        out = []
-        for m in msgs:
-            s = self.store.agent(m["sender"])
-            system = m["sender"] == SYSTEM
-            out.append(m | {"sender_name": s["name"] if s else ("中心神殿" if system else "主人"),
-                            "sender_role": s["role"] if s else (SYSTEM if system else OWNER)})
-        return out
+        return [m | self.sender_meta(m["sender"]) for m in msgs]
+
+    def sender_meta(self, sender_id: str) -> dict:
+        a = self.store.agent(sender_id)
+        if a:
+            return {"sender_name": a["name"], "sender_role": a["role"]}
+        if sender_id == SYSTEM:
+            return {"sender_name": "中心神殿", "sender_role": SYSTEM}
+        if sender_id == OWNER:
+            return {"sender_name": "主人", "sender_role": OWNER}
+        # Verified external Feishu delegates (feishu:<open_id>) never read as the owner.
+        return {"sender_name": "飞书外部", "sender_role": "external"}
 
     async def _on_frame(self, conn: Conn, frame: dict) -> None:
         t = frame.get("type")

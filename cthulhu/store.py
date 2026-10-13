@@ -370,7 +370,8 @@ class Store:
         rows = self.q("SELECT * FROM turn_log WHERE agent_id=? AND scope=? AND id>? ORDER BY id DESC LIMIT ?", (agent_id, scope, after, limit))
         return rows[::-1]
 
-    def channel_accept(self, agent_id: str, app_id: str, event_id: str, scope: str, payload: dict) -> tuple[dict, bool]:
+    def channel_accept(self, agent_id: str, app_id: str, event_id: str, scope: str, payload: dict,
+                       sender: str = 'owner', origin: str = '飞书') -> tuple[dict, bool]:
         """One transaction: external event -> existing message/chat, never a second queue."""
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
@@ -384,9 +385,9 @@ class Store:
                     return row, False
                 mid, now = new_id('msg'), time.time()
                 self.db.execute("INSERT INTO messages (id,sender,receiver,kind,text,created_at) VALUES (?,?,?,?,?,?)",
-                                (mid, 'owner', agent_id, 'channel', payload['prompt'], now))
+                                (mid, sender, agent_id, 'channel', payload['prompt'], now))
                 self.db.execute("INSERT INTO chat_turns (id,agent_id,user_text,origin,created_at,updated_at) VALUES (?,?,?,?,?,?)",
-                                (mid, agent_id, payload['text'], '飞书', now, now))
+                                (mid, agent_id, payload['text'], origin, now, now))
                 self.db.execute("INSERT INTO channel_events (agent_id,app_id,event_id,scope,message_id,payload) VALUES (?,?,?,?,?,?)",
                                 (agent_id, app_id, event_id, scope, mid, json.dumps(payload, ensure_ascii=False)))
                 row = self.db.execute("SELECT * FROM channel_events WHERE message_id=?", (mid,)).fetchone()
