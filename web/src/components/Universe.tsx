@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from 'react'
 import { Activity, Brain, Check, Cpu, Globe2, Loader2, Pencil, Radio, ShieldCheck, Trash2, X } from 'lucide-react'
-import { Agent, AdmissionContact, ago, api, Directory, Memory, Message, Patrol, ROLE_META, timeLabel, tokens } from '../api'
+import { Agent, ago, api, Directory, Memory, Message, Patrol, ROLE_META, timeLabel, tokens } from '../api'
 import { Avatar, stateOf } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 import { MessageRow } from './Messages'
@@ -249,61 +249,82 @@ function MemoryRow({ agentId, item, tone, onChange }: { agentId: string; item: M
   )
 }
 
+function admissionRecord(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : null
+}
+
+function admissionText(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? '（无）'
+}
+
+function AdmissionValue({ value }: { value: unknown }) {
+  return <pre className="max-h-[30vh] overflow-auto whitespace-pre-wrap break-words text-xs font-sans">{admissionText(value)}</pre>
+}
+
 function Admission({ data, online }: { data?: Agent['admission']; online: boolean }) {
   if (!data) return <p className="text-sm text-slate-500">{online ? '尚未收到准入配置。' : '奈亚离线，无法读取准入配置。'}</p>
-  const contacts = Object.entries(data.config?.contacts ?? {})
+  const config = admissionRecord(data.config)
+  const contactMap = admissionRecord(config?.contacts)
+  const contacts = Object.entries(contactMap ?? {})
+  const { contacts: _contacts, default: _default, version: _version, ...extra } = config ?? {}
   return (
     <div className="space-y-3 text-sm text-slate-300">
       <p className="text-xs text-slate-500">
-        由奈亚自行维护，每次状态更新时从 <span className="break-all font-mono">{data.path}</span> 读取
-        {data.config && <> · 默认 {data.config.default === 'deny' ? '拒绝' : data.config.default ?? '未设置'} · 版本 {data.config.version ?? '?'}</>}
+        由奈亚自行维护，每次状态更新时从 <span className="break-all font-mono">{admissionText(data.path)}</span> 读取
+        {config && <> · 默认 {config.default === 'deny' ? '拒绝' : admissionText(config.default ?? '未设置')} · 版本 {admissionText(config.version ?? '?')}</>}
       </p>
-      {data.error ? <p className="text-rose-300">{data.error}</p>
-        : contacts.length ? contacts.map(([name, c]) => <AdmissionEntry key={name} name={name} c={c} />)
-        : <p className="text-slate-500">没有登记任何联系人（全部拒绝）。</p>}
+      {data.error ? <p className="text-rose-300">{admissionText(data.error)}</p>
+        : !config ? <><p className="text-slate-500">准入配置为空或格式无法识别。</p><AdmissionValue value={data.config} /></>
+        : config.contacts != null && !contactMap ? <><p className="text-slate-500">联系人格式无法识别，原始内容：</p><AdmissionValue value={config.contacts} /></>
+        : contacts.length ? contacts.map(([name, value]) => <AdmissionEntry key={name} name={name} value={value} />)
+        : <p className="text-slate-500">没有登记任何联系人。</p>}
+      {Object.keys(extra).length > 0 && <AdmissionValue value={extra} />}
     </div>
   )
 }
 
-function AdmissionEntry({ name, c }: { name: string; c: AdmissionContact }) {
-  const { identity, allow, deny, scope, ...rest } = c
-  const resources = scope?.resources ?? []
-  const list = (items: string[] | undefined, tone: string) => items?.length
-    ? <ul className="list-disc space-y-1 pl-5">{items.map((x, i) => <li key={i} className={`whitespace-pre-wrap break-words ${tone}`}>{x}</li>)}</ul>
-    : <p className="text-slate-500">（无）</p>
+function AdmissionEntry({ name, value }: { name: string; value: unknown }) {
+  const contact = admissionRecord(value)
+  const { identity, allow, deny, scope, ...rest } = contact ?? {}
+  const scopeRecord = admissionRecord(scope)
+  const { resources, ...scopeFields } = scopeRecord ?? {}
+  const resourceItems = Array.isArray(resources) ? resources : resources == null ? [] : [resources]
+  const list = (items: unknown, tone: string) => items == null || (Array.isArray(items) && !items.length)
+    ? <p className="text-slate-500">（无）</p>
+    : <ul className="list-disc space-y-1 pl-5">{(Array.isArray(items) ? items : [items]).map((x, i) => <li key={i} className={tone}><AdmissionValue value={x} /></li>)}</ul>
   return (
     <details open className="rounded-xl border border-white/[0.06] bg-white/[0.03]">
       <summary className="flex cursor-pointer items-center gap-2 p-3 font-medium text-white">
         <ShieldCheck className="h-4 w-4 text-emerald-300" />{name}
       </summary>
       <div className="space-y-3 px-3 pb-3">
-        <div className="space-y-0.5 text-xs text-slate-400">
-          {Object.entries(identity ?? {}).map(([k, v]) => <p key={k}><span className="text-slate-500">{k}</span> <span className="break-all font-mono">{v}</span></p>)}
-        </div>
+        {!contact ? <><p className="text-xs text-slate-500">联系人内容为空或格式无法识别：</p><AdmissionValue value={value} /></> : <>
+        <div className="text-xs text-slate-400"><AdmissionValue value={identity} /></div>
         <div><p className="mb-1 text-xs text-slate-500">允许</p>{list(allow, 'text-emerald-200/90')}</div>
         <div><p className="mb-1 text-xs text-slate-500">禁止</p>{list(deny, 'text-rose-200/90')}</div>
-        {scope && (
+        {scope != null && (
           <details className="rounded-lg bg-black/20">
-            <summary className="cursor-pointer p-2 text-xs text-slate-400">范围：{scope.name ?? '未命名'} · {resources.length} 项资源</summary>
+            <summary className="cursor-pointer p-2 text-xs text-slate-400">范围：{admissionText(scopeRecord?.name ?? '未命名')} · {resourceItems.length} 项资源</summary>
+            <div className="px-2 pb-2 text-slate-400"><AdmissionValue value={scopeRecord ? scopeFields : scope} /></div>
             <ul className="max-h-[40vh] space-y-2 overflow-y-auto px-2 pb-2 text-xs">
-              {resources.map((r, i) => (
-                <li key={i} className="rounded bg-white/[0.03] p-2">
-                  <p>{[r.date, r.role, r.type].filter(Boolean).join(' · ')}</p>
-                  {r.url ? <a className="break-all font-mono text-sky-300 hover:underline" href={r.url} target="_blank" rel="noreferrer">{r.url}</a>
-                    : <p className="break-all font-mono">{r.token}</p>}
-                  {r.evidence && <p className="mt-0.5 text-slate-500">{r.evidence}</p>}
+              {resourceItems.map((resource, i) => {
+                const url = admissionRecord(resource)?.url
+                return <li key={i} className="rounded bg-white/[0.03] p-2">
+                  <AdmissionValue value={resource} />
+                  {typeof url === 'string' && /^https?:\/\//i.test(url) && <a className="break-all font-mono text-sky-300 hover:underline" href={url} target="_blank" rel="noreferrer">{url}</a>}
                 </li>
-              ))}
+              })}
             </ul>
-            {scope.maintenance && <p className="whitespace-pre-wrap px-2 pb-2 text-xs text-slate-400">维护规则：{scope.maintenance}</p>}
           </details>
         )}
         {Object.keys(rest).length > 0 && (
           <details className="rounded-lg bg-black/20">
             <summary className="cursor-pointer p-2 text-xs text-slate-400">其他字段</summary>
-            <pre className="max-h-[30vh] overflow-auto whitespace-pre-wrap break-words px-2 pb-2 text-[11px] text-slate-400">{JSON.stringify(rest, null, 2)}</pre>
+            <div className="px-2 pb-2 text-slate-400"><AdmissionValue value={rest} /></div>
           </details>
         )}
+        </>}
       </div>
     </details>
   )

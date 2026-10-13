@@ -141,15 +141,9 @@ export function modelLabel(model?: string | null) {
 }
 
 // Nyarl's own admission config (admission.json); Nyarl maintains it, the overview only shows it.
-export interface AdmissionContact {
-  identity?: Record<string, string>
-  allow?: string[]
-  deny?: string[]
-  scope?: { name?: string; resources?: Record<string, string>[]; maintenance?: string }
-  [key: string]: unknown
-}
 export interface AdmissionConfig {
-  version?: number
-  default?: string
-  contacts?: Record<string, AdmissionContact>
+  version?: unknown
+  default?: unknown
+  contacts?: unknown
+  [key: string]: unknown
 }
