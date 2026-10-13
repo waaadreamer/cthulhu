@@ -31,7 +31,8 @@ class FakeClient:
         pass
 
     async def interrupt(self):
-        pass
+        if getattr(self, "sleeping", None):
+            self.sleeping.set()
 
     async def query(self, text):
         self.pending = text
@@ -61,8 +62,16 @@ class FakeClient:
                 out = await tool.handler(json.loads(args.splitlines()[0]))
                 reply = "tool: " + out["content"][0]["text"]
         elif "SLEEP " in text and "定时巡检" not in text:
-            await asyncio.sleep(float(text.split("SLEEP ", 1)[1].split()[0]))
-            reply = "slept"
+            self.sleeping = asyncio.Event()
+            try:
+                await asyncio.wait_for(self.sleeping.wait(), float(text.split("SLEEP ", 1)[1].split()[0]))
+                yield ResultMessage(subtype="error_during_execution", duration_ms=1, duration_api_ms=1, is_error=True,
+                                    num_turns=1, session_id=self.sid, terminal_reason="aborted_streaming", uuid="x")
+                return
+            except asyncio.TimeoutError:
+                reply = "slept"
+            finally:
+                self.sleeping = None
         elif "REPLY " in text.split("</handoff>")[-1].split("</recovery>")[-1]:
             reply = text.split("REPLY ", 1)[1].strip()
         else:

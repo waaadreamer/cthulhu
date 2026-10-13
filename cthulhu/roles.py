@@ -53,6 +53,11 @@ DEPLOY_REQUEST = {Role.GHROTH}            # ask azathoth to deploy
 SUPERVISED = {Role.OLD_ONE, Role.GHROTH, Role.NYARLATHOTEP}
 
 
+# Message priority: 0..URGENT, handled high to low. URGENT interrupts the receiver's running turn.
+URGENT = 10
+NO_URGENT = {Role.OLD_ONE}
+
+
 def can_send(sender: str, receiver: str) -> bool:
     return receiver in SEND.get(sender, set())
 
@@ -64,3 +69,10 @@ class Denied(Exception):
 def require_send(sender: str, receiver: str) -> None:
     if not can_send(sender, receiver):
         raise Denied(f"{sender} may not message {receiver}")
+
+
+def require_priority(sender: str | None, priority: int) -> None:
+    if not 0 <= priority <= URGENT:
+        raise Denied(f"priority must be between 0 and {URGENT}")
+    if priority == URGENT and sender in NO_URGENT:
+        raise Denied(f"{sender} may not send priority {URGENT}")

@@ -44,7 +44,7 @@ def clip(text: str | None, n: int) -> str:
 log = logging.getLogger(__name__)
 
 SESSION_TTL = 30 * 86400
-OWNER_PRIORITY = 10
+OWNER_PRIORITY = 9
 TASK_STATUSES = ("progress", "blocked", "done")
 SYSTEM = "temple"   # sender id of the temple's own notices
 FILE_PREVIEW_BYTES = 2 * 1024 * 1024
@@ -235,6 +235,8 @@ class Temple:
             pass                                 # ghroth's only channel: asking azathoth to approve a deploy
         else:
             roles.require_send(sender_role, receiver_role)
+        priority = int(priority)
+        roles.require_priority(sender_role, priority)
         if Role.NYARLATHOTEP in (sender_role, receiver_role):
             other = receiver if sender_role == Role.NYARLATHOTEP else sender
             other_role = self.role_of(other)
@@ -316,7 +318,7 @@ class Temple:
                 return await self.continuations.send(conn.id, p)
             task_id, status = self.task_fields(role, self.role_of(p["to"]), p)
             msg = await self.route(conn.id, p["to"], p["text"], kind=p.get("kind", "message"),
-                                   priority=int(p.get("priority", 0)), reply_to=p.get("reply_to"),
+                                   priority=int(p.get("priority") or 0), reply_to=p.get("reply_to"),
                                    task_id=task_id, status=status)
             if status == "done":
                 self.store.set_task(task_id, "done")
@@ -673,13 +675,13 @@ class Temple:
         except Exception:
             log.exception("could not report deploy result")
 
-    async def owner_send(self, to: str, text: str) -> dict:
+    async def owner_send(self, to: str, text: str, priority: int = OWNER_PRIORITY) -> dict:
         target = self.store.agent(to)
         if target and target["desired"] != "running":
             raise Denied(f"{target['name']} is stopped; resume it first")
         mid = new_id("msg")
         self.store.add_turn(mid, to, text)
-        msg = await self.route(OWNER, to, text, kind="chat", priority=OWNER_PRIORITY, message_id=mid)
+        msg = await self.route(OWNER, to, text, kind="chat", priority=priority, message_id=mid)
         await self.broadcast({"type": "chat", "turn": self.store.turn(mid)})
         return msg
 
@@ -964,7 +966,8 @@ class Temple:
             if path == "send":
                 if self.role_of(body["to"]) not in roles.SEND[OWNER]:
                     raise Denied("this role does not accept owner chat")
-                return JSONResponse(await self.owner_send(body["to"], body["text"]))
+                return JSONResponse(await self.owner_send(body["to"], body["text"],
+                                                          roles.URGENT if body.get("urgent") else OWNER_PRIORITY))
             if path == "stop":
                 return JSONResponse({"ok": await self.owner_stop(body["agent_id"])})
             if path in ("force_stop", "resume"):
