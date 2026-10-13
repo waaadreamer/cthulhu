@@ -256,6 +256,16 @@ class CodexRuntime:
         except Exception:
             pass
 
+    async def steer(self, thread_id: str, turn_id: str, text: str) -> bool:
+        """Add input to the running turn; False if that turn is no longer the active one."""
+        try:
+            await self.request("turn/steer", {"threadId": thread_id, "expectedTurnId": turn_id,
+                                              "input": [{"type": "text", "text": text, "text_elements": []}]}, timeout=10)
+            return True
+        except Exception as e:
+            log.info("steer into %s/%s not accepted: %s", thread_id, turn_id, e)
+            return False
+
     async def run_turn(self, thread_id: str, text: str, *, on_event: EventHandler | None = None,
                        output_schema: dict | None = None, timeout: float = 6 * 3600,
                        on_start: Callable[[str], None] | None = None, images: list[str] | None = None) -> TurnResult:

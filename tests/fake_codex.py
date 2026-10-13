@@ -20,6 +20,7 @@ pending = {}
 interruptible = {}
 sleeping = {}   # turn -> timer; SLEEP turns run in the background so turn/interrupt can stop them
 lock = threading.Lock()
+steerable = {}
 
 
 def out(msg):
@@ -120,6 +121,8 @@ for line in sys.stdin:
             finish(p['threadId'], turn, json.dumps({'tools': [t['name'] for t in start.get('dynamicTools') or []],
                                                     'instructions': start.get('developerInstructions', ''),
                                                     'input': text}, ensure_ascii=False))
+        elif 'WAIT_STEER_FIXTURE' in body and '定时巡检' not in body:
+            steerable[turn] = p['threadId']   # finishes when input is steered into it
         elif body.strip() == 'WAIT_INTERRUPT_FIXTURE':
             interruptible[turn] = p['threadId']
         elif "SLEEP " in body:
@@ -134,6 +137,13 @@ for line in sys.stdin:
             finish(p["threadId"], turn, body.split("REPLY ", 1)[1].strip())
         else:
             finish(p["threadId"], turn, "echo[codex]: " + text)
+    elif m == 'turn/steer':
+        thread = steerable.pop(p['expectedTurnId'], None)
+        if thread != p['threadId']:
+            out({'id': rid, 'error': {'code': -32600, 'message': 'expectedTurnId is not the active turn'}})
+        else:
+            out({'id': rid, 'result': {'turnId': p['expectedTurnId']}})
+            finish(thread, p['expectedTurnId'], 'steered: ' + p['input'][0]['text'])
     elif m == 'turn/interrupt':
         thread = interruptible.pop(p['turnId'], None)
         timer = sleeping.pop(p['turnId'], None)

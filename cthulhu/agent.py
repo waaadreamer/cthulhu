@@ -50,8 +50,13 @@ def load_role(name: str) -> str:
     return (ROLES_DIR / f"{name}.md").read_text(encoding="utf-8")
 
 
-def clip(text: str, n: int) -> str:
-    return text if len(text) <= n else text[:n] + f"…（截断，共 {len(text)} 字）"
+def clip(text: str, n: int, *, keep_end: bool = False) -> str:
+    if len(text) <= n:
+        return text
+    notice = f"…（截断，共 {len(text)} 字）"
+    if keep_end:
+        return text[:n // 2] + notice + text[-(n - n // 2):]
+    return text[:n] + notice
 
 
 class Agent:
@@ -95,10 +100,11 @@ class Agent:
         self.draining = False
         self.halted = False          # force-stopped by the temple; the galaxy kills this process next
         self.in_batch = False        # handling a batch right now (state alone can read "working" with work only queued)
-        self.batch: list[dict] = []
+        self.batch: list[dict] | None = None   # the running main turn's batch; steered messages join it
         self.finished: set[str] = set()   # ids of batch messages fully handled (the rest is requeued on preemption)
         self.preempted = False
         self.main_cancel: asyncio.Event | None = None   # recovery cancel of the running main turn
+        self.steering_lock = asyncio.Lock()   # settle accepted input before completing/logging its turn
         self.inflight_runs = 0
         self.state = "starting"
         self.current: str | None = None
@@ -216,8 +222,8 @@ class Agent:
     # hooks for subclasses
 
     def take_batch(self, ready: list[dict] | None = None) -> list[dict]:
-        # Highest priority first; everything already queued (or `ready`) joins the same turn,
-        # except that urgent messages get a turn of their own.
+        # Highest priority first; everything already queued (or `ready`) joins the same turn, except that
+        # urgent messages get a turn of their own. Later same-task messages are steered in (see steer).
         batch = sorted(self.queue if ready is None else ready, key=lambda m: (-m["priority"], m["created_at"]))
         if batch and batch[0]["priority"] >= URGENT:
             batch = [m for m in batch if m["priority"] >= URGENT]
@@ -298,7 +304,7 @@ class Agent:
         if not missed:
             return ""
         lines = [f"[{time.strftime('%m-%d %H:%M', time.localtime(r['created_at']))} · {r['backend']}:{r['model'] or ''}]\n"
-                 f"收到：{clip(r['input'], 1500)}\n状态：{r['status']}\n你答：{clip(r['reply'], 1500)}" for r in missed]
+                 f"收到：{clip(r['input'], 1500, keep_end=True)}\n状态：{r['status']}\n你答：{clip(r['reply'], 1500)}" for r in missed]
         return ("<handoff>\n以下是其他会话的近期交流及状态，仅作为背景供你接续。"
                 "已完成的操作不要重复执行；失败或中断的工作先检查已有结果再续办：\n\n"
                 + "\n\n".join(lines) + "\n</handoff>\n\n")
@@ -359,15 +365,21 @@ class Agent:
     async def run_main(self, text: str, on_event=None, **kw) -> TurnResult:
         if self.preempted:
             return TurnResult("interrupted", error=PREEMPTED)
+        batch = self.batch
+        original_size = len(batch) if batch is not None else 0
+        def full_input():
+            added = batch[original_size:] if batch is not None else []
+            return text + ("\n\n" + self.render(added) if added else "")
         async def attempt(rt, note):
             thread = await self.ensure_thread()
             bridge = await self.handoff_context(thread) + await self.memory_delta(thread)
-            result = await self.run(thread, bridge + note + text, on_event=on_event, runtime=rt, **kw)
+            # Accepted inputs remain in the batch for retries and backend handoff.
+            result = await self.run(thread, bridge + note + full_input(), on_event=on_event, runtime=rt, **kw)
             self.last_turn = (rt, thread)
             try:
                 await self.link.call("log_turn", backend=self.backends.active_cfg.get("backend", "codex"),
                                      model=self.backends.active_cfg.get("model"), thread=thread,
-                                     input=text, reply=result.text or result.error or "", status=result.status)
+                                     input=full_input(), reply=result.text or result.error or "", status=result.status)
             except Exception:
                 log.exception("could not log turn")
             return result
@@ -432,6 +444,9 @@ class Agent:
         def started(turn_id: str) -> None:
             if track:
                 self.active = (rt, thread, turn_id)
+                # Inputs may have arrived before turn/start or during recovery settlement.
+                for m in sorted(self.queue, key=lambda m: (-m['priority'], m['created_at'])):
+                    asyncio.create_task(self.steer(m))
             if recovery is not None and recovery['cancel'].is_set():
                 asyncio.create_task(rt.interrupt(thread, turn_id))
             if on_start:
@@ -442,9 +457,11 @@ class Agent:
             if recovery is not None:
                 recovery["terminal"] = True
         finally:
-            self.inflight_runs -= 1
             if track:
-                self.active = None
+                async with self.steering_lock:
+                    if self.active and self.active[:2] == (rt, thread):
+                        self.active = None
+            self.inflight_runs -= 1
         if track:
             self.latest = {"last_reply": clip(result.text, 3000), "last_status": result.status,
                            "last_task": self.current_task,
@@ -500,7 +517,7 @@ class Agent:
     async def preempt(self) -> None:
         """An urgent message arrived: abort the running batch. Its unfinished messages are requeued
         behind the urgent one; background turns (memory) are left alone."""
-        if not self.in_batch or self.preempted or any(m["priority"] >= URGENT for m in self.batch):
+        if not self.in_batch or self.preempted or any(m["priority"] >= URGENT for m in self.batch or []):
             return
         log.info("%s preempting the current batch for an urgent message", self.name)
         self.preempted = True
@@ -589,6 +606,7 @@ class Agent:
                 self.latest = {"error": str(e), "at": time.time()}
             finally:
                 self.in_batch = False
+                self.batch = None
             if self.preempted:
                 # Unfinished work goes back in the queue; it runs after the urgent message, flagged as resumed.
                 requeued = [m | {"preempted": True} for m in batch if m["id"] not in self.finished]
@@ -637,6 +655,30 @@ class Agent:
         self.wake.set()
         if m.get("priority", 0) >= URGENT and (not self.draining or m.get("sender") == OWNER):
             asyncio.create_task(self.preempt())
+        elif self.batch is not None and m.get("kind", "message") == "message" and not self.draining:
+            asyncio.create_task(self.steer(m))
+
+    async def steer(self, m: dict) -> bool:
+        """Deliver a message into the running main turn instead of after it, so a long turn
+        still sees new instructions. Owner chats keep their own turns; failure leaves it queued."""
+        async with self.steering_lock:
+            batch, active = self.batch, self.active
+            # Exact task ownership; never inject into owner chats, scoped or background runs.
+            if (not batch or not active or self.draining or m not in self.queue
+                    or getattr(self, 'reporting', None) is not None
+                    or m.get('kind', 'message') != 'message' or m['sender'] == OWNER
+                    or m.get('task_id') != self.current_task
+                    or any(b.get('kind', 'message') != 'message' or b['sender'] == OWNER
+                           or b.get('task_id') != self.current_task for b in batch)
+                    or active[1] not in self.threads.values() or not hasattr(active[0], 'steer')):
+                return False
+            rt, thread, turn = active
+            if not await rt.steer(thread, turn, self.render([m])):
+                return False
+            self.queue.remove(m)
+            batch.append(m)          # marked handled with the batch it joined
+            log.info("%s steered %s into the running turn", self.name, m["id"])
+            return True
 
     def drain_status(self):
         memory_busy = hasattr(self, "memory_lock") and self.memory_lock.locked()
