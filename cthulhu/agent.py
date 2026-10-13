@@ -547,17 +547,18 @@ class Agent:
         self.queue = [m for m in self.queue if m.get('task_id') != task_id]
         matching = bool(self.in_batch and self.current_task == task_id and self.batch
                         and all(m.get('task_id') == task_id for m in self.batch))
-        requested = False
+        requested, recovery_cancelled = False, False
         if matching:
             self.finished.update(m['id'] for m in self.batch)
             if self.main_cancel is not None:
                 self.main_cancel.set()
+                recovery_cancelled = True
                 if self.active:
                     await self.active[0].interrupt(*self.active[1:])
                     requested = True
         return {'task_id': task_id, 'acknowledged': True, 'retired_queued': len(queued),
                 'matching_main_turn': matching, 'interrupt_requested': requested,
-                'main_recovery_cancelled': matching and self.main_cancel is not None,
+                'main_recovery_cancelled': recovery_cancelled,
                 'agent_stopped': False, 'detached_workloads_stopped': False}
 
     async def preempt(self) -> None:

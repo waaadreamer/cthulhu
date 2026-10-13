@@ -209,6 +209,30 @@ class Discipline(unittest.IsolatedAsyncioTestCase):
         await self.d.sweep()
         self.assertEqual(len(self.owner_notes()), notes)
 
+    async def test_cancel_during_inflight_delivery_cannot_restore_pending_input(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        async def send(frame):
+            started.set()
+            await release.wait()
+            return True
+        self.t.agents['old_a'] = SimpleNamespace(send=send, rpc=AsyncMock(return_value={
+            'task_id': self.tid, 'acknowledged': True, 'matching_main_turn': False}))
+        msg = self.t.store.add_message('shub', 'old_a', 'still in socket send', task_id=self.tid)
+        sending = asyncio.create_task(Temple.deliver(self.t, msg))
+        try:
+            await started.wait()
+            await self.call('shub', 'task_cancel', task_id=self.tid, reason='owner cancellation')
+            self.assertEqual(self.t.store.message(msg['id'])['state'], 'cancelled')
+            release.set()
+            await sending
+            self.assertEqual(self.t.store.message(msg['id'])['state'], 'cancelled')
+            self.assertNotIn(msg['id'], [m['id'] for m in self.t.store.pending_for('old_a')])
+            await Temple.deliver(self.t, msg)
+            self.assertEqual(self.t.store.message(msg['id'])['state'], 'cancelled')
+        finally:
+            release.set()
+            await asyncio.gather(sending, return_exceptions=True)
+
     async def test_execution_guard_preserves_foreign_message_labels_without_read_authority(self):
         self.t.store.upsert_agent('old_b', 'b', Role.OLD_ONE, 'g1', 'shub', {'task': 'other history'})
         msg = await self.t.route('old_a', 'old_b', 'associated result', task_id=self.tid)

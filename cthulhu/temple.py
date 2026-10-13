@@ -289,7 +289,8 @@ class Temple:
             task = self.store.task(msg["task_id"])
             envelope["task_title"] = task and task["title"]
         if await conn.send({"type": "message", "message": envelope}):
-            if msg["state"] == "queued":
+            # Cancellation may retire this input while the socket send is in flight.
+            if self.store.message(msg['id'])['state'] == 'queued':
                 self.store.mark(msg["id"], "delivered")
 
     # agent calls: (conn, params) -> result
