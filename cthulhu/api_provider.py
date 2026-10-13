@@ -24,9 +24,9 @@ MAX_REQUEST = 4 * 1024 * 1024
 MAX_CHUNK = 64 * 1024
 MAX_EVENT = 4 * 1024 * 1024
 MAX_STREAM = 32 * 1024 * 1024
-MAX_STREAMS = 32
-MAX_PROVIDER = 8
-MAX_CALLER = 4
+MAX_STREAMS = 256
+MAX_PROVIDER = 64
+MAX_CALLER = 8
 SLOT_WAIT = 15
 STREAM_TTL = 600
 IDLE_TIMEOUT = 90
@@ -172,14 +172,17 @@ class ProviderBroker:
         beta = p.get("beta", "")
         if not isinstance(beta, str) or not BETA.fullmatch(beta):
             raise ValueError("invalid Anthropic beta header")
-        limit = self.policy(gid).get("max_streams", MAX_PROVIDER)
+        policy, limits = self.policy(gid), self.temple.config.get("api_limits", {})
+        limit = policy.get("max_streams", limits.get("per_provider", MAX_PROVIDER))
+        per_caller = policy.get("max_per_caller", limits.get("per_caller", MAX_CALLER))
+        total = limits.get("total", MAX_STREAMS)
         # Briefly queue for a slot: concurrent agents and forks routinely overlap.
         for attempt in range(SLOT_WAIT * 10 + 1):
             provider = self.providers.get(gid, {}).get("conn")
             if provider is None:
                 raise Denied("eligible API provider is not online")
-            if (len(self.streams) < MAX_STREAMS and
-                    sum(s.caller is conn for s in self.streams.values()) < MAX_CALLER and
+            if (len(self.streams) < total and
+                    sum(s.caller is conn for s in self.streams.values()) < per_caller and
                     sum(s.provider is provider for s in self.streams.values()) < limit):
                 break
             if attempt == SLOT_WAIT * 10:

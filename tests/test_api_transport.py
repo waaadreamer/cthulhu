@@ -282,13 +282,13 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                     async with client.stream("POST", url, json=body, headers=headers) as r:
                         return r.status_code, await r.aread()
                 # Former per-caller cap (2) and per-provider cap (4) produced bare 503s here.
-                tasks = [asyncio.create_task(one()) for _ in range(api_provider.MAX_CALLER + 2)]
+                tasks = [asyncio.create_task(one()) for _ in range(6)]
                 await asyncio.sleep(.5)
                 self.terminal_gate.set()
                 results = await asyncio.gather(*tasks)
                 self.assertTrue(all(code == 200 and b"response.completed" in data for code, data in results), results)
                 # Exhaustion that outlasts the wait is a named, retryable 429, never a bare route 503.
-                with patch.object(api_provider, "SLOT_WAIT", 0), patch.object(api_provider, "MAX_CALLER", 0):
+                with patch.object(api_provider, "SLOT_WAIT", 0), patch.dict(self.temple.config, {"api_limits": {"per_caller": 0}}):
                     r = await client.post(url, json=body, headers=headers)
                 self.assertEqual(r.status_code, 429)
                 self.assertIn("API capacity exhausted", r.text)
