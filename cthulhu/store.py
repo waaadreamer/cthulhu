@@ -300,10 +300,11 @@ class Store:
 
     def memory_stats(self) -> dict[str, dict]:
         stats = {}
-        for r in self.q("SELECT agent_id, text FROM memory"):
-            st = stats.setdefault(r["agent_id"], {"entries": 0, "tokens": 0})
+        for r in self.q("SELECT agent_id, text, updated_at FROM memory"):
+            st = stats.setdefault(r["agent_id"], {"entries": 0, "tokens": 0, "updated_at": 0})
             st["entries"] += 1
             st["tokens"] += estimate_tokens(r["text"])
+            st["updated_at"] = max(st["updated_at"], r["updated_at"])
         return stats
 
     def forget(self, agent_id: str, memory_id: int) -> bool:

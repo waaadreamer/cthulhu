@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from 'react'
-import { Activity, Brain, Check, Cpu, Globe2, Loader2, Pencil, Radio, Trash2, X } from 'lucide-react'
-import { Agent, ago, api, Directory, Memory, Message, Patrol, ROLE_META, timeLabel, tokens } from '../api'
+import { Activity, Brain, Check, Cpu, Globe2, Loader2, Pencil, Radio, ShieldCheck, Trash2, X } from 'lucide-react'
+import { Agent, AdmissionContact, ago, api, Directory, Memory, Message, Patrol, ROLE_META, timeLabel, tokens } from '../api'
 import { Avatar, stateOf } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 import { MessageRow } from './Messages'
@@ -128,19 +128,24 @@ function AgentCard({ agent, galaxies, onClick, wide }: { agent: Agent; galaxies:
 }
 
 function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; onClose: () => void }) {
-  const [tab, setTab] = useState<'latest' | 'memory' | 'messages'>('latest')
+  const [tab, setTab] = useState<'latest' | 'memory' | 'admission' | 'messages'>('latest')
   const [latest, setLatest] = useState<Record<string, unknown> | null>(null)
   const [memory, setMemory] = useState<Memory[] | null>(null)
   const [msgs, setMsgs] = useState<Message[] | null>(null)
   const m = ROLE_META[agent.role]
-  const hasMemory = ['azathoth', 'shub', 'yog', 'ghroth'].includes(agent.role)
+  const hasMemory = ['azathoth', 'shub', 'yog', 'ghroth', 'nyarlathotep'].includes(agent.role)
+  const hasAdmission = agent.role === 'nyarlathotep'
 
   useEffect(() => {
     setLatest(null); setMemory(null); setMsgs(null)
     api<Record<string, unknown>>(`latest?agent_id=${agent.id}`).then(setLatest).catch((e) => setLatest({ error: e.message }))
-    if (hasMemory) api<Memory[]>(`memory?agent_id=${agent.id}`).then(setMemory)
     api<Message[]>(`messages?agent_id=${agent.id}&limit=60`).then(setMsgs)
-  }, [agent.id, hasMemory])
+  }, [agent.id])
+
+  // Refetch whenever the directory reports a memory change for this agent.
+  useEffect(() => {
+    if (hasMemory) api<Memory[]>(`memory?agent_id=${agent.id}`).then(setMemory).catch(() => setMemory([]))
+  }, [agent.id, hasMemory, agent.memory?.entries, agent.memory?.updated_at])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -168,10 +173,10 @@ function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; on
           <div className="max-h-[25vh] overflow-y-auto whitespace-pre-wrap break-words px-3 pb-3">{agent.task}</div>
         </details>}
         <nav className="flex shrink-0 gap-1 border-b border-white/[0.06] px-5">
-          {(['latest', ...(hasMemory ? ['memory'] : []), 'messages'] as const).map((t) => (
+          {(['latest', ...(hasMemory ? ['memory'] : []), ...(hasAdmission ? ['admission'] : []), 'messages'] as const).map((t) => (
             <button key={t} onClick={() => setTab(t as typeof tab)}
               className={`relative px-3 py-2.5 text-sm transition ${tab === t ? 'text-white' : 'text-slate-500 hover:text-slate-300'}`}>
-              {{ latest: '最新状态', memory: '永久上下文', messages: '消息' }[t]}
+              {{ latest: '最新状态', memory: '永久上下文', admission: '准入配置', messages: '消息' }[t]}
               {tab === t && <span className={`absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-gradient-to-r ${m.grad}`} />}
             </button>
           ))}
@@ -188,6 +193,7 @@ function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; on
               </>
             ) : <p className="text-sm text-slate-500">永久上下文为空。</p>
           ) : <Spinner />)}
+          {tab === 'admission' && <Admission data={agent.admission} online={agent.online} />}
           {tab === 'messages' && (msgs ? (
             msgs.length ? <div className="space-y-2">{msgs.slice().reverse().map((x) => <MessageRow key={x.id} m={x} dir={dir} compact />)}</div>
               : <p className="text-sm text-slate-500">没有消息。</p>
@@ -240,6 +246,66 @@ function MemoryRow({ agentId, item, tone, onChange }: { agentId: string; item: M
         </div>
       </div>
     </li>
+  )
+}
+
+function Admission({ data, online }: { data?: Agent['admission']; online: boolean }) {
+  if (!data) return <p className="text-sm text-slate-500">{online ? '尚未收到准入配置。' : '奈亚离线，无法读取准入配置。'}</p>
+  const contacts = Object.entries(data.config?.contacts ?? {})
+  return (
+    <div className="space-y-3 text-sm text-slate-300">
+      <p className="text-xs text-slate-500">
+        由奈亚自行维护，每次状态更新时从 <span className="break-all font-mono">{data.path}</span> 读取
+        {data.config && <> · 默认 {data.config.default === 'deny' ? '拒绝' : data.config.default ?? '未设置'} · 版本 {data.config.version ?? '?'}</>}
+      </p>
+      {data.error ? <p className="text-rose-300">{data.error}</p>
+        : contacts.length ? contacts.map(([name, c]) => <AdmissionEntry key={name} name={name} c={c} />)
+        : <p className="text-slate-500">没有登记任何联系人（全部拒绝）。</p>}
+    </div>
+  )
+}
+
+function AdmissionEntry({ name, c }: { name: string; c: AdmissionContact }) {
+  const { identity, allow, deny, scope, ...rest } = c
+  const resources = scope?.resources ?? []
+  const list = (items: string[] | undefined, tone: string) => items?.length
+    ? <ul className="list-disc space-y-1 pl-5">{items.map((x, i) => <li key={i} className={`whitespace-pre-wrap break-words ${tone}`}>{x}</li>)}</ul>
+    : <p className="text-slate-500">（无）</p>
+  return (
+    <details open className="rounded-xl border border-white/[0.06] bg-white/[0.03]">
+      <summary className="flex cursor-pointer items-center gap-2 p-3 font-medium text-white">
+        <ShieldCheck className="h-4 w-4 text-emerald-300" />{name}
+      </summary>
+      <div className="space-y-3 px-3 pb-3">
+        <div className="space-y-0.5 text-xs text-slate-400">
+          {Object.entries(identity ?? {}).map(([k, v]) => <p key={k}><span className="text-slate-500">{k}</span> <span className="break-all font-mono">{v}</span></p>)}
+        </div>
+        <div><p className="mb-1 text-xs text-slate-500">允许</p>{list(allow, 'text-emerald-200/90')}</div>
+        <div><p className="mb-1 text-xs text-slate-500">禁止</p>{list(deny, 'text-rose-200/90')}</div>
+        {scope && (
+          <details className="rounded-lg bg-black/20">
+            <summary className="cursor-pointer p-2 text-xs text-slate-400">范围：{scope.name ?? '未命名'} · {resources.length} 项资源</summary>
+            <ul className="max-h-[40vh] space-y-2 overflow-y-auto px-2 pb-2 text-xs">
+              {resources.map((r, i) => (
+                <li key={i} className="rounded bg-white/[0.03] p-2">
+                  <p>{[r.date, r.role, r.type].filter(Boolean).join(' · ')}</p>
+                  {r.url ? <a className="break-all font-mono text-sky-300 hover:underline" href={r.url} target="_blank" rel="noreferrer">{r.url}</a>
+                    : <p className="break-all font-mono">{r.token}</p>}
+                  {r.evidence && <p className="mt-0.5 text-slate-500">{r.evidence}</p>}
+                </li>
+              ))}
+            </ul>
+            {scope.maintenance && <p className="whitespace-pre-wrap px-2 pb-2 text-xs text-slate-400">维护规则：{scope.maintenance}</p>}
+          </details>
+        )}
+        {Object.keys(rest).length > 0 && (
+          <details className="rounded-lg bg-black/20">
+            <summary className="cursor-pointer p-2 text-xs text-slate-400">其他字段</summary>
+            <pre className="max-h-[30vh] overflow-auto whitespace-pre-wrap break-words px-2 pb-2 text-[11px] text-slate-400">{JSON.stringify(rest, null, 2)}</pre>
+          </details>
+        )}
+      </div>
+    </details>
   )
 }
 

@@ -13,8 +13,9 @@ export interface Agent {
   current: string | null
   context_fill: number | null
   queued: number
-  memory?: { entries: number; tokens: number }
+  memory?: { entries: number; tokens: number; updated_at?: number }
   runtime?: RuntimeStatus | null
+  admission?: { path: string; config?: AdmissionConfig; error?: string } | null
   created_at: number
   updated_at: number
 }
@@ -137,4 +138,18 @@ export function modelLabel(model?: string | null) {
   if (!model) return '默认模型'
   const m = model.replace(/^claude-/, '').replace(/-(\d)-(\d)$/, ' $1.$2').replace(/^gpt-/, 'GPT-')
   return m.charAt(0).toUpperCase() + m.slice(1)
+}
+
+// Nyarl's own admission config (admission.json); Nyarl maintains it, the overview only shows it.
+export interface AdmissionContact {
+  identity?: Record<string, string>
+  allow?: string[]
+  deny?: string[]
+  scope?: { name?: string; resources?: Record<string, string>[]; maintenance?: string }
+  [key: string]: unknown
+}
+export interface AdmissionConfig {
+  version?: number
+  default?: string
+  contacts?: Record<string, AdmissionContact>
 }

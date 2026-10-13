@@ -146,6 +146,26 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         self.n.admission_path.write_text(json.dumps({'version':1,'default':'deny','contacts':{}}))
         with self.assertRaises(PermissionError): await self.run_event(yor|{'event_id':'y3'},prompt='REPLY bad')
 
+    async def test_overview_shows_current_admission_config_to_owner_only(self):
+        self.assertEqual(self.n.status_extra()['admission']['error'],'尚未创建准入配置')
+        self.n.admission_path.write_text('{broken')
+        self.assertEqual(self.n.status_extra()['admission']['error'],'准入配置无法读取或解析')
+        cfg={'version':1,'default':'deny','contacts':{'约尔':{'identity':{'feishu_sender_id':'fixture-yor'},'allow':['只读']}}}
+        self.n.admission_path.write_text(json.dumps(cfg,ensure_ascii=False))
+        await self.n.report('idle')
+        for _ in range(100):
+            shown=self.t.public_agent(self.t.store.agent('nyarlathotep'))['admission']
+            if shown and 'config' in shown: break
+            await asyncio.sleep(.02)
+        self.assertEqual(shown['config'],cfg)
+        # Agents outside ADMIN_READ never receive the policy through the directory.
+        d=await self.t.handle_agent_call(SimpleNamespace(id='ghroth'),'directory',{})
+        self.assertTrue(all(a.get('admission') is None for a in d['agents']))
+        d=await self.t.handle_agent_call(SimpleNamespace(id='shub'),'directory',{})
+        self.assertEqual(next(a for a in d['agents'] if a['id']=='nyarlathotep')['admission']['config'],cfg)
+        mid=self.t.store.remember('nyarlathotep','fixture rule','fixture')
+        self.assertGreater(self.t.store.memory_stats()['nyarlathotep']['updated_at'],0)
+
     async def test_nyarl_memory_also_distills_azathoth(self):
         self.assertEqual(self.n.memory_sources,{'owner','azathoth'})
 

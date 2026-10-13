@@ -65,6 +65,16 @@ class NyarlBridge:
         return next(((name, entry) for name, entry in contacts.items() if isinstance(entry, dict) and sender
                      and (entry.get('identity') or {}).get('feishu_sender_id') == sender), None)
 
+    def status_extra(self):
+        # The overview shows Nyarl's own admission config as it currently is on disk.
+        path = self.admission_path
+        try:
+            return {'admission': {'path': str(path), 'config': json.loads(path.read_text())}}
+        except FileNotFoundError:
+            return {'admission': {'path': str(path), 'error': '尚未创建准入配置'}}
+        except (OSError, ValueError):
+            return {'admission': {'path': str(path), 'error': '准入配置无法读取或解析'}}
+
     async def authorize(self, event):
         """Owner via the temple binding; anyone else only through an admission contact. Returns the contact name."""
         if (await self.link.call('channel_authorize', **event))['owner']:
@@ -181,6 +191,7 @@ class NyarlBridge:
             raise
         finally:
             self.channel_runs.pop(run_id, None)
+            await self.report(self.state)
 
     async def run_scoped(self, scope, params, emit):
         """Catalog supplies the candidate thread; scoped turn_log validates it.

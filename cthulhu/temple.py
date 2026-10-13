@@ -194,7 +194,7 @@ class Temple:
                 "parent_id": a["parent_id"], "desired": a["desired"], "task": a["spec"].get("task", ""),
                 "online": a["id"] in self.agents, "state": live.get("state", "offline"),
                 "current": live.get("current"), "context_fill": live.get("context_fill"),
-                "runtime": live.get("runtime"),
+                "runtime": live.get("runtime"), "admission": live.get("admission"),
                 "created_at": a["created_at"], "updated_at": a["updated_at"]}
 
     def directory(self) -> dict:
@@ -323,8 +323,8 @@ class Temple:
         if method == "directory":
             d = self.directory()
             if role not in roles.ADMIN_READ:
-                # Others only see whom they can talk to.
-                d["agents"] = [a for a in d["agents"] if roles.can_send(role, a["role"]) or a["id"] == conn.id]
+                # Others only see whom they can talk to, without Nyarl's admission policy.
+                d["agents"] = [a | {"admission": None} for a in d["agents"] if roles.can_send(role, a["role"]) or a["id"] == conn.id]
             return d
         if method == "status":
             self.status[conn.id] = p
@@ -349,12 +349,13 @@ class Temple:
             from .feishu import check_scope
             scope = check_scope(self, conn.id, p.get('scope', ''))
             return self.store.turn_log(conn.id, limit=min(int(p.get("limit", 20)), 100), scope=scope)
-        if method == "remember":
-            return self.store.remember(conn.id, p["text"], p.get("source"))
-        if method == "revise":
-            return self.store.revise(conn.id, int(p["memory_id"]), p["text"], p.get("source"))
-        if method == "forget":
-            return self.store.forget(conn.id, int(p["memory_id"]))
+        if method in ("remember", "revise", "forget"):
+            result = (self.store.remember(conn.id, p["text"], p.get("source")) if method == "remember" else
+                      self.store.revise(conn.id, int(p["memory_id"]), p["text"], p.get("source")) if method == "revise" else
+                      self.store.forget(conn.id, int(p["memory_id"])))
+            # Open overview drawers refetch the entries when the directory's memory stats change.
+            await self.broadcast({"type": "directory", **self.directory()})
+            return result
         if method == "memory":
             return self.store.memory(conn.id)
         if method == "chat_update":

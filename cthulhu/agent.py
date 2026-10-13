@@ -537,7 +537,10 @@ class Agent:
         self.state = state
         await self.link.emit({"type": "call", "id": 0, "method": "status", "params": {
             "state": state, "current": self.current, "runtime": self.runtime_status(),
-            "context_fill": round(self.runtime.context_fill(self.thread_id or ""), 3)}})
+            "context_fill": round(self.runtime.context_fill(self.thread_id or ""), 3), **self.status_extra()}})
+
+    def status_extra(self) -> dict:
+        return {}
 
     async def _on_welcome(self, w: dict) -> None:
         self.draining = bool(w.get("draining"))
