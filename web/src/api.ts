@@ -73,7 +73,25 @@ export interface Turn {
   updated_at: number
 }
 
-export interface Task { id: string; title: string; state: 'open' | 'done'; created_at: number; updated_at: number }
+export type TaskState = 'active' | 'blocked_on_owner' | 'submitted' | 'accepted' | 'failed'
+export interface TaskSample { at: number; value: number | null; progress: boolean | null; note?: string }
+export interface TaskExtension { at: number; by: string; until: number; reason: string; approver: string; state: 'pending' | 'approved' | 'denied' | 'refused'; decision?: string }
+export interface TaskEvent { at: number; kind: string; by: string; text: string }
+export interface Task {
+  id: string; title: string; state: TaskState; created_at: number; updated_at: number
+  creator?: string | null; manager?: string | null; executor?: string | null; deadline?: number | null
+  acceptance?: string; probe?: string | null
+  data?: { samples?: TaskSample[]; extensions?: TaskExtension[]; events?: TaskEvent[]; next_check?: number; misses?: number
+           quiet?: boolean; submissions?: { at: number; by: string; evidence: string }[]; owner_verdict?: boolean; brief?: string }
+}
+
+export const TASK_STATE: Record<TaskState, { label: string; chip: string }> = {
+  active: { label: '进行中', chip: 'bg-sky-400/15 text-sky-300' },
+  blocked_on_owner: { label: '等你决定', chip: 'bg-amber-400/15 text-amber-300' },
+  submitted: { label: '待验收', chip: 'bg-violet-400/15 text-violet-300' },
+  accepted: { label: '已验收', chip: 'bg-emerald-400/15 text-emerald-300' },
+  failed: { label: '已作废', chip: 'bg-rose-500/15 text-rose-300' },
+}
 
 export interface Message {
   id: string

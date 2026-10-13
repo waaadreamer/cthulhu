@@ -8,6 +8,7 @@ type Handlers = {
   onMessage?: (m: Message) => void
   onPatrol?: () => void
   onDeploy?: () => void
+  onTask?: (taskId: string) => void
 }
 
 /** Live temple state over the owner websocket, with reconnect. */
@@ -71,6 +72,9 @@ export function useTemple(handlers: Handlers) {
             break
           case 'deploy':
             h.current.onDeploy?.()
+            break
+          case 'task':
+            h.current.onTask?.(f.task_id)
             break
         }
       }
