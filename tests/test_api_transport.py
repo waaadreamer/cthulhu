@@ -266,6 +266,52 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"response.completed", content)
 
 
+    async def test_concurrent_streams_queue_for_slot_instead_of_local_503(self):
+        from cthulhu import api_provider
+        from cthulhu.galaxy_api_runtime import GalaxyAPITransport
+        import httpx2 as httpx
+        self.terminal_gate = asyncio.Event()
+        transport = GalaxyAPITransport(link=self.caller, provider="ali", state_dir=self.tmp.name, model="gpt-6-astra")
+        await transport.start()
+        cfg = transport.api_transport
+        url, headers = cfg["base_url"] + "/responses", {"authorization": "Bearer " + cfg["token"]}
+        body = {"model": "gpt-6-astra", "input": "hello"}
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=30) as client:
+                async def one():
+                    async with client.stream("POST", url, json=body, headers=headers) as r:
+                        return r.status_code, await r.aread()
+                # Former per-caller cap (2) and per-provider cap (4) produced bare 503s here.
+                tasks = [asyncio.create_task(one()) for _ in range(api_provider.MAX_CALLER + 2)]
+                await asyncio.sleep(.5)
+                self.terminal_gate.set()
+                results = await asyncio.gather(*tasks)
+                self.assertTrue(all(code == 200 and b"response.completed" in data for code, data in results), results)
+                # Exhaustion that outlasts the wait is a named, retryable 429, never a bare route 503.
+                with patch.object(api_provider, "SLOT_WAIT", 0), patch.object(api_provider, "MAX_CALLER", 0):
+                    r = await client.post(url, json=body, headers=headers)
+                self.assertEqual(r.status_code, 429)
+                self.assertIn("API capacity exhausted", r.text)
+        finally:
+            self.terminal_gate.set()
+            await transport.close()
+
+    async def test_open_waits_for_provider_reregistration(self):
+        await self.provider_link.ws.close()
+        for _ in range(200):
+            if not self.temple.api_broker.catalog():
+                break
+            await asyncio.sleep(.01)
+        self.assertFalse(self.temple.api_broker.catalog())
+
+        async def reregister():
+            await asyncio.wait_for(self.provider_link.connected.wait(), 5)
+            await self.worker.register("restarted")
+        task = asyncio.create_task(reregister())
+        data, _ = await self.consume({"model": "gpt-6-astra", "input": "during restart"})
+        await task
+        self.assertIn(b"response.completed", data)
+
     async def test_cancel_ack_closes_only_target_request(self):
         self.hold_stream = True
         opened = await self.caller.call("api_open", provider="ali", body={"model": "gpt-6-astra", "input": "cancel me"})

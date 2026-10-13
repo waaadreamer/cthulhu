@@ -25,8 +25,9 @@ MAX_CHUNK = 64 * 1024
 MAX_EVENT = 4 * 1024 * 1024
 MAX_STREAM = 32 * 1024 * 1024
 MAX_STREAMS = 32
-MAX_PROVIDER = 4
-MAX_CALLER = 2
+MAX_PROVIDER = 8
+MAX_CALLER = 4
+SLOT_WAIT = 15
 STREAM_TTL = 600
 IDLE_TIMEOUT = 90
 QUEUE_SIZE = 4
@@ -130,6 +131,9 @@ class ProviderBroker:
                 if self.temple.galaxies.get(gid) is item["conn"] and
                 (consumer is None or consumer in self.policy(gid).get("consumers", []))]
 
+    def policy_ids(self, consumer: str) -> list[str]:
+        return [g for g, v in self.temple.config.get("api_providers", {}).items() if consumer in v.get("consumers", [])]
+
     def consumer(self, conn) -> str:
         if conn.kind == "maintenance" and conn in self.temple.maintainers:
             maintainer = self.temple.god(Role.GHROTH)
@@ -150,7 +154,12 @@ class ProviderBroker:
         if "galaxy_api_v1" not in getattr(conn, "capabilities", []):
             raise Denied("caller lacks Galaxy API capability")
         gid = p.get("provider")
-        offered = next((x for x in self.catalog(consumer) if x["id"] == gid), None)
+        # A restarting provider re-registers within seconds; wait instead of failing the turn.
+        for _ in range(SLOT_WAIT * 10 + 1):
+            offered = next((x for x in self.catalog(consumer) if x["id"] == gid), None)
+            if offered or gid not in self.policy_ids(consumer):
+                break
+            await asyncio.sleep(.1)
         if not offered:
             raise Denied("eligible API provider is not online")
         protocol = p.get("protocol", "responses")
@@ -163,11 +172,19 @@ class ProviderBroker:
         beta = p.get("beta", "")
         if not isinstance(beta, str) or not BETA.fullmatch(beta):
             raise ValueError("invalid Anthropic beta header")
-        provider = self.providers[gid]["conn"]
-        if (len(self.streams) >= MAX_STREAMS or
-                sum(s.caller is conn for s in self.streams.values()) >= MAX_CALLER or
-                sum(s.provider is provider for s in self.streams.values()) >= MAX_PROVIDER):
-            raise ValueError("API capacity exhausted")
+        limit = self.policy(gid).get("max_streams", MAX_PROVIDER)
+        # Briefly queue for a slot: concurrent agents and forks routinely overlap.
+        for attempt in range(SLOT_WAIT * 10 + 1):
+            provider = self.providers.get(gid, {}).get("conn")
+            if provider is None:
+                raise Denied("eligible API provider is not online")
+            if (len(self.streams) < MAX_STREAMS and
+                    sum(s.caller is conn for s in self.streams.values()) < MAX_CALLER and
+                    sum(s.provider is provider for s in self.streams.values()) < limit):
+                break
+            if attempt == SLOT_WAIT * 10:
+                raise ValueError("API capacity exhausted")
+            await asyncio.sleep(.1)
         sid = secrets.token_hex(16)
         s = self.streams[sid] = Stream(sid, conn, provider, body["model"], body.get("service_tier", "default"), protocol)
         s.timer = asyncio.create_task(self.expire(s))
@@ -335,7 +352,7 @@ class ProviderWorker:
             return
         if sid in self.tasks:
             return
-        if len(self.tasks) >= MAX_PROVIDER:
+        if len(self.tasks) >= self.config.get("max_streams", MAX_PROVIDER):
             await self.link.call("api_push", id=sid, seq=0, error="backpressure", timeout=10)
             return
         task = asyncio.create_task(self.run(sid, frame.get("body"), self.generation,
