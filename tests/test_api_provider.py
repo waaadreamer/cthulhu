@@ -151,12 +151,13 @@ class RuntimeSafetyTests(unittest.IsolatedAsyncioTestCase):
                                       "fallback": {"backend": "codex", "model": "gpt-6-astra"}}, **kw)
             pair.primary.start = AsyncMock(side_effect=RuntimeError("provider offline"))
             pair.fallback.start = AsyncMock()
-            with patch.object(backends, "RETRY_DELAYS", (0,)*5):
+            with patch.object(backends, "RETRY_DELAYS", (0,)):
                 await pair.start()
             self.assertTrue(pair.using_fallback)
             self.assertEqual(pair.active_cfg["backend"], "codex")
+            self.assertEqual(pair.primary.start.await_count, 2)
             pair.fallback.start.assert_awaited_once()
-            # Five startup retries precede the configured fallback, with the usual hold.
+            # One startup retry precedes the configured fallback, with the usual hold.
             self.assertEqual(pair.hold, backends.FALLBACK_HOLD)
             pair.failed_at -= backends.FALLBACK_HOLD + 1
             self.assertFalse(pair.using_fallback)

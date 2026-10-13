@@ -18,7 +18,7 @@ import asyncio
 
 from .runtime import CodexRuntime, TurnResult, RuntimeError_
 
-RETRY_DELAYS = (0.5, 1, 2, 3, 5)  # Five retries AFTER the first attempt, on each source.
+RETRY_DELAYS = (0.5,)  # One retry AFTER the first attempt, on each source.
 
 
 def recoverable(error: str | None) -> bool:
@@ -163,7 +163,7 @@ class Backends:
                         await publish('interrupted')
                         return TurnResult('interrupted', error='Recovery cancelled')
                     total += 1
-                    await publish('running', attempt=total, retry=retry, retries=5,
+                    await publish('running', attempt=total, retry=retry, retries=len(RETRY_DELAYS),
                                   source=label(cfg), fallback=rt is self.fallback)
                     if cancel.is_set():
                         await publish('interrupted')

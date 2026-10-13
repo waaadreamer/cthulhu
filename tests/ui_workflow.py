@@ -46,7 +46,7 @@ async def main():
         t.store.upsert_agent('worker','长提示执行者','old_one','test','az',{'task': '\n'.join(['长职责内容 '*20]*400)})
         cfg={'backend':'codex','model':'gpt-6-astra'}
         t.status['worker']={'state':'working','runtime':cfg | {'config':cfg,'default':cfg,'fallback_active':False,
-            'recovery':{'phase':'retrying','attempt':3,'retry':2,'retries':5,'source':'codex:gpt-6-astra','fallback':False}}}
+            'recovery':{'phase':'retrying','attempt':2,'retry':1,'retries':1,'source':'codex:gpt-6-astra','fallback':False}}}
         server=uvicorn.Server(uvicorn.Config(t.app(),host='127.0.0.1',port=port,log_level='error'))
         serve=asyncio.create_task(server.serve())
         while not server.started:
@@ -59,7 +59,7 @@ async def main():
                 print(text,flush=True)
                 if text == 'RECOVERY_DONE':
                     status=t.status['worker']
-                    status['runtime']['recovery'].update(phase='completed',attempt=7,retry=0,source='codex:gpt-6.1-sol',fallback=True)
+                    status['runtime']['recovery'].update(phase='completed',attempt=3,retry=0,source='codex:gpt-6.1-sol',fallback=True)
                     status['runtime'].update(model='gpt-6.1-sol',fallback_active=True)
                     await t.broadcast({'type':'status','agent_id':'worker','status':status})
                 if text == 'FEISHU_RECEIPT':

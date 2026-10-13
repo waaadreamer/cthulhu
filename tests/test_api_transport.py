@@ -515,7 +515,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.temple.set_runtime("old_native", {"backend": "claude", "provider": "ali", "model": model})
 
-    async def test_native_claude_shared_six_attempts_then_configured_claude_fallback(self):
+    async def test_native_claude_shared_two_attempts_then_configured_claude_fallback(self):
         from cthulhu import backends
         primary = await self.enable_claude()
         fallback = "claude-sonnet-5-5"
@@ -542,15 +542,46 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             checked.append(await rt.recovery_checkpoint(threads[rt], True))
             return "Previous attempt settled; no tool executed."
         async def report(state): statuses.append(state)
-        with patch.object(backends, "RETRY_DELAYS", (0,) * 5):
+        with patch.object(backends, "RETRY_DELAYS", (0,)):
             result = await pair.recover(attempt, prepare=prepare, report=report)
         self.assertEqual(result.status, "completed", (result.error, statuses))
-        self.assertEqual([r["model"] for r in self.requests], [primary] * 6 + [fallback] * 2)
+        self.assertEqual([r["model"] for r in self.requests], [primary] * 2 + [fallback] * 2)
         self.assertEqual(effects, ["native-echo"])
-        self.assertEqual(len(checked), 6)
-        self.assertEqual(statuses[-1]["attempt"], 7)
+        self.assertEqual(len(checked), 2)
+        self.assertEqual(statuses[-1]["attempt"], 3)
+        self.assertEqual(statuses[-1]["retries"], 1)
         self.assertTrue(statuses[-1]["fallback"])
         self.assertEqual(pair.active_cfg["backend"], "claude")
+
+    async def test_native_claude_unoffered_fallback_fails_without_model_request(self):
+        from cthulhu import backends
+        primary = await self.enable_claude()
+        fallback = "claude-sonnet-5-5"
+        self.messages_fail_model = primary
+        pair = self.rt = backends.Backends({"backend": "claude", "provider": "ali", "model": primary,
+                    "fallback": {"backend": "claude", "provider": "ali", "model": fallback}},
+                    codex="must-not-run-codex", cwd=self.tmp.name, log_dir=Path(self.tmp.name),
+                    sub_agents=False, api_link=self.caller)
+        calls, statuses = [], []
+        threads = {}
+        async def attempt(rt, note):
+            calls.append(rt)
+            await rt.start()
+            if rt not in threads:
+                threads[rt] = await rt.start_thread("Reply ready.", [], None)
+            return await rt.run_turn(threads[rt], "Reply ready. " + note, timeout=20)
+        async def report(state): statuses.append(state)
+        with patch.object(backends, "RETRY_DELAYS", (0,)):
+            result = await pair.recover(attempt, report=report)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("does not offer this model", result.error)
+        self.assertIn("configured fallback exhausted", result.error)
+        self.assertEqual(calls, [pair.primary] * 2 + [pair.fallback] * 2)
+        self.assertEqual([r["model"] for r in self.requests], [primary] * 2)
+        self.assertEqual(pair.fallback.api_result, {})
+        self.assertEqual(statuses[-1]["phase"], "failed")
+        self.assertEqual(statuses[-1]["attempt"], 4)
+        self.assertEqual(statuses[-1]["retries"], 1)
 
     async def test_native_canary_real_cli_and_tool_result_not_in_prompt(self):
         from cthulhu.api_canary import run_native_claude, run

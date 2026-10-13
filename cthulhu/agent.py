@@ -125,6 +125,8 @@ class Agent:
     def runtime_status(self) -> dict:
         return {"backend": self.backends.active_cfg.get("backend", "codex"), "model": self.backends.active_cfg.get("model"),
                 "fallback_active": self.backends.using_fallback, "config": self.backends.cfg,
+                "recovery_policy": {"retries": len(backends.RETRY_DELAYS),
+                                    "fallback_hold_seconds": backends.FALLBACK_HOLD},
                 **({"recovery": self.recovery} if self.recovery else {}),
                 **({"background_recovery": self.background_recovery} if self.background_recovery else {}),
                 "api_result": getattr(self.runtime, "api_result", None),

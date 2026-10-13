@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -11,6 +13,10 @@ from tests import test_universe as universe
 
 
 class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
+    def test_global_default_is_one_retry_and_thirty_minute_hold(self):
+        self.assertEqual(backends.RETRY_DELAYS, (0.5,))
+        self.assertEqual(backends.FALLBACK_HOLD, 1800)
+
     def pair(self, fallback=True):
         pair = object.__new__(backends.Backends)
         pair.primary = object()
@@ -28,13 +34,14 @@ class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
             return TurnResult('failed',error='invalid_stream') if rt is pair.primary else TurnResult('completed','done')
         prepare = AsyncMock(return_value='checked persisted execution')
         async def report(s): statuses.append(s)
-        with patch.object(backends,'RETRY_DELAYS',(0,)*5):
+        with patch.object(backends,'RETRY_DELAYS',(0,)):
             result = await pair.recover(attempt,prepare=prepare,report=report)
         self.assertEqual(result.status,'completed')
-        self.assertEqual([r for r,n in calls],[pair.primary]*6+[pair.fallback])
+        self.assertEqual([r for r,n in calls],[pair.primary]*2+[pair.fallback])
         self.assertEqual(calls[-1][1],'checked persisted execution')
-        self.assertEqual(prepare.await_count,6)
-        self.assertEqual(statuses[-1]['attempt'],7)
+        self.assertEqual(prepare.await_count,2)
+        self.assertEqual(statuses[-1]['attempt'],3)
+        self.assertTrue(all(s['retries'] == 1 for s in statuses))
         self.assertTrue(statuses[-1]['fallback'])
 
     async def test_cancellation_during_delay_never_calls_again(self):
@@ -56,6 +63,45 @@ class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
         result=await pair.recover(attempt)
         self.assertEqual(result.status,'completed')
         self.assertTrue(pair.using_fallback)
+
+    async def test_hold_retains_fallback_across_turns_and_expiry_returns_primary(self):
+        pair = self.pair()
+        now = 10000.0
+        calls = []
+        async def attempt(rt, note):
+            calls.append(rt)
+            return TurnResult('completed')
+        with patch.object(backends.time, 'time', side_effect=lambda: now):
+            self.assertTrue(pair.trip())
+            self.assertEqual(pair.failed_at, now)
+            now += 1799
+            result = await pair.recover(attempt)
+            self.assertEqual(result.status, 'completed')
+            self.assertEqual(calls, [pair.fallback])
+            # The existing policy starts the hold again when a fallback turn finishes.
+            self.assertEqual(pair.failed_at, now)
+            now += 1799
+            self.assertTrue(pair.using_fallback)
+            now += 1
+            self.assertFalse(pair.using_fallback)
+            await pair.recover(attempt)
+        self.assertEqual(calls, [pair.fallback, pair.primary])
+
+    async def test_configured_fallback_failure_is_exhausted_after_one_retry(self):
+        pair = self.pair()
+        calls, statuses = [], []
+        async def attempt(rt, note):
+            calls.append(rt)
+            return TurnResult('failed', error='provider offline')
+        async def report(state): statuses.append(state)
+        with patch.object(backends, 'RETRY_DELAYS', (0,)):
+            result = await pair.recover(attempt, report=report)
+        self.assertEqual(calls, [pair.primary] * 2 + [pair.fallback] * 2)
+        self.assertEqual(result.status, 'failed')
+        self.assertIn('configured fallback exhausted', result.error)
+        self.assertEqual(statuses[-1]['phase'], 'failed')
+        self.assertEqual(statuses[-1]['attempt'], 4)
+        self.assertEqual(statuses[-1]['retries'], 1)
 
     async def test_cancel_during_status_publish_does_not_dispatch(self):
         pair=self.pair(); cancel=asyncio.Event(); attempt=AsyncMock()
@@ -81,22 +127,23 @@ class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
             result=await pair.recover(attempt)
             attempt.assert_awaited_once(); self.assertEqual(result.error,error)
         pair=self.pair(False); attempt=AsyncMock(return_value=TurnResult('failed',error='provider_disconnected'))
-        with patch.object(backends,'RETRY_DELAYS',(0,)*5):
+        with patch.object(backends,'RETRY_DELAYS',(0,)):
             result=await pair.recover(attempt)
-        self.assertEqual(attempt.await_count,6)
+        self.assertEqual(attempt.await_count,2)
         self.assertIn('no configured fallback',result.error)
 
-    async def test_routing_discovery_failure_does_not_stop_at_retry_three(self):
+    async def test_routing_discovery_failure_exhausts_after_one_retry(self):
         pair = self.pair(False)
-        errors = ['workspace routing discovery timed out'] * 3 + ['workspace routing discovery failed'] * 3
+        errors = ['workspace routing discovery timed out', 'workspace routing discovery failed']
         attempt = AsyncMock(side_effect=[TurnResult('failed', error=e) for e in errors])
         statuses = []
         async def report(state): statuses.append(state)
-        with patch.object(backends, 'RETRY_DELAYS', (0,) * 5):
+        with patch.object(backends, 'RETRY_DELAYS', (0,)):
             result = await pair.recover(attempt, report=report)
-        self.assertEqual(attempt.await_count, 6)
-        self.assertEqual(statuses[-1]['attempt'], 6)
-        self.assertEqual(statuses[-1]['retry'], 5)
+        self.assertEqual(attempt.await_count, 2)
+        self.assertEqual(statuses[-1]['attempt'], 2)
+        self.assertEqual(statuses[-1]['retry'], 1)
+        self.assertEqual(statuses[-1]['retries'], 1)
         self.assertIn('no configured fallback is available', result.error)
         self.assertFalse(backends.recoverable('workspace routing discovery failed: 401 unauthorized'))
         self.assertFalse(backends.recoverable('workspace routing discovery failed: invalid argument'))
@@ -128,10 +175,18 @@ class RecoveryServerTests(universe.HarnessServer):
     patrol_interval=3600
 
     def configure(self, fallback=True):
+        # Unchanged runtime settings deliberately retain cooldown. Isolate each test
+        # by applying the fixture's default before the requested recovery config.
+        self.api('runtimes', {'key': 'ghroth', 'config': None})
+        self.wait(lambda: self.runtime()['config'] == self.runtime()['default'])
         cfg={'backend':'codex','model':'recovery-primary'}
         if fallback: cfg['fallback']={'backend':'codex','model':'recovery-fallback'}
         self.api('runtimes',{'key':'ghroth','config':cfg})
-        self.wait(lambda: self.runtime()['model']=='recovery-primary')
+        self.wait(lambda: self.runtime()['model']=='recovery-primary' and self.runtime()['config'] == cfg)
+        self.assertEqual(self.runtime()['recovery_policy'], {'retries': 1, 'fallback_hold_seconds': 1800})
+        self.assertEqual(self.api('runtimes')['overrides']['ghroth'], cfg)
+        self.assertEqual(self.runtime()['config'], cfg)
+        return cfg
 
     def runtime(self):
         return next(a for a in self.api('directory')['agents'] if a['id']=='gh')['runtime']
@@ -139,20 +194,51 @@ class RecoveryServerTests(universe.HarnessServer):
     def completed(self, mid):
         return next((t for t in self.api('chat?agent_id=gh') if t['id']==mid and t['status'] not in ('running','queued')),None)
 
-    def test_five_retries_then_fallback_preserves_task_and_one_effect(self):
-        self.configure()
+    def test_one_retry_then_fallback_preserves_task_and_one_effect(self):
+        cfg = self.configure()
         msg=self.api('send',{'to':'gh','text':'RECOVERY_FIXTURE fallback task_fixture'})
         turn=self.wait(lambda:self.completed(msg['id']),40)
         self.assertEqual(turn['status'],'done',turn)
         self.assertIn('RECOVERED_WITH_EXISTING_EFFECT once',turn['reply'])
         rows=[json.loads(s) for s in (self.dir/'recovery-fallback.jsonl').read_text().splitlines()]
-        self.assertEqual([r['model'] for r in rows],['recovery-primary']*6+['recovery-fallback'])
+        self.assertEqual([r['model'] for r in rows],['recovery-primary']*2+['recovery-fallback'])
         self.assertTrue(all(r['checked_context'] for r in rows[1:]))
         self.assertTrue(all(r['task_present'] for r in rows))
         self.assertEqual((self.dir/'recovery-fallback-effect').read_text(),'once')
-        self.assertEqual(self.runtime()['recovery']['attempt'],7)
+        self.assertEqual(self.runtime()['recovery']['attempt'],3)
+        self.assertEqual(self.runtime()['recovery']['retries'],1)
         self.assertEqual(self.runtime()['recovery']['phase'],'completed')
         self.assertTrue(self.runtime()['fallback_active'])
+        self.assertEqual(self.api('runtimes')['overrides']['ghroth'], cfg)
+        self.assertEqual(self.runtime()['config'], cfg)
+        following = self.api('send', {'to': 'gh', 'text': 'RECOVERY_FIXTURE fallback task_fixture'})
+        following_turn = self.wait(lambda: self.completed(following['id']))
+        self.assertEqual(following_turn['status'], 'done', following_turn)
+        rows = [json.loads(s) for s in (self.dir / 'recovery-fallback.jsonl').read_text().splitlines()]
+        self.assertEqual([r['model'] for r in rows], ['recovery-primary'] * 2 + ['recovery-fallback'] * 2)
+        self.assertEqual((self.dir / 'recovery-fallback-effect').read_text(), 'once')
+        self.assertEqual(self.runtime()['recovery']['attempt'], 1)
+        self.assertTrue(self.runtime()['fallback_active'])
+
+    def test_policy_and_model_config_survive_isolated_galaxy_restart(self):
+        cfg = self.configure()
+        self.wait(lambda: all(a['state'] == 'idle' for a in self.api('directory')['agents']))
+        cls = type(self)
+        cls.galaxy.terminate()
+        cls.galaxy.wait(15)
+        self.wait(lambda: not any(a['online'] for a in self.api('directory')['agents']))
+        env = os.environ | {'PYTHONPATH': str(universe.ROOT), 'CTHULHU_FAKE_CLAUDE': '1'}
+        cls.galaxy = subprocess.Popen([str(universe.ROOT / 'venv/bin/python'), '-m', 'cthulhu', 'galaxy',
+                                      '--config', str(self.dir / 'galaxy.json')], env=env)
+        self.wait(lambda: all(a['online'] for a in self.api('directory')['agents']), 30)
+        self.wait(lambda: self.runtime().get('config') == cfg)
+        self.assertEqual(self.runtime()['recovery_policy'], {'retries': 1, 'fallback_hold_seconds': 1800})
+        self.assertEqual(self.api('runtimes')['overrides']['ghroth'], cfg)
+        store = universe.Store(self.dir / 'temple.db')
+        try:
+            self.assertEqual(store.setting('runtimes')['ghroth'], cfg)
+        finally:
+            store.db.close()
 
     def test_nonretryable_stays_failed_without_fallback(self):
         self.configure(False)
@@ -162,17 +248,17 @@ class RecoveryServerTests(universe.HarnessServer):
         self.assertEqual(len((self.dir/'recovery-fatal.jsonl').read_text().splitlines()),1)
         self.assertEqual(self.runtime()['recovery']['phase'],'failed')
 
-    def test_workspace_routing_discovery_fails_through_fifth_retry_then_fallback(self):
+    def test_workspace_routing_discovery_fails_once_then_retries_and_falls_back(self):
         self.configure()
         msg = self.api('send', {'to': 'gh', 'text': 'RECOVERY_FIXTURE routing task_fixture'})
         turn = self.wait(lambda: self.completed(msg['id']), 40)
         self.assertEqual(turn['status'], 'done', turn)
         rows = [json.loads(s) for s in (self.dir/'recovery-routing.jsonl').read_text().splitlines()]
-        self.assertEqual([r['model'] for r in rows], ['recovery-primary'] * 6 + ['recovery-fallback'])
+        self.assertEqual([r['model'] for r in rows], ['recovery-primary'] * 2 + ['recovery-fallback'])
         self.assertTrue(all(r['checked_context'] for r in rows[1:]))
         self.assertTrue(all(r['task_present'] for r in rows))
         self.assertEqual((self.dir/'recovery-routing-effect').read_text(), 'once')
-        self.assertEqual(self.runtime()['recovery']['attempt'], 7)
+        self.assertEqual(self.runtime()['recovery']['attempt'], 3)
         self.assertTrue(self.runtime()['recovery']['fallback'])
         self.assertEqual(self.runtime()['recovery']['phase'], 'completed')
 

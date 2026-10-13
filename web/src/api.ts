@@ -32,6 +32,7 @@ export interface RuntimeCfg {
 }
 
 export interface RuntimeStatus {
+  recovery_policy?: { retries: number; fallback_hold_seconds: number }
   recovery?: { phase: string; attempt: number; retry: number; retries: number; source: string; fallback: boolean; error?: string }
   api_result?: { provider?: string; requested_model?: string; requested_tier?: string; returned_model?: string; returned_tier?: string }
   backend: string

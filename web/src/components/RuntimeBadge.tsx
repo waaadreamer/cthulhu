@@ -24,7 +24,7 @@ export function RuntimeBadge({ runtime, compact }: { runtime?: RuntimeStatus | n
       {modelLabel(runtime.model)}
       {runtime.api_result?.returned_tier && !compact && <span className="opacity-70">· 实际 {runtime.api_result.returned_tier}</span>}
       {fb && !compact && <span className="opacity-70">· 后备</span>}
-      {recovering && <span>· 重试 {recovery.retry}/5</span>}
+      {recovering && <span>· 重试 {recovery.retry}/{recovery.retries}</span>}
       {recovery?.phase === 'failed' && <span>· 恢复失败</span>}
     </span>
   )
