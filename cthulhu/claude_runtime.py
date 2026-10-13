@@ -14,7 +14,7 @@ import uuid
 from typing import Any, Callable
 
 from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, StreamEvent,
-                              TextBlock, ToolUseBlock, create_sdk_mcp_server)
+                              TextBlock, ToolUseBlock, HookMatcher, create_sdk_mcp_server)
 from claude_agent_sdk import tool as sdk_tool
 
 from .runtime import EventHandler, RuntimeError_, ToolHandler, TurnResult
@@ -69,6 +69,7 @@ class ClaudeRuntime:
         self.turn_ids: dict[str, str] = {}
         self.sdk_tools: dict[str, list] = {}       # session -> SdkMcpTool list (tests read it)
         self.checkpoints: dict[str, list] = {}
+        self.boundary_input: dict[str, tuple] = {}  # One pending native hook ACK; Agent owns the durable queue.
         self._log = open(log_path, "a") if log_path else None
 
     async def start(self) -> None:
@@ -154,6 +155,8 @@ class ClaudeRuntime:
             model=model or self.model, effort=effort or self.effort, cwd=self.cwd, env=env,
             setting_sources=[], include_partial_messages=True, stderr=self._stderr,
             cli_path=self.cli_path,
+            hooks={event: [HookMatcher(hooks=[self._boundary_hook])]
+                   for event in ('PostToolUse', 'PostToolUseFailure', 'Stop')},
         )
         if fork_from:
             opts.resume, opts.fork_session, opts.session_id = fork_from, True, session_id
@@ -166,6 +169,35 @@ class ClaudeRuntime:
         await client.connect()
         t = self.threads[session_id] = _Thread(client, session_id)
         return t
+
+    async def supply_task_context(self, thread_id, turn_id, text, *, valid=lambda: True):
+        """Inject at a completed-tool/stop hook, without interrupting an active command."""
+        if self.turn_ids.get(thread_id) != turn_id:
+            return False
+        ack = asyncio.get_running_loop().create_future()
+        self.boundary_input[thread_id] = (turn_id, text, ack, valid)
+        try:
+            return await ack
+        finally:
+            if self.boundary_input.get(thread_id, (None, None, None))[2] is ack:
+                self.boundary_input.pop(thread_id, None)
+
+    async def _boundary_hook(self, data, tool_use_id, context):
+        thread = data.get('session_id')
+        pending = self.boundary_input.pop(thread, None)
+        if not pending:
+            return {}
+        turn, text, ack, valid = pending
+        accepted = self.turn_ids.get(thread) == turn and valid() and not ack.done()
+        if not ack.done():
+            ack.set_result(accepted)
+        if not accepted:
+            return {}
+        self.checkpoints.setdefault(thread, []).append({'input_at_tool_boundary': text})
+        event = data['hook_event_name']
+        if event == 'Stop':
+            return {'decision': 'block', 'reason': text}
+        return {'hookSpecificOutput': {'hookEventName': event, 'additionalContext': text}}
 
     async def start_thread(self, instructions: str, tools: list[dict], handler: ToolHandler | None,
                            ephemeral: bool = False) -> str:
@@ -247,6 +279,9 @@ class ClaudeRuntime:
                 return TurnResult('failed', error=f'{type(e).__name__}: {e}')
             finally:
                 self.turn_ids.pop(thread_id, None)
+                pending = self.boundary_input.pop(thread_id, None)
+                if pending and not pending[2].done():
+                    pending[2].set_result(False)
 
     async def _turn(self, t: _Thread, text: str, on_event: EventHandler | None, turn_id: str, json_only: bool) -> TurnResult:
         checkpoint = self.checkpoints.setdefault(t.session_id, [])

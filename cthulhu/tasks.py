@@ -159,7 +159,8 @@ class Discipline:
         title, acceptance, deadline = self.contract(p)
         now = time.time()
         row = self.store.add_task(title, creator=creator, manager=manager, executor=executor, deadline=deadline,
-                                  acceptance=acceptance, data={"duration": deadline - now, "next_check": now + self.interval,
+                                  acceptance=acceptance, data={"duration": deadline - now, "original_deadline": deadline,
+                                                               "execution_started_at": None, "next_check": now + self.interval,
                                                                "brief": str(p.get("text") or p.get("task") or ""),
                                                                "parent": p.get("parent_task_id")})
         task = Task.load(self.store, row["id"])
@@ -182,7 +183,9 @@ class Discipline:
         if not str(p.get("text") or "").strip():
             raise ValueError("text (the task brief) is required")
         task = self.new(caller, manager, executor, p)
-        await self.t.route(caller, executor, p["text"], task_id=task.id)
+        message = await self.t.route(caller, executor, p["text"], task_id=task.id)
+        task.data['assignment_message_id'] = message['id']
+        task.save(self.store)
         await self.changed(task)
         return {"task_id": task.id, "deadline": stamp(task.deadline)}
 
@@ -191,16 +194,37 @@ class Discipline:
         existing task of this manager whose executor it takes over."""
         if p.get("task_id"):
             task = self.get(p["task_id"])
-            if task.manager != caller or self.role(task.executor) != Role.OLD_ONE or task.state not in OPEN:
+            if task.manager != caller or self.role(task.executor) != Role.OLD_ONE or task.state not in ('active', 'blocked_on_owner'):
                 raise Denied("only an open old_one task of your own can be handed to a replacement")
+            old = self.store.agent(task.executor)
+            if old['desired'] != 'stopped' or old['id'] in self.t.agents:
+                raise Denied('stop and settle the current executor before replacement')
+            if not task.data.get('handover_receipt'):
+                raise Denied('executor stop acknowledgement is required before replacement')
             task.log("executor", f"执行者由 {task.executor} 换为 {agent_id}", by=caller)
             task.executor = agent_id
+            task.data['execution_started_at'] = None
+            task.data['next_check'] = time.time() + self.interval
             task.data["brief"] = p["task"]
             task.save(self.store)
             return task
         return self.new(caller, caller, agent_id, p | {"text": p["task"]})
 
     # executor calls
+
+    async def started(self, caller: str, task_id: str, turn_id: str = '') -> dict:
+        async with self.lock:
+            task = self.get(task_id)
+            if caller != task.executor:
+                raise Denied('only the current executor confirms task execution')
+            if task.state != 'active':
+                raise ValueError(f'task is {task.state}')
+            if not task.data.get('execution_started_at'):
+                task.data['execution_started_at'] = time.time()
+                task.data['next_check'] = min(time.time() + self.interval, task.deadline)
+                task.log('started', '原生回合已启动', by=caller, turn_id=turn_id)
+                task.save(self.store)
+        return {'started_at': task.data['execution_started_at']}
 
     async def set_probe(self, caller: str, task_id: str, command: str) -> dict:
         task = self.get(task_id)
@@ -214,7 +238,14 @@ class Discipline:
             raise ValueError(f"probe output must be a single number ({note}); e.g. `stat -c %s out.jsonl 2>/dev/null || echo 0`")
         async with self.lock:
             fresh = self.get(task_id)
+            if fresh.probe != task.probe:
+                fresh.log('probe_stage', '更换验收阶段探针，重新登记基线；历史保留', by=caller,
+                          previous_probe=fresh.probe)
+                fresh.data['probe_review'] = False
+                fresh.data.pop('probe_ok', None)
             fresh.probe = task.probe
+            if 'execution_started_at' in fresh.data and not fresh.data['execution_started_at']:
+                fresh.data['execution_started_at'] = time.time()  # A successful executor tool is actual work.
             fresh.samples.append({"at": time.time(), "value": value, "progress": None, "note": "registered"})
             fresh.data["probe_ok"] = None
             # A probe changed after review is reviewed again at the next checkpoint.
@@ -259,25 +290,35 @@ class Discipline:
         await self.changed(task)
         return {"state": task.state, "deadline": stamp(task.deadline)}
 
-    async def extend(self, caller: str, task_id: str, deadline, reason: str) -> dict:
+    async def extend(self, caller: str, task_id: str, deadline, reason: str, *, evidence='', expected_completion=None) -> dict:
         async with self.lock:
             task = self.get(task_id)
-            if caller != task.executor:
-                raise Denied("only the executor requests an extension")
+            if caller not in (task.executor, task.manager):
+                raise Denied("only the executor or its manager requests an extension")
             if task.state not in ("active", "blocked_on_owner"):
                 raise ValueError(f"task is {task.state}")
             if any(e["state"] == "pending" for e in task.extensions):
                 raise ValueError("an extension request is already pending")
-            until = parse_deadline(deadline, task.deadline)
-            if not until or until <= task.deadline:
-                raise ValueError("the new deadline must be later than the current one")
+            now = time.time()
+            base = max(now, task.deadline)
+            until = parse_deadline(deadline, base)
+            if not until or not math.isfinite(until) or until <= base:
+                raise ValueError("the new deadline must be in the future and later than the current one")
+            eta = parse_deadline(expected_completion, now) if expected_completion else None
             last = next((s for s in reversed(task.samples) if s["progress"] is not None), None)
-            refusal = ("the probe showed no progress in the last checkpoint period" if not last or not last["progress"] else
-                       "an extension may not be longer than the original duration" if until - task.deadline > task.data["duration"] + 1
+            justified_flat = bool(task.probe and task.data.get('probe_ok') is not False and str(evidence).strip()
+                                  and eta and now < eta <= until and reason.strip())
+            refusal = ("no progress evidence: provide actual command/process/artifact evidence and expected_completion" if
+                       (not last or not last['progress']) and not justified_flat else
+                       "an extension may not be longer than the original duration" if until - base > task.data["duration"] + 1
                        else None)
             granted = sum(e["state"] == "approved" for e in task.extensions)
             approver = [self.superior(task), self.god(Role.AZATHOTH), OWNER][min(granted, 2)]
+            if approver in (caller, task.executor):
+                approver = self.god(Role.AZATHOTH) if approver != self.god(Role.AZATHOTH) else OWNER
             ext = {"at": time.time(), "by": caller, "until": until, "reason": reason, "approver": approver,
+                   'executor': task.executor, 'base': base, 'previous_deadline': task.deadline,
+                   'evidence': evidence, 'expected_completion': eta,
                    "state": "refused" if refusal else "pending", **({"decision": refusal} if refusal else {})}
             task.extensions.append(ext)
             task.log("extension", f"申请延期至 {stamp(until)}：{reason}" + (f"（程序拒绝：{refusal}）" if refusal else ""), by=caller)
@@ -302,15 +343,36 @@ class Discipline:
                 raise ValueError("no pending extension request")
             if caller != ext["approver"] or caller == task.executor:
                 raise Denied(f"this extension is decided by {ext['approver']}, never by the executor")
+            if caller == ext['by']:
+                raise Denied('the extension requester may not approve it')
+            if approve and (task.state != 'active' or ext['until'] <= time.time()
+                            or ext.get('executor', task.executor) != task.executor
+                            or ext['until'] - ext.get('base', max(ext['at'], task.deadline)) > task.data['duration'] + 1):
+                approve = False
+                reason = 'extension expired, invalid window or executor/task changed; submit a new bounded request'
             ext.update(state="approved" if approve else "denied", decision=reason, decided_at=time.time())
             if approve:
                 task.deadline = ext["until"]
+                task.data['next_check'] = min(time.time() + self.interval, task.deadline)
+                task.data['misses'] = 0
+                task.data.pop('alarm', None)
             task.log("extension", f"延期{'批准' if approve else '拒绝'}：{reason}", by=caller)
             task.save(self.store)
         await self.tell(task.executor, f"[extension {'approved' if approve else 'denied'}] task {task.id}: {reason or '-'}; "
                         f"deadline {stamp(task.deadline)}.", task)
         await self.changed(task)
+        if approve:
+            await self.retire_reminders(task)
         return {"deadline": stamp(task.deadline), "state": ext["state"]}
+
+    async def retire_reminders(self, task: Task) -> None:
+        ids = [m['id'] for m in self.store.messages(task_id=task.id, limit=500)
+               if m['sender'] == SYSTEM and m['kind'] == 'checkpoint' and m['state'] in ('queued', 'delivered')]
+        for mid in ids:
+            self.store.mark(mid, 'cancelled')
+        conn = self.t.agents.get(task.executor)
+        if conn and ids:
+            await conn.send({'type': 'task_reminders_refresh', 'task_id': task.id, 'ids': ids})
 
     async def submit(self, caller: str, task_id: str, evidence: str) -> dict:
         async with self.lock:
@@ -326,6 +388,8 @@ class Discipline:
             task.log("submit", clip(evidence, 2000), by=caller)
             task.save(self.store)
         if self.role(task.executor) == Role.OLD_ONE:
+            await self.tell(task.manager, f'[result submitted; pending QA] {task.brief()}\nEvidence: {evidence}',
+                            task, kind='message', status='submitted')
             await self.tell(self.god(Role.YOG), f"[acceptance review] {task.brief()}\nBrief: {clip(task.data.get('brief'), 2000)}\n"
                             f"Submitted evidence (frozen): {evidence}\nVerify it against the acceptance criteria yourself, then call "
                             "task_verdict(task_id, passed, reason). End with a one-line Chinese conclusion.", task)
@@ -351,7 +415,10 @@ class Discipline:
                 ("" if passed else f"\nThe task is active again; the clock was not reset (deadline {stamp(task.deadline)})."))
         for to in dict.fromkeys((task.executor, task.manager, task.creator)):
             if to != caller:
-                await self.tell(to, text, task)
+                await self.tell(to, text, task, kind='task_control' if to == task.executor else 'discipline')
+        if role == Role.YOG:
+            await self.tell(self.god(Role.AZATHOTH), text, task, kind='message',
+                            status='progress' if not passed else 'accepted')
         if role == Role.AZATHOTH:
             await self.tell_owner(f"阿撒托斯{'验收通过' if passed else '驳回'}了「{task.title}」：{reason}", task,
                                   kind="summary" if passed else "progress")
@@ -375,10 +442,52 @@ class Discipline:
 
     # azathoth's interventions (each copied to the owner)
 
-    async def replace(self, caller: str, task_id: str, reason: str) -> dict:
+    async def prepare_handover(self, caller: str, task_id: str) -> dict:
         task = self.get(task_id)
-        if self.role(task.executor) != Role.OLD_ONE or task.state not in OPEN:
+        if task.manager != caller or self.role(task.executor) != Role.OLD_ONE or task.state not in ('active', 'blocked_on_owner'):
+            raise Denied('only the manager can hand over an active old_one contract')
+        old = self.store.agent(task.executor)
+        if old['desired'] != 'stopped' or old['id'] in self.t.agents:
+            raise Denied('stop and settle the current executor before replacement')
+        galaxy = self.t.galaxies.get(old['galaxy_id'])
+        if not galaxy:
+            raise Denied('old executor galaxy is unavailable for stop verification')
+        receipt = await galaxy.rpc('agent_stopped', timeout=15, agent_id=old['id'])
+        if not isinstance(receipt, dict) or receipt.get('stopped') is not True or receipt.get('agent_id') != old['id']:
+            raise Denied('old executor process stop is not confirmed')
+        async with self.lock:
+            fresh = self.get(task.id)
+            if fresh.executor != old['id'] or fresh.state not in ('active', 'blocked_on_owner'):
+                raise Denied('executor changed during handover verification')
+            fresh.data['handover_receipt'] = receipt | {'epoch': old['epoch']}
+            fresh.log('handover', '已核实旧执行者停止；保留产物、上下文与原截止', by=caller, receipt=receipt)
+            fresh.save(self.store)
+        return receipt
+
+    async def replace(self, caller: str, task_id: str, reason: str, executor=None) -> dict:
+        task = self.get(task_id)
+        if self.role(task.executor) != Role.OLD_ONE or task.state not in ('active', 'blocked_on_owner'):
             raise ValueError("only an open old_one task can have its executor replaced")
+        if executor:
+            target = self.store.agent(executor)
+            if not target or target['parent_id'] != caller or target['role'] != Role.OLD_ONE or target['desired'] != 'running':
+                raise Denied('replacement must be an available old_one of this manager')
+            await self.prepare_handover(caller, task_id)
+            async with self.lock:
+                task = self.get(task_id)
+                receipt = task.data.get('handover_receipt', {})
+                old = self.store.agent(task.executor)
+                if (task.state not in ('active', 'blocked_on_owner') or old['desired'] != 'stopped'
+                        or receipt.get('agent_id') != old['id'] or receipt.get('epoch') != old['epoch']):
+                    raise Denied('executor or contract changed after stop acknowledgement')
+                task.log('executor', f'执行者由 {task.executor} 换为现有 {executor}：{reason}', by=caller)
+                task.executor = executor
+                task.data['execution_started_at'] = None
+                task.data['next_check'] = min(time.time() + self.interval, task.deadline)
+                task.save(self.store)
+            await self.tell(executor, f'[task reassigned] {task.brief()}\nContinue existing artifacts/context; do not duplicate work. {reason}', task)
+            await self.changed(task)
+            return {'executor': executor, 'task_id': task_id}
         task.log("replace", f"阿撒托斯要求更换执行者：{reason}", by=caller)
         task.save(self.store)
         await self.tell(task.manager, f"[order from azathoth] Replace the executor {task.executor} of task {task.id}: {reason}\n"
@@ -430,6 +539,8 @@ class Discipline:
         if not isinstance(r, dict):
             return None, "galaxy does not support probes; upgrade it"
         out = (r.get("stdout") or "").strip()
+        if r.get('code') != 0:
+            return None, f"probe command exited {r.get('code')}: {clip(r.get('stderr'), 120)}"
         try:
             value = float(out)
             if math.isfinite(value):
@@ -440,12 +551,31 @@ class Discipline:
 
     async def checkpoint(self, task: Task) -> None:
         agent = self.store.agent(task.executor) if task.executor else None
-        if agent and (agent["galaxy_id"] in self.t.maintenance or agent["galaxy_id"] not in self.t.galaxies):
+        waiting = 'execution_started_at' in task.data and not task.data['execution_started_at']
+        if not waiting and agent and (agent["galaxy_id"] in self.t.maintenance or agent["galaxy_id"] not in self.t.galaxies):
             async with self.lock:       # a deploy drain or an offline galaxy is not the executor's stall
                 fresh = self.get(task.id)
                 fresh.data["next_check"] = time.time() + self.interval
                 fresh.save(self.store)
             return
+        if 'execution_started_at' in task.data and not task.data['execution_started_at']:
+            async with self.lock:
+                task = self.get(task.id)
+                if task.state != 'active' or task.data.get('execution_started_at'):
+                    return
+                if time.time() >= task.deadline:
+                    await self.void(task, 'assignment expired without confirmed execution start')
+                else:
+                    task.data['next_check'] = min(time.time() + self.interval, task.deadline)
+                    task.log('dispatch_wait', '合同已派发，尚无原生执行启动确认；截止不变')
+                    task.save(self.store)
+                    await self.tell(self.superior(task), f'[dispatch waiting] {task.brief()}\nNo execution-start acknowledgement. '
+                                    'Arrange a ready executor before the original deadline; do not stop unrelated work.', task)
+                await self.changed(task)
+            return
+        if agent and agent['desired'] != 'running':
+            await self.tell(self.superior(task), f'[executor unavailable] {task.brief()}\nExecutor is stopped; '
+                            'reassign this contract through the supported handover, not a foreign message label.', task)
         value, note = await self.sample(task) if task.probe else (None, "no probe")
         async with self.lock:
             task = self.get(task.id)
@@ -479,10 +609,11 @@ class Discipline:
                             "Does this probe really measure progress toward the acceptance criteria (not a clock, a log "
                             "that grows anyway, or a constant)? Call task_probe_verdict(task_id, ok, reason). An invalid probe "
                             "voids the task. End with a one-line Chinese conclusion.", task)
-        if misses == 1:
-            await self.tell(task.executor, f"[checkpoint {n}: no progress] Your probe for task {task.id} did not grow "
-                            f"({task.history(3)}{'; ' + note if note else ''}). Make measurable progress before the next "
-                            f"checkpoint at {stamp(d['next_check'])}, or call task_block if you need the owner.", task)
+        await self.retire_reminders(task)
+        await self.tell(task.executor, f"[checkpoint {n}: {'progress' if progress else 'no progress'}] {task.brief()}\n"
+                        'Return actual results now, or request task_extend with command/process/artifact evidence, '
+                        'a reason for quiet work and expected_completion. Pending requests do not stop the clock.',
+                        task, kind='checkpoint')
         if misses == 2:
             await self.tell(self.superior(task), f"[2 checkpoints without progress] {task.brief()}\nWithin 10 minutes: unblock the "
                             "executor, replace it, or have it request an extension. The next stalled checkpoint goes to the owner.", task)
@@ -506,13 +637,19 @@ class Discipline:
         ex = self.store.agent(task.executor) if task.executor else None
         others = self.store.q("SELECT id FROM tasks WHERE executor=? AND id!=? AND state IN ('active','blocked_on_owner','submitted')",
                               (task.executor, task.id))
+        action = 'Executor was NOT stopped; its other work is preserved.'
         if ex and ex["role"] == Role.OLD_ONE and ex["desired"] == "running" and not others:
             try:
                 await self.t.halt(ex["id"], VOIDER)
+                action = 'Scoped stop requested; use its actual stop acknowledgement for process-exit verification.'
             except Exception:
+                action = 'Scoped stop could not be confirmed.'
                 log.exception("task %s: could not stop executor", task.id)
-        await self.tell_owner(f"【任务作废】「{task.title}」：{reason}。执行者 {task.executor} 已停止，管理者须重新派发带探针的新任务。", task)
-        text = (f"[task voided] {task.brief()}\nReason: {reason}. The executor was stopped. "
+        await self.tell_owner(f"【任务作废】「{task.title}」：{reason}。执行者 {task.executor}；"
+                              + ('未停止该角色，其他任务保留。' if action.startswith('Executor was NOT') else '停止范围及确认见任务事件。'), task)
+        task.log('stop_action', action)
+        task.save(self.store)
+        text = (f"[task voided] {task.brief()}\nReason: {reason}. {action} "
                 "Re-dispatch the work as a new task and have its executor register a probe right away (task_probe).")
         for to in dict.fromkeys((self.god(Role.AZATHOTH), task.manager)):
             await self.tell(to, text, task)
@@ -563,10 +700,13 @@ class Discipline:
             return self.view(task.id)
         if method == "task_create":
             return await self.create(caller, p)
+        if method == 'task_started':
+            return await self.started(caller, p['task_id'], p.get('turn_id', ''))
         if method == "task_probe":
             return await self.set_probe(caller, p["task_id"], p["command"])
         if method == "task_extend":
-            return await self.extend(caller, p["task_id"], p.get("deadline"), str(p.get("reason", "")))
+            return await self.extend(caller, p["task_id"], p.get("deadline"), str(p.get("reason", "")),
+                                     evidence=p.get('evidence', ''), expected_completion=p.get('expected_completion'))
         if method == "task_block":
             return await self.block(caller, p["task_id"], p.get("question", ""))
         if method == "task_submit":
@@ -578,10 +718,10 @@ class Discipline:
         if method == "task_extension":
             result = await self.decide_extension(caller, p["task_id"], bool(p["approve"]), str(p.get("reason", "")))
         elif method in ("task_unblock", "task_replace"):
-            if role != Role.AZATHOTH:
+            if role != Role.AZATHOTH and not (method == 'task_replace' and caller == self.get(p['task_id']).manager and p.get('executor')):
                 raise Denied(f"{method} is azathoth's")
             result = await (self.resume(caller, p["task_id"], str(p.get("note", ""))) if method == "task_unblock"
-                            else self.replace(caller, p["task_id"], str(p.get("reason", ""))))
+                            else self.replace(caller, p["task_id"], str(p.get("reason", "")), p.get('executor')))
         else:
             raise Denied(f"unknown task call {method}")
         if role == Role.AZATHOTH:

@@ -21,6 +21,8 @@ class Galaxy:
 
     async def rpc(self, method, timeout=30, **p):
         self.calls.append((method, p))
+        if method == 'agent_stopped':
+            return {'agent_id': p['agent_id'], 'stopped': True}
         return {"code": 0, "stdout": str(self.value), "stderr": ""}
 
     async def send(self, frame):
@@ -71,6 +73,90 @@ class Discipline(unittest.IsolatedAsyncioTestCase):
         self.galaxy.value = value
         return await self.call("old_a", "task_probe", task_id=self.tid, command=command)
 
+    async def test_queued_assignment_is_bounded_without_false_manager_stop(self):
+        await self.checkpoint()
+        self.assertEqual(self.task()['state'], 'active')
+        self.assertIsNone(self.task()['data']['execution_started_at'])
+        self.assertTrue(any('dispatch waiting' in m['text'] for m in self.inbox('shub')))
+        r = await self.call('azathoth', 'task_create', executor='shub', title='queued report',
+                            text='report', acceptance='facts', deadline=20)
+        task = self.d.get(r['task_id'])
+        task.deadline = time.time() - 1
+        task.data['next_check'] = time.time() - 1
+        task.save(self.t.store)
+        await self.d.sweep()
+        self.assertEqual(self.t.store.task(task.id)['state'], 'failed')
+        self.assertEqual(self.t.store.agent('shub')['desired'], 'running')
+        self.assertTrue(any('NOT stopped' in m['text'] for m in self.inbox('shub')))
+
+    async def test_flat_overdue_extension_refresh_and_escalation(self):
+        import datetime
+        await self.probe('10')
+        await self.checkpoint('10')
+        task = self.d.get(self.tid)
+        original = task.deadline = time.time() - 3 * 3600
+        task.data['original_deadline'] = original
+        task.save(self.t.store)
+        history = list(task.samples)
+        eta = (datetime.datetime.now() + datetime.timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M')
+        async def request(who='old_a'):
+            return await self.call(who, 'task_extend', task_id=self.tid, deadline=5,
+                                   reason='existing bounded computation', evidence='PID 12, command aggregate, out.json',
+                                   expected_completion=eta)
+        r = await request()
+        self.assertEqual(r['approver'], 'shub')
+        before = time.time()
+        await self.call('shub', 'task_extension', task_id=self.tid, approve=True, reason='verified process')
+        self.assertGreater(self.task()['deadline'], before)
+        self.assertEqual(self.task()['data']['original_deadline'], original)
+        self.assertEqual(self.task()['data']['samples'], history)
+        self.assertEqual(self.task()['data']['misses'], 0)
+        self.assertGreater(self.task()['data']['next_check'], before)
+        self.assertTrue(all(m['state'] == 'cancelled' for m in self.inbox('old_a') if m['kind'] == 'checkpoint'))
+        self.assertEqual((await request())['approver'], 'azathoth')
+        await self.call('azathoth', 'task_extension', task_id=self.tid, approve=True, reason='verified')
+        self.assertEqual((await request())['approver'], 'owner')
+
+    async def test_expired_approval_does_not_grant_or_keep_pending(self):
+        await self.probe('1')
+        await self.checkpoint('2')
+        await self.call('old_a', 'task_extend', task_id=self.tid, deadline=5, reason='more verified rows')
+        task = self.d.get(self.tid)
+        deadline = task.deadline
+        task.extensions[-1]['until'] = time.time() - 1
+        task.save(self.t.store)
+        r = await self.call('shub', 'task_extension', task_id=self.tid, approve=True, reason='late')
+        self.assertEqual(r['state'], 'denied')
+        self.assertEqual(self.task()['deadline'], deadline)
+        self.assertFalse(any(e['state'] == 'pending' for e in self.task()['data']['extensions']))
+
+    async def test_manager_on_behalf_cannot_approve_own_request(self):
+        await self.probe('1')
+        await self.checkpoint('2')
+        r = await self.call('shub', 'task_extend', task_id=self.tid, deadline=5, reason='verified worker work')
+        self.assertEqual(r['approver'], 'azathoth')
+        with self.assertRaises(Denied):
+            await self.call('shub', 'task_extension', task_id=self.tid, approve=True, reason='self')
+
+    async def test_existing_producer_reassignment_and_qa_result_routing(self):
+        self.t.store.upsert_agent('old_b', 'b', Role.OLD_ONE, 'g1', 'shub', {'task': 'other history'})
+        with self.assertRaisesRegex(Denied, 'stop and settle'):
+            await self.call('shub', 'task_replace', task_id=self.tid, executor='old_b', reason='handover')
+        await self.call('shub', 'stop', agent_id='old_a')
+        original = self.task()['deadline']
+        await self.call('shub', 'task_replace', task_id=self.tid, executor='old_b', reason='saved producer output')
+        self.assertEqual(self.task()['executor'], 'old_b')
+        self.assertEqual(self.task()['deadline'], original)
+        await self.call('old_b', 'task_submit', task_id=self.tid, evidence='out.json exit0 hash123')
+        self.assertTrue(any('pending QA' in m['text'] and 'hash123' in m['text'] for m in self.inbox('shub')))
+        with self.assertRaises(ValueError):
+            await self.call('shub', 'task_replace', task_id=self.tid, executor='old_b', reason='during review')
+        await self.call('yog', 'task_verdict', task_id=self.tid, passed=False, reason='need mapping')
+        self.assertTrue(any('[rejected]' in m['text'] for m in self.inbox('old_b')))
+        await self.call('old_b', 'task_submit', task_id=self.tid, evidence='mapping verified')
+        await self.call('yog', 'task_verdict', task_id=self.tid, passed=True, reason='complete')
+        self.assertTrue(any('[accepted]' in m['text'] for m in self.inbox('azathoth')))
+
     # contract
 
     async def test_contract_validation(self):
@@ -102,6 +188,9 @@ class Discipline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((task["executor"], task["manager"]), (r["id"], "shub"))
         self.assertEqual(self.t.store.agent(r["id"])["spec"]["task_id"], task["id"])
         # Replacement: a new old_one takes over the existing task, which keeps its clock.
+        with self.assertRaisesRegex(Denied, "stop and settle"):
+            await self.call("shub", "spawn", name="blocked", galaxy_id="g1", task="t", skill="s", task_id=task["id"])
+        await self.call("shub", "stop", agent_id=r["id"])
         r2 = await self.call("shub", "spawn", name="w2", galaxy_id="g1", task="t", skill="s", task_id=task["id"])
         self.assertEqual(self.t.store.task(task["id"])["executor"], r2["id"])
         self.assertEqual(self.t.store.task(task["id"])["deadline"], task["deadline"])
@@ -119,6 +208,7 @@ class Discipline(unittest.IsolatedAsyncioTestCase):
     # probe and the first checkpoint
 
     async def test_void_on_missing_probe(self):
+        await self.call("old_a", "task_started", task_id=self.tid, turn_id="actual-turn")
         await self.checkpoint()
         t = self.task()
         self.assertEqual(t["state"], "failed")

@@ -153,6 +153,9 @@ class Galaxy:
         elif frame.get("type") == "rpc" and frame["method"] == "read_file":
             # The owner previews a file an agent produced; read as this galaxy's OS user.
             return await asyncio.to_thread(read_file, **frame.get("params", {}))
+        elif frame.get('type') == 'rpc' and frame['method'] == 'agent_stopped':
+            aid = frame['params']['agent_id']
+            return {'agent_id': aid, 'stopped': aid not in self.procs}
 
     async def reconcile(self, wanted: list[dict]) -> None:
         wanted_ids = {a["id"] for a in wanted}
@@ -171,12 +174,15 @@ class Galaxy:
                 p.spec = spec
 
     async def stop(self, aid: str) -> None:
-        p = self.procs.pop(aid, None)
+        p = self.procs.get(aid)
         if not p:
             return
         if p.task:
             p.task.cancel()
+            await asyncio.gather(p.task, return_exceptions=True)
         await self._kill(p)
+        if self.procs.get(aid) is p:
+            self.procs.pop(aid)
 
     async def _kill(self, p: Proc) -> None:
         if p.process and p.process.returncode is None:

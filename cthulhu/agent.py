@@ -425,9 +425,24 @@ class Agent:
             recovery.update(thread=thread, terminal=False)
         live: list[str] = []
         last_activity_at = None
+        start_acknowledged = False
+
+        def confirm_start(turn_id):
+            nonlocal start_acknowledged
+            if not track or not self.current_task or start_acknowledged:
+                return
+            start_acknowledged = True
+            async def acknowledge_start(task_id=self.current_task):
+                try:
+                    await self.link.call('task_started', task_id=task_id, turn_id=turn_id)
+                except Exception:
+                    log.info('task-start acknowledgement not accepted for %s', task_id)
+            asyncio.create_task(acknowledge_start())
 
         def events(method: str, p: dict) -> None:
             nonlocal last_activity_at
+            if method in ('item/started', 'item/completed'):
+                confirm_start(p.get('turnId', ''))  # Native Claude output/tool receipt, not local query construction.
             if recovery is not None and method in ("item/started", "item/completed"):
                 recovery["events"].append({"event": method, "item": p.get("item")})
             if method == "item/completed":
@@ -444,6 +459,9 @@ class Agent:
         def started(turn_id: str) -> None:
             if track:
                 self.active = (rt, thread, turn_id)
+                from .claude_runtime import ClaudeRuntime
+                if not isinstance(rt, ClaudeRuntime):
+                    confirm_start(turn_id)  # Codex turn/start is an acknowledged native RPC.
                 # Inputs may have arrived before turn/start or during recovery settlement.
                 for m in sorted(self.queue, key=lambda m: (-m['priority'], m['created_at'])):
                     asyncio.create_task(self.steer(m))
@@ -655,7 +673,7 @@ class Agent:
         self.wake.set()
         if m.get("priority", 0) >= URGENT and (not self.draining or m.get("sender") == OWNER):
             asyncio.create_task(self.preempt())
-        elif self.batch is not None and m.get("kind", "message") == "message" and not self.draining:
+        elif self.batch is not None and m.get("kind", "message") in ('message', 'checkpoint', 'task_control') and not self.draining:
             asyncio.create_task(self.steer(m))
 
     async def steer(self, m: dict) -> bool:
@@ -666,18 +684,30 @@ class Agent:
             # Exact task ownership; never inject into owner chats, scoped or background runs.
             if (not batch or not active or self.draining or m not in self.queue
                     or getattr(self, 'reporting', None) is not None
-                    or m.get('kind', 'message') != 'message' or m['sender'] == OWNER
+                    or m.get('kind', 'message') not in ('message', 'checkpoint', 'task_control') or m['sender'] == OWNER
                     or m.get('task_id') != self.current_task
-                    or any(b.get('kind', 'message') != 'message' or b['sender'] == OWNER
+                    or any(b.get('kind', 'message') not in ('message', 'checkpoint', 'task_control', 'discipline') or b['sender'] == OWNER
+                           or (b.get('kind') == 'discipline' and b['sender'] != 'temple')
                            or b.get('task_id') != self.current_task for b in batch)
-                    or active[1] not in self.threads.values() or not hasattr(active[0], 'steer')):
+                    or active[1] not in self.threads.values()
+                    or not (hasattr(active[0], 'steer') or hasattr(active[0], 'supply_task_context'))):
                 return False
             rt, thread, turn = active
-            if not await rt.steer(thread, turn, self.render([m])):
+            from .claude_runtime import ClaudeRuntime
+            if isinstance(rt, ClaudeRuntime):
+                if m.get('kind') not in ('checkpoint', 'task_control') or m['sender'] != 'temple':
+                    return False
+                accepted = await rt.supply_task_context(thread, turn, self.render([m]), valid=lambda: m in self.queue and not self.draining)
+            else:
+                accepted = await rt.steer(thread, turn, self.render([m]))
+            if not accepted:
                 return False
+            if m not in self.queue:
+                return False  # An approved refresh retired it while the native ACK was settling.
             self.queue.remove(m)
             batch.append(m)          # marked handled with the batch it joined
-            log.info("%s steered %s into the running turn", self.name, m["id"])
+            log.info("%s supplied %s through %s", self.name, m["id"],
+                     "native tool boundary" if isinstance(rt, ClaudeRuntime) else "native turn/steer")
             return True
 
     def drain_status(self):
@@ -691,6 +721,9 @@ class Agent:
         t = frame.get("type")
         if t == "message":
             self.enqueue(frame["message"])
+        elif t == 'task_reminders_refresh':
+            ids = set(frame['ids'])
+            self.queue = [m for m in self.queue if m['id'] not in ids or m.get('kind') != 'checkpoint']
         elif t == "runtime":
             # Owner changed this role's backend; applied before the next turn.
             self.pending_runtime = frame["config"] or self.default_runtime

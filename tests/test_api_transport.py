@@ -30,6 +30,138 @@ def no_signals():
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_claude_checkpoint_reaches_model_after_active_tool_without_interrupt(self):
+        from cthulhu.claude_runtime import ClaudeRuntime
+        from cthulhu.galaxy_api_runtime import GalaxyAPITransport
+        model = await self.enable_claude()
+        self.rt = ClaudeRuntime(self.tmp.name, model=model, api_transport=GalaxyAPITransport(
+            link=self.caller, provider='ali', state_dir=Path(self.tmp.name), model=model, protocol='messages'))
+        tool_started, release = asyncio.Event(), asyncio.Event()
+        effects = []
+        async def handler(name, args):
+            tool_started.set()
+            await release.wait()
+            effects.append(args['value'])
+            return 'already completed effect'
+        thread = await self.rt.start_thread('Use echo once, then reply.', [tool('echo', 'fixture', {'value': {'type': 'string'}})], handler)
+        running = asyncio.create_task(self.rt.run_turn(thread, 'Use echo exactly once.', timeout=30))
+        injecting = None
+        try:
+            await asyncio.wait_for(tool_started.wait(), 10)
+            marker = '[checkpoint 1] Return actual results or explained evidence-backed extension.'
+            injecting = asyncio.create_task(self.rt.supply_task_context(thread, self.rt.turn_ids[thread], marker))
+            await asyncio.sleep(.02)
+            self.assertFalse(injecting.done())
+            self.assertEqual(effects, [])  # Waiting did not kill or replay the healthy command.
+            release.set()
+            self.assertTrue(await asyncio.wait_for(injecting, 10))
+            self.assertEqual((await running).status, 'completed')
+            self.assertEqual(len(effects), 1)
+            self.assertIn(marker, json.dumps(self.requests[-1]['messages']))
+            print('CLAUDE_CHECKPOINT_SERVER native_hook/model_context/one_effect/no_interrupt', flush=True)
+        finally:
+            release.set()
+            for task in (running, injecting):
+                if task and not task.done():
+                    task.cancel()
+            await asyncio.gather(*(t for t in (running, injecting) if t), return_exceptions=True)
+
+    async def test_owner_loop_through_real_agent_claude_queue_and_task_server(self):
+        import datetime
+        from cthulhu.gods import OldOne
+        from cthulhu.claude_runtime import ClaudeRuntime
+        from cthulhu.galaxy_api_runtime import GalaxyAPITransport
+        from cthulhu.protocol import agent_token
+        from cthulhu.galaxy import run_probe
+        model = await self.enable_claude()
+        async def local_galaxy_frame(frame):
+            if frame.get('type') == 'rpc' and frame['method'] == 'probe':
+                return await run_probe(frame['params']['command'], self.tmp.name, 5)
+        self.caller.on_frame = local_galaxy_frame
+        clients = {}
+        async def ignore(frame):
+            pass
+        for aid, role, parent in [('manager', 'shub', None), ('reviewer', 'yog', None), ('worker', 'old_one', 'manager')]:
+            self.temple.store.upsert_agent(aid, aid, role, 'central', parent_id=parent)
+            link = Link(self.caller.url, {'kind': 'agent', 'id': aid,
+                        'token': agent_token('test-secret', aid, 1),
+                        'capabilities': ['galaxy_api_v1', 'galaxy_api_claude_v1']}, ignore, ignore)
+            self.links.append(asyncio.create_task(link.run()))
+            await asyncio.wait_for(link.connected.wait(), 3)
+            clients[aid] = link
+        self.rt = ClaudeRuntime(self.tmp.name, model=model, api_transport=GalaxyAPITransport(
+            link=clients['worker'], provider='ali', state_dir=Path(self.tmp.name) / 'api', model=model, protocol='messages'))
+        with patch('cthulhu.agent.Link', return_value=clients['worker']), patch('cthulhu.backends.build', return_value=self.rt):
+            actor = OldOne('unused', {'id': 'worker', 'name': 'worker', 'token': 'unused', 'spec': {}},
+                           'unused', self.tmp.name, Path(self.tmp.name),
+                           runtime={'backend': 'claude', 'provider': 'ali', 'model': model})
+        clients['worker'].on_frame = actor._on_frame
+        original_tools, original_call = actor.tools, actor.call_tool
+        actor.tools = lambda: original_tools() + [tool('echo', 'bounded real result', {'value': {'type': 'string'}}, ['value'])]
+        started, release = asyncio.Event(), asyncio.Event()
+        effects = []
+        output = Path(self.tmp.name) / 'result.json'
+        output.write_text('[]')
+        async def call_tool(name, args):
+            if name != 'echo':
+                return await original_call(name, args)
+            await original_call('task_probe', {'task_id': actor.current_task, 'command': f'stat -c %s {output}'})
+            started.set()
+            await release.wait()
+            output.write_text('["verified bounded result"]')
+            effects.append('once')
+            return 'verified bounded result'
+        actor.call_tool = call_tool
+        loop = asyncio.create_task(actor.loop())
+        try:
+            made = await clients['manager'].call('task_create', executor='worker', title='bounded result',
+                                                text='Use echo once, then reply.', acceptance='readable result', deadline='20')
+            tid = made['task_id']
+            await asyncio.wait_for(started.wait(), 10)
+            task = self.temple.discipline.get(tid)
+            self.assertIsNotNone(task.data['execution_started_at'])
+            task.data['next_check'] = __import__('time').time() - 1
+            task.save(self.temple.store)
+            await self.temple.discipline.sweep()
+            for _ in range(100):
+                if self.rt.boundary_input:
+                    break
+                await asyncio.sleep(.02)
+            self.assertTrue(self.rt.boundary_input)
+            self.assertEqual(effects, [])
+            reminder = next(m for m in self.temple.store.messages(task_id=tid) if m['kind'] == 'checkpoint')
+            self.assertEqual(reminder['priority'], 9)
+            release.set()
+            for _ in range(200):
+                if self.temple.store.message(reminder['id'])['state'] == 'handled':
+                    break
+                await asyncio.sleep(.02)
+            self.assertEqual(self.temple.store.message(reminder['id'])['state'], 'handled')
+            self.assertEqual(effects, ['once'])
+            self.assertIn('request task_extend', json.dumps(self.requests[-1]['messages']))
+            eta = (datetime.datetime.now() + datetime.timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M')
+            req = await clients['worker'].call('task_extend', task_id=tid, deadline='5', reason='quiet verification',
+                                               evidence=f'{output} exists; bounded computation exit0', expected_completion=eta)
+            self.assertEqual(req['approver'], 'manager')
+            await clients['manager'].call('task_extension', task_id=tid, approve=True, reason='evidence checked')
+            task = self.temple.discipline.get(tid)
+            self.assertEqual(task.data['misses'], 0)
+            self.assertGreater(task.data['next_check'], __import__('time').time())
+            await clients['worker'].call('task_submit', task_id=tid, evidence=f'{output}: exit0/one effect; pending QA')
+            manager_note = next(m for m in self.temple.store.messages(task_id=tid)
+                                if m['receiver'] == 'manager' and 'pending QA' in m['text'])
+            self.assertIn(str(output), manager_note['text'])
+            await clients['reviewer'].call('task_verdict', task_id=tid, passed=False, reason='missing mapping')
+            rejected = next(m for m in self.temple.store.messages(task_id=tid) if '[rejected]' in m['text'] and m['receiver'] == 'worker')
+            self.assertEqual(self.temple.store.task(tid)['executor'], 'worker')
+            self.assertEqual(self.temple.store.task(tid)['state'], 'active')
+            self.assertIn('missing mapping', rejected['text'])
+            print('OWNER_LOOP_SERVER priority9/native_boundary/one_effect/flat_request/approval_refresh/manager_evidence/current_executor_reject', flush=True)
+        finally:
+            release.set()
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+
     async def serve(self, app):
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))

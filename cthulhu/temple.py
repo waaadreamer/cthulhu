@@ -308,7 +308,7 @@ class Temple:
             return {"id": msg["id"], "task_id": task_id}
         if method == "handled":
             msg = self.store.message(p["id"])
-            if msg and msg["receiver"] == conn.id:
+            if msg and msg["receiver"] == conn.id and msg['state'] != 'cancelled':
                 self.store.mark(p["id"], "handled")
             return True
         if method == "directory":
@@ -454,6 +454,8 @@ class Temple:
         if not p.get("task", "").strip():
             raise ValueError("an old_one needs a task")
         aid = new_id("old")
+        if p.get('task_id'):
+            await self.discipline.prepare_handover(creator, p['task_id'])
         task = self.discipline.bind_spawn(creator, p, aid)
         spec = {"task": p["task"], "skill": p.get("skill", ""), "model": p.get("model"),
                 "task_id": task.id, "acceptance": task.acceptance, "deadline": task.deadline,
@@ -512,6 +514,12 @@ class Temple:
         await self.drop_agent_conn(a["id"])
         self.status.pop(a["id"], None)
         await self.sync_galaxy(a["galaxy_id"])     # the galaxy kills its process tree
+        for row in self.store.q("SELECT id FROM tasks WHERE executor=? AND state IN ('active','submitted','blocked_on_owner')", (agent_id,)):
+            task = self.discipline.get(row['id'])
+            task.log('executor_stopped', '执行者已撤权，未完成合同待实名改派或结束；原截止保留', by=by)
+            task.save(self.store)
+            await self.discipline.tell(self.discipline.superior(task), f'[executor stopped] {task.brief()}\n'
+                                       'Preserve artifacts and reassign or end this contract; other work is not canceled.', task)
         await self.broadcast({"type": "directory", **self.directory()})
         return True
 

@@ -41,12 +41,12 @@ TASK = {
                    ["executor", "title", "text", "acceptance"]),
     "probe": tool("task_probe", "登记本任务的进度探针：一条 shell 命令，输出单个数字，数字增长即进展（如 `wc -l < out.jsonl`、"
                   "`stat -c %s report.md`、`git -C repo rev-list --count HEAD`）。由所在星系每个检查点执行，是唯一的进度证据；"
-                  "第一个检查点前没有有效探针，任务作废、执行者被停止。",
+                  "实际执行后的首检查点前没有有效探针，任务作废、执行者被停止。",
                   {"task_id": STR, "command": STR}, ["task_id", "command"]),
     "extend": tool("task_extend", "申请延期。第 1 次由直接上级批准，第 2 次阿撒托斯，第 3 次只能主人；延长不超过原时长；"
-                   "上个检查点没有进展的申请被程序直接拒绝。",
-                   {"task_id": STR, "deadline": {"type": "string", "description": "在当前截止上延长的分钟数，或 'YYYY-MM-DD HH:MM'"},
-                    "reason": STR}, ["task_id", "deadline", "reason"]),
+                   "静默工作须提供命令/进程/产物证据与预计完成；manager可代申请但不能自批。",
+                   {"task_id": STR, "deadline": {"type": "string", "description": "从现在或截止（取较晚）延长的分钟数，或 'YYYY-MM-DD HH:MM'"},
+                    "reason": STR, "evidence": STR, "expected_completion": STR}, ["task_id", "deadline", "reason"]),
     "block": tool("task_block", "任务卡在只有主人能做的决定上：暂停计时并立即通知主人。", {"task_id": STR, "question": STR},
                   ["task_id", "question"]),
     "submit": tool("task_submit", "提交验收：附上可核验的证据（产物路径、命令输出、提交号）。证据提交后冻结。",
@@ -58,7 +58,7 @@ TASK = {
     "probe_verdict": tool("task_probe_verdict", "判断探针是否真实度量了朝验收标准的进展。判为无效则任务作废。",
                           {"task_id": STR, "ok": BOOL, "reason": STR}, ["task_id", "ok", "reason"]),
     "unblock": tool("task_unblock", "解除任务的主人阻塞并恢复计时（程序抄送主人）。", {"task_id": STR, "note": STR}, ["task_id", "note"]),
-    "replace": tool("task_replace", "命令管理者更换某任务的执行者（程序抄送主人）。", {"task_id": STR, "reason": STR}, ["task_id", "reason"]),
+    "replace": tool("task_replace", "命令换人；manager可填executor绑定已有worker，须先清算原执行者。", {"task_id": STR, "reason": STR, "executor": STR}, ["task_id", "reason"]),
 }
 EXECUTOR_TOOLS = [TASK[k] for k in ("get", "probe", "extend", "block", "submit")]
 
@@ -388,6 +388,12 @@ SPAWN_FIELDS = {
 class Manager:
     """Mixin for shub and ghroth: they take tasks from azathoth and run their own old_ones."""
 
+    def take_batch(self, ready=None):
+        # Keep automatically inherited task IDs unambiguous when several tasks wake Shub together.
+        candidates = self.queue if ready is None else ready
+        first = min(candidates, key=lambda m: (-m['priority'], m['created_at']))
+        return super().take_batch([m for m in candidates if m.get('task_id') == first.get('task_id')])
+
     def send_tool(self, extra: dict | None = None) -> dict:
         return super().send_tool({
             "task_id": {"type": "string", "description": "这条消息所属的任务 ID"},
@@ -400,7 +406,7 @@ class Manager:
             tool("temple_stop", "终止你自己的一个旧日支配者。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_restart", "重启你自己的一个旧日支配者（保留其上下文）。", {"agent_id": STR}, ["agent_id"]),
             tool("temple_delete", "删除一个已终止的旧日支配者（历史保留）。", {"agent_id": STR}, ["agent_id"]),
-            *(TASK[k] for k in ("create", "extension")), *EXECUTOR_TOOLS,
+            *(TASK[k] for k in ("create", "extension", "replace")), *EXECUTOR_TOOLS,
         ]
 
     async def send(self, to, text, priority=0, kind="message", **task):
@@ -433,12 +439,6 @@ class Shub(Manager, MemoryAgent):
         text = await self.roster()
         self.roster_seen = text
         return text
-
-    def take_batch(self, ready=None):
-        # Keep automatically inherited task IDs unambiguous when several tasks wake Shub together.
-        candidates = self.queue if ready is None else ready
-        first = min(candidates, key=lambda m: (-m['priority'], m['created_at']))
-        return super().take_batch([m for m in candidates if m.get('task_id') == first.get('task_id')])
 
     async def receive(self, batch: list[dict]) -> None:
         # The roster is part of shub's permanent context; refresh it whenever it changed.
