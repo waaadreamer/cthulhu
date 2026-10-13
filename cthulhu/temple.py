@@ -198,6 +198,7 @@ class Temple:
                 "online": a["id"] in self.agents, "state": live.get("state", "offline"),
                 "current": live.get("current"), "context_fill": live.get("context_fill"),
                 "runtime": live.get("runtime"), "admission": live.get("admission"),
+                "stopped_by": (self.store.setting("force_stopped") or {}).get(a["id"]) if a["desired"] != "running" else None,
                 "created_at": a["created_at"], "updated_at": a["updated_at"]}
 
     def directory(self) -> dict:
@@ -226,8 +227,8 @@ class Temple:
         if receiver_role is None:
             raise Denied(f"unknown agent {receiver}")
         target = self.store.agent(receiver)
-        if target["desired"] != "running":
-            raise Denied(f"{target['name']} is stopped")
+        if target and target["desired"] != "running":
+            raise Denied(f"{target['name']} is stopped; messages are rejected until it is resumed")
         if sender == SYSTEM:
             pass                                 # the temple's own notices (deploy results)
         elif sender_role == Role.GHROTH and receiver_role == Role.AZATHOTH and kind == "deploy_request":
@@ -301,6 +302,8 @@ class Temple:
     # agent calls: (conn, params) -> result
 
     async def handle_agent_call(self, conn: Conn, method: str, p: dict) -> Any:
+        if self.store.agent(conn.id)["desired"] != "running":
+            raise Denied("this agent has been stopped")
         if method.startswith('channel_'):
             from .feishu import channel_call
             return await channel_call(self, conn, method, p)
@@ -498,19 +501,58 @@ class Temple:
         await self.broadcast({"type": "directory", **self.directory()})
         return {"id": a["id"], "name": a["name"], "galaxy_id": galaxy["id"]}
 
-    async def stop(self, p: dict, _by: str) -> bool:
+    async def stop(self, p: dict, by: str) -> bool:
+        return await self.halt(self._managed(p["agent_id"])["id"], by)
+
+    async def restart(self, p: dict, by: str) -> bool:
         a = self._managed(p["agent_id"])
+        if a["id"] in (self.store.setting("force_stopped") or {}):
+            raise Denied(f"{a['name']} was force-stopped by the owner; only the owner can resume it")
+        return await self.relaunch(a["id"], by)
+
+    # Shub's old_one stop/restart, and the owner's / maintenance force-stop and resume of any agent.
+
+    async def halt(self, agent_id: str, by: str, force: bool = False) -> bool:
+        """Stop an agent now: revoke it (persisted), abort its turn, cancel its pending work, kill its processes.
+        A force stop (owner / maintenance) can only be lifted by the owner or maintenance."""
+        a = self.store.agent(agent_id)
+        if not a:
+            raise Denied(f"unknown agent {agent_id}")
+        log.warning("%s stopped by %s", a["name"], by)
+        if force:
+            self.store.set_setting("force_stopped", (self.store.setting("force_stopped") or {}) | {a["id"]: by})
+        # Revoked first, so nothing routed from here on reaches it and it cannot reconnect.
         self.store.set_agent(a["id"], desired="stopped", epoch=a["epoch"] + 1)
+        conn = self.agents.get(a["id"])
+        if conn:
+            with contextlib.suppress(Exception):
+                await conn.rpc("halt", timeout=3)
+        # Work handed to it before the stop does not run on resume.
+        for m in self.store.pending_for(a["id"]):
+            self.store.mark(m["id"], "cancelled")
+        for turn in self.store.q("SELECT id FROM chat_turns WHERE agent_id=? AND status IN ('queued','running')", (a["id"],)):
+            self.store.update_turn(turn["id"], status="interrupted", reply=f"已被强制停止（{by}）")
+            await self.broadcast({"type": "chat", "turn": self.store.turn(turn["id"])})
         await self.drop_agent_conn(a["id"])
-        await self.sync_galaxy(a["galaxy_id"])
+        self.status.pop(a["id"], None)
+        await self.sync_galaxy(a["galaxy_id"])     # the galaxy kills its process tree
         await self.broadcast({"type": "directory", **self.directory()})
         return True
 
-    async def restart(self, p: dict, _by: str) -> bool:
-        a = self._managed(p["agent_id"])
+    async def relaunch(self, agent_id: str, by: str, only_stopped: bool = False) -> bool:
+        a = self.store.agent(agent_id)
+        if not a:
+            raise Denied(f"unknown agent {agent_id}")
+        if only_stopped and a["desired"] == "running":
+            return False
+        log.warning("%s (re)started by %s", a["name"], by)
+        forced = self.store.setting("force_stopped") or {}
+        if forced.pop(a["id"], None):
+            self.store.set_setting("force_stopped", forced)
         self.store.set_agent(a["id"], desired="running", epoch=a["epoch"] + 1)
         await self.drop_agent_conn(a["id"])
         await self.sync_galaxy(a["galaxy_id"])
+        await self.broadcast({"type": "directory", **self.directory()})
         return True
 
     def _managed(self, agent_id: str) -> dict:
@@ -632,6 +674,9 @@ class Temple:
             log.exception("could not report deploy result")
 
     async def owner_send(self, to: str, text: str) -> dict:
+        target = self.store.agent(to)
+        if target and target["desired"] != "running":
+            raise Denied(f"{target['name']} is stopped; resume it first")
         mid = new_id("msg")
         self.store.add_turn(mid, to, text)
         msg = await self.route(OWNER, to, text, kind="chat", priority=OWNER_PRIORITY, message_id=mid)
@@ -669,8 +714,8 @@ class Temple:
                 task = asyncio.create_task(self._on_frame(conn, frame))
                 conn.tasks.add(task)
                 task.add_done_callback(conn.tasks.discard)
-        except WebSocketDisconnect:
-            pass
+        except (WebSocketDisconnect, RuntimeError):
+            pass                                 # RuntimeError: we closed it ourselves (revoked agent)
         finally:
             await self._disconnect(conn)
 
@@ -779,6 +824,12 @@ class Temple:
             if not galaxy or "galaxy_api_v1" not in galaxy.capabilities:
                 raise ValueError("galaxy protocol upgrade required")
             return await galaxy.rpc("api_canary", timeout=1200, provider=p.get("provider", "ali"))
+        if method in ("maintenance_stop", "maintenance_resume"):
+            if method == "maintenance_stop":
+                await self.halt(p["agent_id"], "maintenance", force=True)
+            else:
+                await self.relaunch(p["agent_id"], "maintenance", only_stopped=True)
+            return self.public_agent(self.store.agent(p["agent_id"]))
         if method == "maintenance_drain":
             return await self.maintenance_state(p["galaxy"], p.get("enabled"))
         if method in ("api_catalog", "api_open", "api_next", "api_cancel"):
@@ -916,6 +967,12 @@ class Temple:
                 return JSONResponse(await self.owner_send(body["to"], body["text"]))
             if path == "stop":
                 return JSONResponse({"ok": await self.owner_stop(body["agent_id"])})
+            if path in ("force_stop", "resume"):
+                if path == "force_stop":
+                    await self.halt(body["agent_id"], "主人", force=True)
+                else:
+                    await self.relaunch(body["agent_id"], "主人", only_stopped=True)
+                return JSONResponse(self.public_agent(self.store.agent(body["agent_id"])))
             if path == "messages":
                 before = float(q["before"]) if q.get("before") else None
                 return JSONResponse(self.store.messages(q.get("agent_id") or None,

@@ -6,9 +6,11 @@ backend would implement the same methods.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import signal
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -106,12 +108,17 @@ class CodexRuntime:
         await self._write({"method": "initialized"})
 
     async def close(self) -> None:
+        # app-server runs in its own session; signal the group so running commands go down with it.
         if self.proc and self.proc.returncode is None:
-            self.proc.terminate()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.proc.pid, signal.SIGTERM)
             try:
                 await asyncio.wait_for(self.proc.wait(), 5)
             except asyncio.TimeoutError:
-                self.proc.kill()
+                pass
+        if self.proc:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.proc.pid, signal.SIGKILL)
 
     @property
     def alive(self) -> bool:

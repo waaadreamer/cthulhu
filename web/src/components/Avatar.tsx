@@ -17,6 +17,7 @@ export function StatusDot({ agent, className = '' }: { agent: Agent; className?:
 }
 
 export function stateOf(a: Agent) {
+  if (a.desired === 'stopped' && a.stopped_by) return { label: '已强制停止', dot: 'bg-rose-600', chip: 'bg-rose-500/15 text-rose-300', pulse: false }
   if (a.desired === 'stopped') return { label: '已终止', dot: 'bg-slate-600', chip: 'bg-slate-500/15 text-slate-400', pulse: false }
   if (!a.online) {
     if (a.state === 'crashed') return { label: '崩溃重启中', dot: 'bg-rose-500', chip: 'bg-rose-500/15 text-rose-300', pulse: true }

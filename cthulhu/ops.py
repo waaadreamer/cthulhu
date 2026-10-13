@@ -20,6 +20,15 @@ async def connect(config_path):
     return link, task
 
 
+async def call(config_path, method, timeout=30, **params):
+    link, task = await connect(config_path)
+    try:
+        return await link.call(method, timeout=timeout, **params)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def main(args):
     link, task = await connect(args.config)
     try:

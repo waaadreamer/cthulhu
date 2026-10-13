@@ -135,7 +135,8 @@ export function MessageRow({ m, dir, compact }: { m: Message; dir: Directory; co
         <span className={r ? ROLE_META[r.role].text : 'text-slate-400'}>{r?.name ?? m.receiver}</span>
         {m.priority > 0 && <span className="chip bg-rose-500/15 text-rose-300">优先 {m.priority}</span>}
         <span className="ml-auto shrink-0 text-slate-600">{timeLabel(m.created_at)}</span>
-        {!compact && m.state !== 'handled' && <span className="chip bg-sky-400/15 text-sky-300">{m.state === 'queued' ? '待投递' : '处理中'}</span>}
+        {!compact && m.state !== 'handled' && m.state !== 'cancelled' && <span className="chip bg-sky-400/15 text-sky-300">{m.state === 'queued' ? '待投递' : '处理中'}</span>}
+        {m.state === 'cancelled' && <span className="chip bg-slate-500/15 text-slate-400" title="接收方被强制停止，未处理">已取消</span>}
       </div>
       <p onClick={() => long && setOpen(!open)}
         className={`whitespace-pre-wrap break-words pl-9 text-sm text-slate-300 ${long ? 'cursor-pointer' : ''} ${long && !open ? 'line-clamp-4' : ''}`}>

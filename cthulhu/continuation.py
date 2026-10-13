@@ -69,7 +69,7 @@ class Continuations:
             return bool(r.get('current_task') == task_id and
                         (r.get('state') == 'working' or r.get('active_runs') or r.get('background_busy')))
         active = any(task_active(r) for r in executors)
-        pending = store.q("SELECT id FROM messages WHERE task_id=? AND state!='handled' AND receiver IN "
+        pending = store.q("SELECT id FROM messages WHERE task_id=? AND state NOT IN ('handled','cancelled') AND receiver IN "
                           "(SELECT id FROM agents WHERE role IN ('shub','old_one','ghroth','nyarlathotep')) AND sender NOT IN "
                           "(SELECT id FROM agents WHERE role='yog')", (task_id,))
         # A missing/offline/unknown runtime is not proof that restarting its workload is safe.
@@ -115,7 +115,7 @@ class Continuations:
                 suppressed = 'in_flight'
             elif rec.get('phase') == 'escalated' and rec.get('instruction_id') == instruction:
                 suppressed = 'escalated'
-            elif t.store.q("SELECT id FROM messages WHERE task_id=? AND receiver=? AND state!='handled'", (task_id,target)):
+            elif t.store.q("SELECT id FROM messages WHERE task_id=? AND receiver=? AND state NOT IN ('handled','cancelled')", (task_id,target)):
                 suppressed = 'in_flight'
             if suppressed:
                 return {'suppressed': suppressed, 'id': rec.get('message_id'), 'task_id': task_id}
@@ -172,12 +172,15 @@ class Continuations:
                         continue
                     # Recover reservation-before-route crashes using the exact persisted message ID.
                     if not t.store.message(rec['message_id']):
-                        await t.route(yog_id, target, rec['text'], task_id=task['id'], kind='message', message_id=rec['message_id'])
+                        try:
+                            await t.route(yog_id, target, rec['text'], task_id=task['id'], kind='message', message_id=rec['message_id'])
+                        except Denied:
+                            continue    # recipient force-stopped: nothing is delivered until it is resumed
                     if time.time() >= rec['deadline']:
                         az = t.god(Role.AZATHOTH)
                         if az:
                             mid = 'reminder_escalation_' + rec['message_id']
-                            if not t.store.message(mid):
+                            if not t.store.message(mid) and az['desired'] == 'running':
                                 await t.route(yog_id, az['id'],
                                     f"Reminder {rec['message_id']} has no verified " + ('completed collection' if shub else 'worker response') +
                                     ' after 15 minutes. Coordinate the specific task failure; preserve existing workloads.',

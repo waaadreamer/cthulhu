@@ -11,6 +11,7 @@ import logging
 import time
 
 from .agent import Agent, clip, load_role, summarize_items
+from .protocol import CallFailed
 from .store import estimate_tokens
 from .roles import OWNER, Role
 from .runtime import TurnResult, tool
@@ -597,7 +598,10 @@ class Yog(MemoryAgent):
                 if r2.status != "completed":
                     log.warning("yog follow-up report turn failed: %s", r2.error)
             if must_report and not self.reported:
-                await self.send(self.azathoth_id, self.ghroth_fallback(ghroth))
+                try:
+                    await self.send(self.azathoth_id, self.ghroth_fallback(ghroth))
+                except CallFailed as e:
+                    log.warning("ghroth report not delivered: %s", e)   # e.g. azathoth force-stopped
             self.latest = {"last_patrol": clip(r.text, 1500), "finished_at": time.time()}
             log.info("patrol model result status=%s reported=%s", r.status, self.reported)
             await self.link.call("patrol_log", summary=r.text or r.error or "")
