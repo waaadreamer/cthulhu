@@ -5,6 +5,7 @@ import { Avatar, stateOf } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 import { MessageRow } from './Messages'
 import { Deploy } from './Deploy'
+import { ForceStop } from './ForceStop'
 
 const ROLE_TITLE: Record<string, string> = { azathoth: '意志的化身', shub: '万物之母 · 组织落地', yog: '门与钥匙 · 监督', ghroth: '维护者 · sudo' }
 
@@ -106,7 +107,9 @@ function AgentCard({ agent, galaxies, onClick, wide }: { agent: Agent; galaxies:
           <p className={`text-xs ${m.text}`}>{agent.role === 'old_one' ? m.label : ROLE_TITLE[agent.role]}</p>
         </div>
         <span className={`chip ${st.chip}`}>{st.label}</span>
+        <ForceStop agent={agent} compact />
       </div>
+      {agent.desired === 'stopped' && agent.stopped_by && <p className="mt-2 text-xs text-rose-300/80">由{agent.stopped_by}强制停止 · 拒收消息直至恢复</p>}
       {wide && agent.task && <p className="mt-3 line-clamp-2 text-xs text-slate-400">{agent.task}</p>}
       <div className="mt-3 min-h-[1.25rem] text-xs text-slate-500">
         {agent.state === 'working' && agent.current ? <p className="line-clamp-2 text-amber-200/80">⟳ {agent.current}</p> : <span>{g?.name ?? agent.galaxy_id}{agent.queued > 0 && ` · 队列 ${agent.queued}`}</span>}
@@ -166,6 +169,7 @@ function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; on
             <p className="text-xs text-slate-500">创建于 {ago(agent.created_at)}</p>
             {agent.runtime && <div className="mt-1.5"><RuntimeBadge runtime={agent.runtime} /></div>}
           </div>
+          <ForceStop agent={agent} />
           <button className="btn-icon" onClick={onClose}><X className="h-5 w-5" /></button>
         </header>
         {agent.task && <details className="mx-5 mb-4 shrink-0 rounded-xl border border-white/[0.06] bg-white/[0.03] text-sm text-slate-300">

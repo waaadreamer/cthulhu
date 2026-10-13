@@ -12,10 +12,12 @@ Subclasses decide what goes into permanent vs temporary context.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from contextvars import ContextVar
 import hashlib
 import json
 import logging
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -90,6 +92,7 @@ class Agent:
         self.seen: set[str] = set()
         self.wake = asyncio.Event()
         self.draining = False
+        self.halted = False          # force-stopped by the temple; the galaxy kills this process next
         self.in_batch = False        # handling a batch right now (state alone can read "working" with work only queued)
         self.inflight_runs = 0
         self.state = "starting"
@@ -460,21 +463,43 @@ class Agent:
         await rt.interrupt(thread, turn)
         return True
 
+    async def halt(self) -> bool:
+        """Force-stop: drop queued work, never start another turn, abort the current one and
+        kill the model processes (the galaxy then ends this process)."""
+        self.halted = True
+        self.queue.clear()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.interrupt(), 1)
+        asyncio.create_task(self.backends.close())
+        return True
+
     # loop
 
     async def main(self) -> None:
+        # The galaxy stops agents with SIGTERM; unwind so the finally below closes the model processes.
+        me = asyncio.current_task()
+        with contextlib.suppress(ValueError, NotImplementedError, RuntimeError):
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, me.cancel)
         link = asyncio.create_task(self.link.run())
-        await self.ready.wait()
-        await self.apply_runtime()
-        await self.backends.start()
-        await self.on_ready()
-        workers = [asyncio.create_task(self.loop()), asyncio.create_task(self.background()), link,
-                   asyncio.create_task(self.watchdog())]
-        done, _ = await asyncio.wait(workers, return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            if t.exception():
-                raise t.exception()
-        raise SystemExit(f"{self.name}: {'temple rejected: ' + self.link.fatal if self.link.fatal else 'runtime exited'}")
+        try:
+            # A revoked (stopped) agent is rejected before any welcome: exit rather than wait forever.
+            await asyncio.wait([link, asyncio.create_task(self.ready.wait())], return_when=asyncio.FIRST_COMPLETED)
+            if not self.ready.is_set():
+                raise SystemExit(f"{self.name}: temple rejected: {self.link.fatal}")
+            await self.apply_runtime()
+            await self.backends.start()
+            await self.on_ready()
+            workers = [asyncio.create_task(self.loop()), asyncio.create_task(self.background()), link,
+                       asyncio.create_task(self.watchdog())]
+            done, _ = await asyncio.wait(workers, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                if t.exception():
+                    raise t.exception()
+            raise SystemExit(f"{self.name}: {'temple rejected: ' + self.link.fatal if self.link.fatal else 'runtime exited'}")
+        finally:
+            # Revoked (e.g. force-stopped) or crashed: take the model processes down with us.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.backends.close(), 10)
 
     async def watchdog(self) -> None:
         # A crashed codex app-server takes its threads with it; let the galaxy restart the agent.
@@ -503,6 +528,8 @@ class Agent:
         while True:
             await self.wake.wait()
             self.wake.clear()
+            if self.halted:
+                continue
             # While draining only the owner's messages are taken; everything else waits for the drain to end.
             ready = [m for m in self.queue if m.get("sender") == OWNER] if self.draining else self.queue
             if not ready:
@@ -560,7 +587,7 @@ class Agent:
         await self.report(self.state)
 
     def enqueue(self, m: dict) -> None:
-        if m["id"] in self.seen:
+        if m["id"] in self.seen or self.halted:
             return
         self.seen.add(m["id"])
         self.queue.append(m)
@@ -593,6 +620,8 @@ class Agent:
                 return self.latest_result()
             if frame["method"] == "interrupt":
                 return await self.interrupt()
+            if frame["method"] == "halt":
+                return await self.halt()
             raise ValueError(f"unknown rpc {frame['method']}")
 
 

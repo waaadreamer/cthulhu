@@ -31,6 +31,11 @@ def main() -> None:
     s.add_argument("--id", required=True)
     s.add_argument("--name", required=True)
     s.add_argument("--no-spawn", action="store_true", help="galaxy refuses old_ones")
+    for name, what in (("stop", "force-stop an agent now (aborts its turn; rejects messages until resumed)"),
+                       ("resume", "resume a force-stopped agent")):
+        s = sub.add_parser(name, help=what + "; local maintenance access")
+        s.add_argument("--config", default="/etc/cthulhu/temple.json", help="local temple config")
+        s.add_argument("agent_id")
     s = sub.add_parser("passwd", help="set the owner web password")
     s.add_argument("--config", required=True)
     s.add_argument("username")
@@ -87,6 +92,10 @@ def main() -> None:
         print(f"galaxy {args.id} registered; restart the temple (systemctl restart cthulhu-v2-temple) to accept it.\n")
         print("Run on the target machine, as the user the agents should run as (no root needed):\n")
         print(f"curl -fsSL https://raw.githubusercontent.com/{public['repo']}/main/deploy/install-galaxy.sh | bash -s -- {blob}")
+    elif args.cmd in ("stop", "resume"):
+        from .ops import call
+        r = asyncio.run(call(args.config, f"maintenance_{args.cmd}", agent_id=args.agent_id))
+        print(f"{r['name']} ({r['id']}): {r['desired']}")
     elif args.cmd == "passwd":
         import getpass
         from .store import Store

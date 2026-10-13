@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS messages (
     priority INTEGER NOT NULL DEFAULT 0,
     text TEXT NOT NULL,
     reply_to TEXT,
-    state TEXT NOT NULL DEFAULT 'queued',  -- queued | delivered | handled
+    state TEXT NOT NULL DEFAULT 'queued',  -- queued | delivered | handled | cancelled (receiver force-stopped)
     created_at REAL NOT NULL,
     handled_at REAL
 );
@@ -220,7 +220,7 @@ class Store:
         return self.one("SELECT * FROM messages WHERE id=?", (mid,))
 
     def pending_for(self, receiver: str) -> list[dict]:
-        return self.q("SELECT * FROM messages WHERE receiver=? AND state!='handled' ORDER BY created_at", (receiver,))
+        return self.q("SELECT * FROM messages WHERE receiver=? AND state NOT IN ('handled','cancelled') ORDER BY created_at", (receiver,))
 
     def mark(self, mid: str, state: str) -> None:
         self.x("UPDATE messages SET state=?, handled_at=? WHERE id=?",
@@ -251,7 +251,7 @@ class Store:
 
     def pending_counts(self) -> dict[str, int]:
         return {r["receiver"]: r["n"] for r in
-                self.q("SELECT receiver, COUNT(*) n FROM messages WHERE state!='handled' GROUP BY receiver")}
+                self.q("SELECT receiver, COUNT(*) n FROM messages WHERE state NOT IN ('handled','cancelled') GROUP BY receiver")}
 
     # tasks
 
