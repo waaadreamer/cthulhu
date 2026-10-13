@@ -220,7 +220,8 @@ class Store:
         return self.one("SELECT * FROM messages WHERE id=?", (mid,))
 
     def pending_for(self, receiver: str) -> list[dict]:
-        return self.q("SELECT * FROM messages WHERE receiver=? AND state NOT IN ('handled','cancelled') ORDER BY created_at", (receiver,))
+        return self.q("SELECT * FROM messages WHERE receiver=? AND state NOT IN ('handled','cancelled')"
+                      " ORDER BY priority DESC, created_at", (receiver,))
 
     def mark(self, mid: str, state: str) -> None:
         self.x("UPDATE messages SET state=?, handled_at=? WHERE id=?",

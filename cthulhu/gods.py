@@ -165,6 +165,8 @@ class OwnerChat:
             await Agent.receive(self, rest)
 
     async def chat(self, m: dict) -> None:
+        if self.preempted:
+            return                        # left queued behind the urgent message
         turn_id = m["id"]
         await self.link.call("chat_update", turn_id=turn_id, status="running")
         final_items: set[str] = set()
@@ -187,8 +189,11 @@ class OwnerChat:
             result = await self.run_main(self.render([m]), on_event=on_event)
             status = {"completed": "done", "interrupted": "interrupted"}.get(result.status, "failed")
             reply = result.text or (f"（出错：{result.error}）" if result.error else "")
+            if self.preempted and result.status == "interrupted":
+                status, reply = "queued", ""     # requeued behind the urgent message
         except Exception as e:
             result, status, reply = TurnResult("failed", error=str(e)), "failed", f"（出错：{e}）"
+        self.complete([m], result)
         await self.link.call("chat_update", turn_id=turn_id, reply=reply, status=status, activity=activity[-40:],
                              model=self.latest.get("model"))
         await self.after_turn([m], result)
@@ -322,7 +327,8 @@ class Azathoth(OwnerChat, MemoryAgent):
             result = await self.run_main(text)
             if result.status == "completed" and not self.reporting["told"]:
                 result = await self.run_main(f"【程序提示】你还没有调用 tell_owner。现在调用它。{guide}")
-            if not self.reporting["told"]:
+            self.complete(batch, result)
+            if not self.reporting["told"] and not (self.preempted and result.status == "interrupted"):
                 reply = (result.text or "").strip() if result.status == "completed" else \
                     f"（处理{self.reporting['origin']}的消息时出错：{result.error or result.status}）"
                 if reply:
@@ -366,6 +372,7 @@ class Shub(MemoryAgent):
             self.roster_seen = roster
             text = f"【名册已更新】\n{roster}\n\n{text}"
         result = await self.run_main(text)
+        self.complete(batch, result)
         await self.after_turn(batch, result)
 
     async def roster(self) -> str:

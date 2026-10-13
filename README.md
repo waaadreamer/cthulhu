@@ -17,7 +17,7 @@
 
 - **Temple**（`cthulhu/temple.py`）：唯一的消息路由。保存 agent 注册表、消息、永久上下文和主人聊天，执行权限矩阵，并提供网页和 API。
 - **Galaxy**（`cthulhu/galaxy.py`）：以某个 OS 用户运行，主动连接中心，按中心下发的期望集合启动、停止、重启 agent 进程（崩溃后指数退避）。agent 继承该 OS 用户，所以"用户"只用来区分格赫罗斯和其他 agent。
-- **Agent**（`cthulhu/agent.py`）：一个 agent 对应一个进程，包含一个 `codex app-server` 子进程和一条连到中心的 websocket。接口是 `send`、`receive`、`latest_result`。消息按优先级排队，同一批消息合并成一轮处理。
+- **Agent**（`cthulhu/agent.py`）：一个 agent 对应一个进程，包含一个 `codex app-server` 子进程和一条连到中心的 websocket。接口是 `send`、`receive`、`latest_result`。消息按优先级（0–10，高先）排队，同一批消息合并成一轮处理；优先级 10 立即打断当前回合，被打断的消息排在它之后续办。主人消息默认 9，界面“加急”为 10；旧日支配者不能发 10（`roles.py`）。
 - **角色子类**（`cthulhu/gods.py`）：决定哪些内容进永久上下文、持有哪些工具、被什么唤醒。
 - **运行时**（`cthulhu/runtime.py`）：Codex app-server 的 stdio JSON-RPC 适配。以后接 Claude Code 只需实现同一组方法。
 
@@ -151,5 +151,5 @@ cd web && npm install && npm run build        # 前端构建到 cthulhu/static�
 
 ## TODO
 
-- 优先级消息插队（steer 进正在运行的回合），目前是排队后合并处理。
+- 同任务消息 steer 进正在运行的回合（优先级 10 已实现为打断当前回合，见 agent.py: preempt）。
 - 奈亚拉托提普（飞书入口）。
