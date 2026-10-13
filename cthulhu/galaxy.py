@@ -72,6 +72,19 @@ def read_file(path: str, max_bytes: int = 0, offset: int = 0) -> dict:
     return out
 
 
+async def run_probe(command: str, cwd: str | None, limit: float) -> dict:
+    proc = await asyncio.create_subprocess_shell(command, cwd=cwd if cwd and Path(cwd).is_dir() else None,
+                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                                 start_new_session=True)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), limit)
+    except asyncio.TimeoutError:
+        os.killpg(proc.pid, signal.SIGKILL)
+        await proc.wait()
+        return {"code": None, "stdout": "", "stderr": f"timed out after {limit:g}s"}
+    return {"code": proc.returncode, "stdout": out.decode(errors="replace")[-200:], "stderr": err.decode(errors="replace")[-200:]}
+
+
 class Galaxy:
     def __init__(self, config: dict):
         self.config = config
@@ -132,6 +145,11 @@ class Galaxy:
             # Exit; systemd (Restart=always) or run.sh brings the galaxy back on the new code.
             asyncio.get_running_loop().call_later(0.5, os.kill, os.getpid(), signal.SIGTERM)
             return {"restarting": True}
+        elif frame.get("type") == "rpc" and frame["method"] == "probe":
+            # A task's progress probe, run as this galaxy's OS user in the executor's working directory.
+            p = frame["params"]
+            proc = self.procs.get(p["agent_id"])
+            return await run_probe(p["command"], self.agent_cwd(proc.spec) if proc else None, float(p.get("timeout_s", 30)))
         elif frame.get("type") == "rpc" and frame["method"] == "read_file":
             # The owner previews a file an agent produced; read as this galaxy's OS user.
             return await asyncio.to_thread(read_file, **frame.get("params", {}))
@@ -171,10 +189,33 @@ class Galaxy:
                 except ProcessLookupError:
                     pass
 
+    def agent_cwd(self, spec: dict) -> str:
+        if spec["spec"].get("worktree"):
+            return str(self.state / spec["id"] / "worktree")
+        return spec["spec"].get("cwd") or self.config.get("cwd") or str(Path.home())
+
+    async def worktree(self, spec: dict) -> None:
+        """Ghroth's old_ones each work on their own branch of the harness repo; only ghroth merges."""
+        path, branch = self.agent_cwd(spec), spec["spec"]["worktree"]
+        if Path(path).exists():
+            return
+        repo = self.config.get("harness_repo") or ROOT
+        git = ["git", "-C", repo]
+        for cmd in (git + ["worktree", "add", "-B", branch, path, "main"],
+                    git + ["config", "extensions.worktreeConfig", "true"],
+                    ["git", "-C", path, "config", "--worktree", "remote.origin.pushurl", "no-push://old_ones-do-not-push"]):
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, err = await proc.communicate()
+            if proc.returncode:
+                raise RuntimeError(f"{' '.join(cmd)}: {err.decode()[-300:]}")
+
     async def supervise(self, p: Proc) -> None:
         try:
             while True:
                 launch = {k: p.spec[k] for k in ("id", "name", "role", "epoch", "spec", "thread_id")}
+                if launch["spec"].get("worktree"):
+                    await self.worktree(p.spec)
+                    launch["spec"] = launch["spec"] | {"cwd": self.agent_cwd(p.spec)}
                 adir = self.state / p.spec["id"]
                 adir.mkdir(parents=True, exist_ok=True)
                 env = os.environ | {"CTHULHU_AGENT_TOKEN": p.spec["token"], "PYTHONPATH": ROOT}

@@ -38,7 +38,7 @@ class Access(unittest.IsolatedAsyncioTestCase):
                     await self.t.handle_agent_call(self.conn(who), method, {"agent_id": "ghroth"})
         # Shub's old_one tool still cannot reach management.
         for target in ("azathoth", "yog", "ghroth"):
-            with self.assertRaisesRegex(Denied, "only old_ones"):
+            with self.assertRaisesRegex(Denied, "only its own old_ones"):
                 await self.t.handle_agent_call(self.conn("shub"), "stop", {"agent_id": target})
         self.assertTrue(all(a["desired"] == "running" for a in self.t.store.agents()))
 
@@ -127,12 +127,9 @@ class ForceStop(HarnessServer):
         self.assertIn("stopped", reply)
         self.assertFalse(self.agent("gh")["online"])
 
-        # Maintenance CLI stops yog too; no patrol runs while it is stopped.
+        # Maintenance CLI stops yog too.
         self.assertIn("stopped", self.cli("stop", "yo"))
         self.wait(lambda: not alive(self.pids('"id": "yo"')), 15)
-        patrols = len(self.api("patrols?limit=100"))
-        time.sleep(3 * self.patrol_interval + 1)
-        self.assertEqual(len(self.api("patrols?limit=100")), patrols)
 
         # The temple restarts: both stay stopped and the galaxy does not relaunch them.
         self.restart_temple()

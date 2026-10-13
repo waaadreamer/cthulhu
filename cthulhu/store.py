@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS agents (
     parent_id TEXT,
     spec TEXT NOT NULL DEFAULT '{}',      -- init params: task, cwd, model
     epoch INTEGER NOT NULL DEFAULT 1,     -- bumping it revokes the old token
-    desired TEXT NOT NULL DEFAULT 'running',  -- running | stopped
+    desired TEXT NOT NULL DEFAULT 'running',  -- running | stopped | deleted (history kept)
     thread_id TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -66,10 +66,10 @@ CREATE TABLE IF NOT EXISTS patrols (
     summary TEXT NOT NULL,
     created_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS tasks (          -- one piece of work azathoth handed to shub
+CREATE TABLE IF NOT EXISTS tasks (          -- one contracted piece of work (see discipline.py)
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'open',      -- open | done (set by shub's report)
+    state TEXT NOT NULL DEFAULT 'active',    -- see tasks.STATES
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -138,7 +138,11 @@ class Store:
                     "ALTER TABLE memory ADD COLUMN updated_at REAL", "ALTER TABLE messages ADD COLUMN task_id TEXT",
                     "ALTER TABLE messages ADD COLUMN status TEXT", "ALTER TABLE chat_turns ADD COLUMN task_id TEXT",
                     "ALTER TABLE chat_turns ADD COLUMN kind TEXT",
-                    "ALTER TABLE turn_log ADD COLUMN scope TEXT NOT NULL DEFAULT ''"):
+                    "ALTER TABLE turn_log ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
+                    "ALTER TABLE tasks ADD COLUMN creator TEXT", "ALTER TABLE tasks ADD COLUMN manager TEXT",
+                    "ALTER TABLE tasks ADD COLUMN executor TEXT", "ALTER TABLE tasks ADD COLUMN deadline REAL",
+                    "ALTER TABLE tasks ADD COLUMN acceptance TEXT NOT NULL DEFAULT ''", "ALTER TABLE tasks ADD COLUMN probe TEXT",
+                    "ALTER TABLE tasks ADD COLUMN data TEXT NOT NULL DEFAULT '{}'"):  # checkpoints, extensions, events (tasks.py)
             try:
                 self.db.execute(ddl)
             except sqlite3.OperationalError:
@@ -191,7 +195,7 @@ class Store:
         return a
 
     def agents(self, galaxy_id: str | None = None, include_stopped=True) -> list[dict]:
-        sql, args = "SELECT * FROM agents WHERE 1=1", []
+        sql, args = "SELECT * FROM agents WHERE desired!='deleted'", []
         if galaxy_id:
             sql += " AND galaxy_id=?"
             args.append(galaxy_id)
@@ -256,16 +260,28 @@ class Store:
 
     # tasks
 
-    def add_task(self, title: str) -> dict:
+    def add_task(self, title: str, **fields) -> dict:
         tid, now = new_id("task"), time.time()
-        self.x("INSERT INTO tasks (id, title, created_at, updated_at) VALUES (?,?,?,?)", (tid, title, now, now))
+        self.x("INSERT INTO tasks (id, title, state, created_at, updated_at) VALUES (?,?,?,?,?)",
+               (tid, title, "active", now, now))
+        if fields:
+            self.set_task(tid, **fields)
         return self.task(tid)
 
-    def task(self, task_id: str) -> dict | None:
-        return self.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+    @staticmethod
+    def _task(t: dict | None) -> dict | None:
+        if t:
+            t["data"] = json.loads(t["data"])
+        return t
 
-    def set_task(self, task_id: str, state: str) -> None:
-        self.x("UPDATE tasks SET state=?, updated_at=? WHERE id=?", (state, time.time(), task_id))
+    def task(self, task_id: str) -> dict | None:
+        return self._task(self.one("SELECT * FROM tasks WHERE id=?", (task_id,)))
+
+    def set_task(self, task_id: str, **fields) -> None:
+        if "data" in fields:
+            fields["data"] = json.dumps(fields["data"], ensure_ascii=False)
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.x(f"UPDATE tasks SET {cols}, updated_at=? WHERE id=?", (*fields.values(), time.time(), task_id))
 
     def tasks(self, search: str | None = None, limit=20, before_id: str | None = None,
               state: str | None = None, history=False) -> list[dict]:
@@ -280,7 +296,7 @@ class Store:
             sql += " AND (created_at, id) < (?, ?)"
             args += [cursor['created_at'], cursor['id']]
         order = 'created_at DESC, id DESC' if history else 'updated_at DESC'
-        return self.q(sql + f" ORDER BY {order} LIMIT ?", (*args, limit))
+        return [self._task(t) for t in self.q(sql + f" ORDER BY {order} LIMIT ?", (*args, limit))]
 
     # permanent memory
 
