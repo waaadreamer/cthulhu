@@ -126,6 +126,7 @@ class NyarlBridge:
             if m.get('kind') != 'channel':
                 ordinary.append(m)
                 continue
+            self.finished.add(m['id'])    # never replayed, so never requeued
             if any(r.get('message_id') == m['id'] for r in self.channel_runs.values()):
                 continue
             await self.link.call('chat_update', turn_id=m['id'], status='interrupted',

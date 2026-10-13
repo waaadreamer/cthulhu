@@ -11,12 +11,15 @@ import json
 import time
 import re
 import sys
+import threading
 from pathlib import Path
 
 ids = itertools.count(1)
 threads = {}
 pending = {}
 interruptible = {}
+sleeping = {}   # turn -> timer; SLEEP turns run in the background so turn/interrupt can stop them
+lock = threading.Lock()
 cycle_count = 0
 
 
@@ -27,8 +30,9 @@ def out(msg):
     if msg.get('method') == 'turn/completed' and p.get('threadId') in threads:
         entry = threads[p['threadId']]
         entry.setdefault('turns', []).append(p['turn'] | {'items': entry.pop('journal', [])})
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    with lock:
+        sys.stdout.write(json.dumps(msg) + "\n")
+        sys.stdout.flush()
 
 
 def finish(thread, turn, text):
@@ -189,14 +193,22 @@ for line in sys.stdin:
         elif body.strip() == 'WAIT_INTERRUPT_FIXTURE':
             interruptible[turn] = p['threadId']
         elif "SLEEP " in body and "定时巡检" not in body:   # yog's patrol prompt quotes it; only the target sleeps
-            time.sleep(float(body.split("SLEEP ", 1)[1].split()[0]))
-            finish(p["threadId"], turn, "slept")
+            def wake(thread=p["threadId"], turn=turn):
+                if sleeping.pop(turn, None):
+                    finish(thread, turn, "slept")
+            timer = sleeping[turn] = threading.Timer(float(body.split("SLEEP ", 1)[1].split()[0]), wake)
+            timer.daemon = True
+            interruptible[turn] = p["threadId"]
+            timer.start()
         elif "REPLY " in body:
             finish(p["threadId"], turn, body.split("REPLY ", 1)[1].strip())
         else:
             finish(p["threadId"], turn, "echo[codex]: " + text)
     elif m == 'turn/interrupt':
         thread = interruptible.pop(p['turnId'], None)
+        timer = sleeping.pop(p['turnId'], None)
+        if timer:
+            timer.cancel()
         out({'id':rid,'result':{}})
         if thread:
             out({'method':'turn/completed','params':{'threadId':thread,'turn':{

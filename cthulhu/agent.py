@@ -26,10 +26,11 @@ from . import backends
 from .backends import Backends
 from . import BUILD
 from .protocol import Link
-from .roles import DISPLAY, OWNER, Role
+from .roles import DISPLAY, OWNER, URGENT, Role
 from .runtime import TurnResult, tool
 
 RECOVERY = ContextVar("recovery", default=None)
+PREEMPTED = "preempted by a priority-10 message"
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +95,10 @@ class Agent:
         self.draining = False
         self.halted = False          # force-stopped by the temple; the galaxy kills this process next
         self.in_batch = False        # handling a batch right now (state alone can read "working" with work only queued)
+        self.batch: list[dict] = []
+        self.finished: set[str] = set()   # ids of batch messages fully handled (the rest is requeued on preemption)
+        self.preempted = False
+        self.main_cancel: asyncio.Event | None = None   # recovery cancel of the running main turn
         self.inflight_runs = 0
         self.state = "starting"
         self.current: str | None = None
@@ -163,7 +168,8 @@ class Agent:
         return tool("temple_send", "通过中心神殿给另一个 agent 发消息。接收方由程序校验权限；对方回复会作为新消息到达，不要等待或轮询。",
                     {"to": {"type": "string", "description": "接收方 agent ID"},
                      "text": {"type": "string"},
-                     "priority": {"type": "integer", "description": "0 普通，5 紧急"}, **(extra or {})},
+                     "priority": {"type": "integer", "description": "0–10，默认 0，越大越先处理；10 立即打断对方当前任务，仅限真正的紧急情况"
+                                  + ("（你不能用 10）" if self.role == Role.OLD_ONE else "")}, **(extra or {})},
                     ["to", "text"])
 
     def tools(self) -> list[dict]:
@@ -174,7 +180,7 @@ class Agent:
 
     async def call_tool(self, name: str, args: dict) -> Any:
         if name == "temple_send":
-            return await self.send(args["to"], args["text"], priority=int(args.get("priority", 0)),
+            return await self.send(args["to"], args["text"], priority=int(args.get("priority") or 0),
                                    task_id=args.get("task_id"), status=args.get("status"), title=args.get("title"))
         if name == "temple_agents":
             d = await self.link.call("directory")
@@ -196,6 +202,7 @@ class Agent:
     async def receive(self, batch: list[dict]) -> None:
         """Handle a batch of queued messages in one turn."""
         result = await self.run_main(self.render(batch))
+        self.complete(batch, result)
         await self.after_turn(batch, result)
 
     def latest_result(self) -> dict:
@@ -209,12 +216,19 @@ class Agent:
     # hooks for subclasses
 
     def take_batch(self, ready: list[dict] | None = None) -> list[dict]:
-        # Highest priority first; everything already queued (or `ready`) joins the same turn.
-        # TODO: steer high-priority messages into the running turn instead of waiting.
+        # Highest priority first; everything already queued (or `ready`) joins the same turn,
+        # except that urgent messages get a turn of their own.
         batch = sorted(self.queue if ready is None else ready, key=lambda m: (-m["priority"], m["created_at"]))
+        if batch and batch[0]["priority"] >= URGENT:
+            batch = [m for m in batch if m["priority"] >= URGENT]
         taken = {id(m) for m in batch}
         self.queue = [m for m in self.queue if id(m) not in taken]
         return batch
+
+    def complete(self, msgs: list[dict], result: TurnResult) -> None:
+        """Mark messages handled by this batch, unless their turn was cut short by preemption."""
+        if not (self.preempted and result.status == "interrupted"):
+            self.finished.update(m["id"] for m in msgs)
 
     async def on_sent(self, to: str, text: str) -> None:
         pass
@@ -228,6 +242,10 @@ class Agent:
             who = "主人" if m["sender"] == OWNER else f"{m['sender_name']}（{m['sender_role']}，ID {m['sender']}）"
             task = f" · 任务 {m['task_id']}「{m.get('task_title') or ''}」" if m.get("task_id") else ""
             status = f" · 状态 {m['status']}" if m.get("status") else ""
+            if m.get("priority", 0) >= URGENT:
+                status += " · 加急"
+            if m.get("preempted"):
+                status += " · 处理中途被加急消息打断，先核验已完成的部分，不要重复已执行的操作"
             out.append(f"[消息 {m['id']} · 来自 {who} · {time.strftime('%m-%d %H:%M', time.localtime(m['created_at']))}"
                        f"{task}{status}]\n{m['text']}")
         return "\n\n".join(out)
@@ -339,6 +357,8 @@ class Agent:
             self.recoveries.discard(cancel)
 
     async def run_main(self, text: str, on_event=None, **kw) -> TurnResult:
+        if self.preempted:
+            return TurnResult("interrupted", error=PREEMPTED)
         async def attempt(rt, note):
             thread = await self.ensure_thread()
             bridge = await self.handoff_context(thread) + await self.memory_delta(thread)
@@ -351,7 +371,11 @@ class Agent:
             except Exception:
                 log.exception("could not log turn")
             return result
-        result = await self.recover(attempt)
+        self.main_cancel = asyncio.Event()
+        try:
+            result = await self.recover(attempt, cancel=self.main_cancel)
+        finally:
+            self.main_cancel = None
         self.latest.update(last_status=result.status, error=result.error,
                            last_reply=clip(result.text, 3000), finished_at=time.time(),
                            last_task=self.current_task, model=backends.label(self.backends.active_cfg))
@@ -473,6 +497,18 @@ class Agent:
         asyncio.create_task(self.backends.close())
         return True
 
+    async def preempt(self) -> None:
+        """An urgent message arrived: abort the running batch. Its unfinished messages are requeued
+        behind the urgent one; background turns (memory, patrol) are left alone."""
+        if not self.in_batch or self.preempted or any(m["priority"] >= URGENT for m in self.batch):
+            return
+        log.info("%s preempting the current batch for an urgent message", self.name)
+        self.preempted = True
+        if self.main_cancel is not None:
+            self.main_cancel.set()
+            if self.active:
+                await self.active[0].interrupt(*self.active[1:])
+
     # loop
 
     async def main(self) -> None:
@@ -543,6 +579,7 @@ class Agent:
             self.current = clip(batch[0]["text"], 120)
             self.current_task = next((m["task_id"] for m in batch if m.get("task_id")), None)
             self.working_since = time.time()
+            self.batch, self.finished, self.preempted = batch, set(), False
             self.in_batch = True
             await self.report("working")
             try:
@@ -552,6 +589,12 @@ class Agent:
                 self.latest = {"error": str(e), "at": time.time()}
             finally:
                 self.in_batch = False
+            if self.preempted:
+                # Unfinished work goes back in the queue; it runs after the urgent message, flagged as resumed.
+                requeued = [m | {"preempted": True} for m in batch if m["id"] not in self.finished]
+                self.queue.extend(requeued)
+                batch = [m for m in batch if m["id"] in self.finished]
+                self.preempted = False
             for m in batch:
                 try:
                     await self.link.call("handled", id=m["id"])
@@ -592,6 +635,8 @@ class Agent:
         self.seen.add(m["id"])
         self.queue.append(m)
         self.wake.set()
+        if m.get("priority", 0) >= URGENT and (not self.draining or m.get("sender") == OWNER):
+            asyncio.create_task(self.preempt())
 
     def drain_status(self):
         memory_busy = hasattr(self, "memory_lock") and self.memory_lock.locked()

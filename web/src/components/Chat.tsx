@@ -1,5 +1,5 @@
 import { KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowUp, Check, ChevronDown, CircleAlert, CircleCheck, Copy, Loader2, Search, Sparkles, Square, Terminal, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, CircleAlert, CircleCheck, Copy, Loader2, Search, Sparkles, Square, Terminal, X, Zap } from 'lucide-react'
 import { Agent, api, modelLabel, ROLE_META, timeLabel, Turn } from '../api'
 import { Stream } from '../useTemple'
 import { Avatar, stateOf } from './Avatar'
@@ -20,6 +20,7 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
   const meta = ROLE_META[agent.role]
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  const [urgent, setUrgent] = useState(false)
   const [search, setSearch] = useState<string | null>(null)
   const [results, setResults] = useState<Turn[] | null>(null)
   const [atBottom, setAtBottom] = useState(true)
@@ -60,12 +61,13 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
     if (!t || sending) return
     setSending(true)
     try {
-      const m = await api<{ id: string; created_at: number }>('send', { to: agent.id, text: t })
+      const m = await api<{ id: string; created_at: number }>('send', { to: agent.id, text: t, urgent })
       setTurns((ts) => (ts.some((x) => x.id === m.id) ? ts : [...ts, {
         id: m.id, agent_id: agent.id, user_text: t, reply: '', activity: [], status: 'queued',
         created_at: m.created_at, updated_at: m.created_at,
       }]))
       setText('')
+      setUrgent(false)
       setAtBottom(true)
     } catch (e) {
       alert((e as Error).message)
@@ -151,6 +153,11 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
             placeholder={`对${agent.name}说…`}
             className="max-h-60 min-h-[40px] flex-1 resize-none bg-transparent px-3 py-2 text-[15px] leading-relaxed text-white placeholder:text-slate-500 outline-none"
           />
+          <button onClick={() => setUrgent((u) => !u)} aria-pressed={urgent}
+            title={urgent ? '加急：立即打断它当前的任务' : '加急发送（优先级 10，立即打断当前任务）'}
+            className={`flex h-10 shrink-0 items-center gap-1 rounded-xl px-2.5 text-xs font-medium transition ${urgent ? 'bg-rose-500/25 text-rose-200 ring-1 ring-rose-400/50' : 'bg-white/5 text-slate-400 hover:bg-white/10 hover:text-slate-200'}`}>
+            <Zap className={`h-4 w-4 ${urgent ? 'fill-current' : ''}`} />加急
+          </button>
           {running && (
             <button onClick={() => api('stop', { agent_id: agent.id })} title="停止当前回合"
               className="grid h-10 w-10 place-items-center rounded-xl bg-white/10 text-slate-200 transition hover:bg-white/20">
@@ -162,7 +169,9 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
             {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-5 w-5" />}
           </button>
         </div>
-        <p className="mt-1.5 hidden text-center text-[11px] text-slate-600 sm:block">Enter 发送 · Shift+Enter 换行</p>
+        <p className="mt-1.5 hidden text-center text-[11px] text-slate-600 sm:block">
+          {urgent ? <span className="text-rose-300/80">加急：立即打断当前任务，先处理这条</span> : 'Enter 发送 · Shift+Enter 换行'}
+        </p>
       </div>
     </div>
   )
