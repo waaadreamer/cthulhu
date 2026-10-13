@@ -251,12 +251,11 @@ class CodexRuntime:
 
     async def run_turn(self, thread_id: str, text: str, *, on_event: EventHandler | None = None,
                        output_schema: dict | None = None, timeout: float = 6 * 3600,
-                       on_start: Callable[[str], None] | None = None, images: list[str] | None = None,
-                       sandbox: dict | None = None) -> TurnResult:
+                       on_start: Callable[[str], None] | None = None, images: list[str] | None = None) -> TurnResult:
         inputs = [{"type": "text", "text": text, "text_elements": []}]
         inputs.extend({'type': 'localImage', 'path': path} for path in images or [])
         params = {"threadId": thread_id, "input": inputs,
-                  "approvalPolicy": "never", "sandboxPolicy": sandbox or {"type": "dangerFullAccess"}}
+                  "approvalPolicy": "never", "sandboxPolicy": {"type": "dangerFullAccess"}}
         if self.effort:
             params["effort"] = self.effort
         if self.service_tier is not None:

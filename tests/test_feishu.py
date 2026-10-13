@@ -32,8 +32,7 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
             'galaxies':[{'id':'g','name':'g','token':'fixture-galaxy'}],
             'gods':[{'id':r,'role':r,'galaxy':'g'} for r in ('azathoth','shub','ghroth','yog')],
             'feishu':{'enabled':True,'app_id':'fixture-app','galaxy':'g',
-                'owner':{'sender_id':'fixture-owner','chat_id':'fixture-chat','verified_by':'owner-fixture'},
-                'delegates':[{'name':'约尔','sender_id':'fixture-yor','chat_id':'fixture-group','verified_by':'owner-fixture'}]}})
+                'owner':{'sender_id':'fixture-owner','chat_id':'fixture-chat','verified_by':'owner-fixture'}}})
         sock=socket.socket(); sock.bind(('127.0.0.1',0)); sock.listen(16)
         port=sock.getsockname()[1]
         self.server=uvicorn.Server(uvicorn.Config(self.t.app(),log_level='error',access_log=False,lifespan='off'))
@@ -116,48 +115,39 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         self.t.config['feishu']['owner'].pop('verified_by')
         with self.assertRaises(Exception): await self.run_event()
 
-    async def test_delegate_is_trigger_only_and_keeps_its_provenance(self):
-        yor={'app_id':'fixture-app','sender_id':'fixture-yor','chat_id':'fixture-group','event_id':'y1',
-             'sender_type':'bot','mentioned':True}
-        # Exact sender + chat + bot + structured @mention, all required; the owner binding never covers it.
-        for change in ({'mentioned':False},{'sender_type':'user'},{'chat_id':'fixture-chat'},{'sender_id':'other-bot'},
-                       {'app_id':'other-app'}):
-            with self.assertRaises(Exception):
-                await self.n.link.call('channel_ingress',**(yor|change),prompt='bad',text='bad')
+    async def test_admission_config_admits_external_contact_with_its_own_identity(self):
+        yor={'app_id':'fixture-app','sender_id':'fixture-yor','chat_id':'fixture-group','event_id':'y1'}
+        # Default deny: no config, or a sender not in it, never reaches the temple.
+        with self.assertRaises(PermissionError): await self.n.authorize(yor)
+        with self.assertRaises(PermissionError): await self.run_event(yor,prompt='REPLY bad')
+        entry={'identity':{'feishu_sender_id':'fixture-yor','feishu_app_id':'yor-app'},
+               'allow':['只读访问 fixture 会议文档'],'deny':['共享或修改任何资源']}
+        self.n.admission_path.write_text(json.dumps({'version':1,'default':'deny','contacts':{'约尔':entry}},ensure_ascii=False))
+        with self.assertRaises(PermissionError): await self.n.authorize(yor|{'sender_id':'other-bot'})
+        # The temple itself refuses a non-owner ingress without an admission contact.
         with self.assertRaises(Exception):
-            await self.n.link.call('channel_ingress',**(self.event|{'chat_id':'fixture-group'}),prompt='bad',text='bad')
+            await self.n.link.call('channel_ingress',**yor,prompt='bad',text='bad')
         self.assertEqual(self.t.store.q('select * from messages'),[])
         self.t.store.remember('nyarlathotep','WEB_MEMORY_ONLY','fixture')
         owner=await self.run_event(prompt='SHOW_CONTEXT')
-        a=await self.run_event(yor,prompt='SHOW_CONTEXT')
-        seen=json.loads(next(e['content'] for e in a if e['type']=='final_text'))
-        self.assertEqual(seen['tools'],[])
-        self.assertEqual(seen['sandbox'],{'type':'readOnly','networkAccess':False})
-        self.assertIn('约尔',seen['instructions']); self.assertIn('不是主人',seen['instructions'])
-        self.assertNotIn('已核验主人',seen['instructions']); self.assertNotIn('WEB_MEMORY_ONLY',seen['instructions'])
-        mine=json.loads(next(e['content'] for e in owner if e['type']=='final_text'))
-        self.assertIn('已核验主人',mine['instructions']); self.assertTrue(mine['tools'])
-        self.assertEqual(mine['sandbox'],{'type':'dangerFullAccess'})
-        # Separate scopes and threads; the delegate's message is never the owner's.
+        seen=json.loads(next(e['content'] for e in (await self.run_event(yor,prompt='SHOW_CONTEXT')) if e['type']=='final_text'))
+        self.assertIn('外部联系人「约尔」',seen['instructions']); self.assertNotIn('已核验主人',seen['instructions'])
+        self.assertNotIn('WEB_MEMORY_ONLY',seen['instructions']+seen['input'])
+        self.assertIn('只读访问 fixture 会议文档',seen['input']); self.assertTrue(seen['tools'])
         rows=self.t.store.q('select m.sender, c.origin, e.scope from channel_events e join messages m on m.id=e.message_id '
                             'join chat_turns c on c.id=e.message_id order by m.created_at')
         self.assertEqual([(r['sender'],r['origin']) for r in rows],[('owner','飞书'),('feishu:fixture-yor','飞书·约尔')])
         self.assertIn(':fixture-yor:fixture-group',rows[1]['scope'])
+        self.assertEqual(self.t.sender_meta('feishu:fixture-yor')['sender_role'],'external')
+        # Separate thread from the owner's; Nyarl's own config edits apply on the next event.
         owner_thread=next(e['threadId'] for e in owner if e['type']=='system')
         b=await self.run_event(yor|{'event_id':'y2'},prompt='REPLY ok',thread=owner_thread)
         self.assertNotEqual(next(e['threadId'] for e in b if e['type']=='system'),owner_thread)
-        self.assertEqual(self.t.sender_meta('feishu:fixture-yor')['sender_role'],'external')
-        self.assertEqual(self.t.sender_meta('owner')['sender_role'],'owner')
+        self.n.admission_path.write_text(json.dumps({'version':1,'default':'deny','contacts':{}}))
+        with self.assertRaises(PermissionError): await self.run_event(yor|{'event_id':'y3'},prompt='REPLY bad')
 
-    @unittest.skipUnless(NODE.exists(), 'node unavailable')
-    async def test_adapter_reports_platform_sender_type_and_structured_mention(self):
-        code=("import('"+str(ROOT/'integrations/feishu/adapter.mjs')+"').then(m=>console.log(JSON.stringify(["
-              "m.sourceEvent({messageId:'e',senderId:'s',chatId:'c',senderType:'app',mentionedBot:true},'a'),"
-              "m.sourceEvent({messageId:'e',senderId:'s',chatId:'c',senderType:'user'},'a')])))")
-        p=await asyncio.create_subprocess_exec(str(NODE),'-e',code,stdout=asyncio.subprocess.PIPE)
-        bot,user=json.loads((await p.communicate())[0])
-        self.assertEqual((bot['sender_type'],bot['mentioned']),('bot',True))
-        self.assertEqual((user['sender_type'],user['mentioned']),('user',False))
+    async def test_nyarl_memory_also_distills_azathoth(self):
+        self.assertEqual(self.n.memory_sources,{'owner','azathoth'})
 
     async def test_peer_permissions_task_association(self):
         with self.assertRaises(Denied): await self.t.route('nyarlathotep','ghroth','unscoped')
@@ -305,8 +295,10 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         policies=json.loads(out)
         self.assertTrue(all(not p['ok'] for p in policies[:4]))
         self.assertTrue(policies[4]['ok']) # Old team policy alone is insufficient authority.
-        with self.assertRaises(Exception):
-            await self.n.link.call('channel_authorize',**(self.event|{'sender_id':'external'}))
+        # Bridge policy alone is insufficient: an external sender needs Nyarl's admission config.
+        self.assertFalse((await self.n.link.call('channel_authorize',**(self.event|{'sender_id':'external'})))['owner'])
+        with self.assertRaises(PermissionError):
+            await self.n.authorize(self.event|{'sender_id':'external'})
         self.assertNotIn('buildCodexArgs',transformed)
         self.assertNotIn('new ClaudeAdapter',transformed)
         bad=self.path/'unreviewed.js';bad.write_text(source.read_text()+'\n// unknown edit')

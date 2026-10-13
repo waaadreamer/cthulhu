@@ -9,30 +9,17 @@ from .roles import OWNER, Denied, Role
 
 
 def binding(temple, agent_id, event):
-    """(scope, delegate): delegate is None for the verified owner."""
+    """(scope, is_owner). Non-owner senders are admitted by Nyarl's own admission config, never as the owner."""
     agent = temple.store.agent(agent_id)
     cfg = temple.config.get('feishu') or {}
     if not agent or agent['role'] != Role.NYARLATHOTEP or not cfg.get('enabled'):
         raise Denied('Feishu ingress is not enabled for this identity')
     try:
-        return owner_scope(cfg, event), None
+        return owner_scope(cfg, event), True
     except Denied:
-        delegate = delegate_for(cfg, event)
-        if not delegate:
+        if event.get('app_id') != cfg.get('app_id') or not isinstance(event.get('sender_id'), str) or not event['sender_id']:
             raise
-    return scope_for(cfg['app_id'], event['sender_id'], event), delegate
-
-
-def delegate_for(cfg, event):
-    """A verified bot delegate may only trigger by structured @mention in its one delegated chat.
-
-    Delegation is trigger-only: it never carries owner identity, context or authority.
-    """
-    if event.get('app_id') != cfg.get('app_id') or event.get('sender_type') != 'bot' or event.get('mentioned') is not True:
-        return None
-    return next((d for d in cfg.get('delegates') or []
-                 if d.get('verified_by') and d.get('name') and d.get('sender_id') == event.get('sender_id')
-                 and d.get('chat_id') == event.get('chat_id')), None)
+    return scope_for(cfg['app_id'], event['sender_id'], event), False
 
 
 def owner_scope(cfg, event):
@@ -70,22 +57,25 @@ async def channel_call(temple, conn, method, p):
     if temple.role_of(conn.id) != Role.NYARLATHOTEP:
         raise Denied('channel operation requires Nyarl identity')
     if method == 'channel_authorize':
-        return {'scope': binding(temple, conn.id, p)[0]}
+        scope, owner = binding(temple, conn.id, p)
+        return {'scope': scope, 'owner': owner}
     if method == 'channel_ingress':
-        scope, delegate = binding(temple, conn.id, p)
+        scope, owner = binding(temple, conn.id, p)
         if not all(isinstance(p.get(k), str) and p[k] for k in ('event_id', 'prompt', 'text')):
             raise ValueError('event_id, prompt and text required')
-        # A delegate's message keeps its real Feishu sender, never the owner's identity.
-        sender = f"feishu:{p['sender_id']}" if delegate else OWNER
+        if not owner and not (isinstance(p.get('contact'), str) and p['contact']):
+            raise Denied('external sender requires an admission contact')
+        # An external sender keeps its real Feishu identity; the contact name is only a display label.
+        sender = OWNER if owner else f"feishu:{p['sender_id']}"
         row, created = temple.store.channel_accept(conn.id, p['app_id'], p['event_id'], scope, p, sender=sender,
-                                                   origin=f"飞书·{delegate['name']}" if delegate else '飞书')
+                                                   origin='飞书' if owner else f"飞书·{p['contact']}")
         turn = temple.store.turn(row['message_id'])
         if created:
             await temple.broadcast({'type': 'chat', 'turn': turn})
         # The worker executes via explicit Agent.run; it does not create another
         # agent or route a second copy through the model's main-thread queue.
         return {'message_id': row['message_id'], 'scope': scope, 'created': created,
-                'delegate': delegate and delegate['name'], 'turn': turn, 'receipt': json.loads(row['receipt'])}
+                'owner': owner, 'turn': turn, 'receipt': json.loads(row['receipt'])}
     row = temple.store.one('SELECT * FROM channel_events WHERE agent_id=? AND message_id=?',
                            (conn.id, p.get('message_id')))
     if not row:

@@ -181,11 +181,11 @@ for line in sys.stdin:
             pending[cid] = (p["threadId"], turn)
             out({"id": cid, "method": "item/tool/call", "params": {"threadId": p["threadId"], "turnId": turn,
                  "callId": "c", "tool": name, "arguments": json.loads(args.strip().splitlines()[0])}})
-        elif body.strip() == 'SHOW_CONTEXT':
+        elif body.strip().endswith('SHOW_CONTEXT'):
             start = threads.get(p['threadId'], {})
             finish(p['threadId'], turn, json.dumps({'tools': [t['name'] for t in start.get('dynamicTools') or []],
                                                     'instructions': start.get('developerInstructions', ''),
-                                                    'sandbox': p.get('sandboxPolicy')}, ensure_ascii=False))
+                                                    'input': text}, ensure_ascii=False))
         elif body.strip() == 'WAIT_INTERRUPT_FIXTURE':
             interruptible[turn] = p['threadId']
         elif "SLEEP " in body and "定时巡检" not in body:   # yog's patrol prompt quotes it; only the target sleeps

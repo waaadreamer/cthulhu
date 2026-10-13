@@ -21,11 +21,8 @@ export async function rpc(method, params) {
   } finally { socket.destroy(); }
 }
 export function sourceEvent(msg, appId) {
-  // Raw platform sender_type (bots are 'app') and structured @mention of this bot; delegates need both.
   return {app_id: appId, event_id: msg.messageId, sender_id: msg.senderId,
-    chat_id: msg.chatId, topic_id: msg.threadId || '',
-    sender_type: ['app', 'bot'].includes(msg.senderType) ? 'bot' : (msg.senderType || ''),
-    mentioned: msg.mentionedBot === true};
+    chat_id: msg.chatId, topic_id: msg.threadId || ''};
 }
 export async function authorizeMessage(msg, appId) {
   await rpc('authorize', sourceEvent(msg, appId));
