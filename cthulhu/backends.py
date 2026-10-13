@@ -118,7 +118,7 @@ class Backends:
         return self.cfg["fallback"] if self.using_fallback else self.cfg
 
     def trip(self, hold: float = FALLBACK_HOLD) -> bool:
-        """Primary failed: switch to the fallback if there is one."""
+        """Primary failed: activate fallback for hold seconds from this switch."""
         if self.fallback is None or self.using_fallback:
             return False
         self.failed_at, self.hold = time.time(), hold
@@ -201,8 +201,6 @@ class Backends:
             await publish('failed', error=result.error)
             return result
         finally:
-            if self.using_fallback:
-                self.failed_at = time.time()
             self._selected = None
 
     async def close(self) -> None:

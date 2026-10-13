@@ -137,7 +137,7 @@ blob 里包含星系 token，按密码对待。安装脚本会做这些事：
 每个角色可以单独选择 Codex 或 Claude Code（Claude Agent SDK）作为后端，并配置模型、effort、记忆提炼模型和后备。
 - 默认值写在星系配置的 `runtimes` 里；网页"模型设置"里的修改保存在中心，覆盖默认值，并在 agent 当前回合结束后生效。
 - 维护者修复已有旧日支配者的模型配置可在中心本机运行 `venv/bin/python -m cthulhu.ops --config /etc/cthulhu/temple.json runtime --agent-id old_xxxx --runtime-json '{"backend":"codex","model":"gpt-6-astra"}'`。复用相同校验与热切换，不重启或重新投递任务；`null` 恢复默认。返回的是已保存配置，实际生效状态需再用 `status` 核验。
-- 可恢复的 API/后端失败（比如中转站限流）默认只重试 1 次：首次尝试和这次重试都失败后，沿现有上下文核验与交接流程切到已配置后备；后备也最多重试 1 次。后备回合结束后保留 30 分钟冷却，到期后下一回合再尝试主源（`backends.py: RETRY_DELAYS`、`FALLBACK_HOLD`）。鉴权或模型不支持等不可恢复错误直接如实报错，没有后备或后备不可用时不会宣称恢复成功。运行状态的 `recovery_policy` 给出实际默认重试数与冷却秒数。
+- 可恢复的 API/后端失败（比如中转站限流）默认只重试 1 次：首次尝试和这次重试都失败后，沿现有上下文核验与交接流程切到已配置后备；后备也最多重试 1 次。从切到后备的时刻起保留固定 30 分钟冷却，后续成功回合不延长截止时间；到期时正在执行的后备回合安全完成，下一回合再尝试主源（`backends.py: RETRY_DELAYS`、`FALLBACK_HOLD`）。鉴权或模型不支持等不可恢复错误直接如实报错，没有后备或后备不可用时不会宣称恢复成功。运行状态的 `recovery_policy` 给出实际默认重试数与冷却秒数。
 - 两种后端的会话不互通。每个 agent 的每一轮都会记进中心的 `turn_log`（与后端无关）。换到新会话时，程序把本会话没见过的最近 12 轮放进 `<handoff>` 块带过去，并注明这些请求已经处理过，不要重新执行。
 - Claude 后端的凭证在 `/etc/cthulhu/claude.env`（0600，root），由两个星系服务通过 systemd 的 `EnvironmentFile` 读取。
 

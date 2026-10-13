@@ -54,38 +54,61 @@ class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(pair.using_fallback)
 
     async def test_source_is_pinned_until_long_fallback_turn_finishes(self):
-        pair=self.pair(); pair.trip()
+        pair = self.pair()
+        now = 10000.0
+        calls = []
         async def attempt(rt,note):
-            pair.failed_at=0  # The hold expired while this turn was still running.
-            self.assertIs(pair.active,rt)
-            self.assertEqual(pair.active_cfg['model'],'fallback')
+            nonlocal now
+            calls.append(rt)
+            if rt is pair.fallback:
+                now += 2  # The fixed deadline expires while this turn is running.
+                self.assertIs(pair.active, rt)
+                self.assertEqual(pair.active_cfg['model'], 'fallback')
+                self.assertTrue(pair.using_fallback)
             return TurnResult('completed')
-        result=await pair.recover(attempt)
-        self.assertEqual(result.status,'completed')
-        self.assertTrue(pair.using_fallback)
+        with patch.object(backends.time, 'time', side_effect=lambda: now):
+            self.assertTrue(pair.trip())
+            activated_at = pair.failed_at
+            now += 1799
+            result = await pair.recover(attempt)
+            self.assertEqual(result.status, 'completed')
+            self.assertEqual(pair.failed_at, activated_at)
+            self.assertFalse(pair.using_fallback)
+            self.assertIs(pair.active, pair.primary)
+            await pair.recover(attempt)
+        self.assertEqual(calls, [pair.fallback, pair.primary])
 
     async def test_hold_retains_fallback_across_turns_and_expiry_returns_primary(self):
         pair = self.pair()
         now = 10000.0
         calls = []
         async def attempt(rt, note):
+            nonlocal now
             calls.append(rt)
+            if rt is pair.primary and len(calls) <= 2:
+                return TurnResult('failed', error='provider offline')
+            if len(calls) == 3:
+                now += 60  # Initial successful fallback finishes after activation.
             return TurnResult('completed')
-        with patch.object(backends.time, 'time', side_effect=lambda: now):
-            self.assertTrue(pair.trip())
-            self.assertEqual(pair.failed_at, now)
-            now += 1799
+        with patch.object(backends.time, 'time', side_effect=lambda: now), \
+             patch.object(backends, 'RETRY_DELAYS', (0,)):
             result = await pair.recover(attempt)
             self.assertEqual(result.status, 'completed')
-            self.assertEqual(calls, [pair.fallback])
-            # The existing policy starts the hold again when a fallback turn finishes.
-            self.assertEqual(pair.failed_at, now)
-            now += 1799
+            activated_at = 10000.0
+            self.assertEqual(pair.failed_at, activated_at)
+            for elapsed in (700, 1799):
+                now = activated_at + elapsed
+                result = await pair.recover(attempt)
+                self.assertEqual(result.status, 'completed')
+                self.assertEqual(pair.failed_at, activated_at)
+                self.assertIs(pair.active, pair.fallback)
             self.assertTrue(pair.using_fallback)
-            now += 1
+            now = activated_at + 1800
             self.assertFalse(pair.using_fallback)
-            await pair.recover(attempt)
-        self.assertEqual(calls, [pair.fallback, pair.primary])
+            result = await pair.recover(attempt)
+            self.assertEqual(result.status, 'completed')
+            self.assertEqual(pair.failed_at, activated_at)
+        self.assertEqual(calls, [pair.primary] * 2 + [pair.fallback] * 3 + [pair.primary])
 
     async def test_configured_fallback_failure_is_exhausted_after_one_retry(self):
         pair = self.pair()
