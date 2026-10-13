@@ -22,8 +22,8 @@ class PriorityRules(unittest.TestCase):
         gods = [{"id": r.value, "role": r.value, "galaxy": "g1"} for r in (Role.AZATHOTH, Role.SHUB, Role.GHROTH)]
         self.t = Temple({"secret": "s", "db": str(Path(self.tmp.name) / "temple.db"),
                          "galaxies": [{"id": "g1", "name": "g", "token": "x"}], "gods": gods})
-        self.t.store.upsert_agent("old_a", "a", Role.OLD_ONE, "g1", spec={})
-        self.t.store.upsert_agent("old_b", "b", Role.OLD_ONE, "g1", spec={})
+        self.t.store.upsert_agent("old_a", "a", Role.OLD_ONE, "g1", "shub", spec={})
+        self.t.store.upsert_agent("old_b", "b", Role.OLD_ONE, "g1", "shub", spec={})
 
     def tearDown(self):
         self.t.store.db.close()

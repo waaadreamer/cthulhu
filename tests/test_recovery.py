@@ -195,7 +195,6 @@ class RecoveryPolicyTests(unittest.IsolatedAsyncioTestCase):
 
 class RecoveryServerTests(universe.HarnessServer):
     """Real temple + galaxy + agent + native RPC subprocess; only inference is fictional."""
-    patrol_interval=3600
 
     def configure(self, fallback=True):
         # Unchanged runtime settings deliberately retain cooldown. Isolate each test

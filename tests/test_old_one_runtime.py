@@ -24,7 +24,8 @@ class OldOneRuntimeTests(unittest.IsolatedAsyncioTestCase):
         store.set_setting("runtimes", {"old_tuned": own})
         before = {a["id"]: self.temple.runtime_for(a) for a in (plain, tuned)}
 
-        new = await self.temple.spawn({"name": "n", "galaxy_id": "g1", "task": "t", "skill": "s"}, "sh")
+        new = await self.temple.spawn({"name": "n", "galaxy_id": "g1", "task": "t", "skill": "s",
+                                       "title": "t", "acceptance": "a"}, "sh")
 
         expected = {"backend": "claude", "provider": "ali", "model": "claude-opus-5-5", "effort": "xhigh",
                     "fallback": {"backend": "codex", "model": "gpt-6.1-sol", "effort": "xhigh"}}

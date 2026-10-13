@@ -242,7 +242,7 @@ function TaskView({ turns, agent, streams }: { turns: Turn[]; agent: Agent; stre
   const latest = turns[turns.length - 1]
   const summary = [...turns].reverse().find((t) => t.kind === 'summary')
   // Done when the task is closed; a deliverable summary on a still-open task is shown open but not as "done".
-  const done = !!summary && (latest.task_state ?? 'done') === 'done'
+  const done = !!summary && (latest.task_state ?? 'accepted') === 'accepted'
   const blocked = !done && latest.kind === 'blocked'
   const final = summary ?? (blocked ? latest : undefined)
   const finalIndex = final ? turns.indexOf(final) : turns.length

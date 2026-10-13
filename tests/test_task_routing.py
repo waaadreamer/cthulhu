@@ -24,30 +24,28 @@ class TaskRouting(unittest.TestCase):
         return Temple.task_fields(self.temple, sender, receiver, params)
 
     def test_delegation_and_field_reply_keep_explicit_task_without_status(self):
-        for sender, receiver in [(Role.SHUB, Role.OLD_ONE), (Role.OLD_ONE, Role.SHUB),
+        for sender, receiver in [(Role.SHUB, Role.OLD_ONE), (Role.OLD_ONE, Role.SHUB), (Role.GHROTH, Role.OLD_ONE),
                                  (Role.OLD_ONE, Role.OLD_ONE), (Role.YOG, Role.OLD_ONE)]:
             with self.subTest(sender=sender, receiver=receiver):
                 require_send(sender, receiver)
-                self.assertEqual(self.fields(sender, receiver, task_id=self.task, status='done'),
+                self.assertEqual(self.fields(sender, receiver, task_id=self.task, status='progress'),
                                  (self.task, None))
-        self.assertEqual(self.store.task(self.task)['state'], 'open')
+        self.assertEqual(self.store.task(self.task)['state'], 'active')
 
     def test_text_does_not_infer_task_and_unknown_explicit_task_rejected(self):
         self.assertEqual(self.fields(Role.SHUB, Role.OLD_ONE, text=self.task), (None, None))
         with self.assertRaisesRegex(ValueError, 'unknown task'):
             self.fields(Role.SHUB, Role.OLD_ONE, task_id='missing')
 
-    def test_task_reference_does_not_reopen_closed_task(self):
-        self.store.set_task(self.task, 'done')
-        self.assertEqual(self.fields(Role.OLD_ONE, Role.SHUB, task_id=self.task), (self.task, None))
-        self.assertEqual(self.store.task(self.task)['state'], 'done')
+    def test_manager_report_label_never_closes_a_task(self):
+        for manager in (Role.SHUB, Role.GHROTH):
+            self.assertEqual(self.fields(manager, Role.AZATHOTH, task_id=self.task, status='progress'), (self.task, 'progress'))
+            self.assertEqual(self.fields(manager, Role.AZATHOTH, task_id=self.task, status='done'), (self.task, None))
+        self.assertEqual(self.store.task(self.task)['state'], 'active')
 
-    def test_report_validation_and_message_permissions_remain(self):
-        with self.assertRaisesRegex(ValueError, 'reports to azathoth'):
-            self.fields(Role.SHUB, Role.AZATHOTH, task_id=self.task)
-        self.assertEqual(self.fields(Role.SHUB, Role.AZATHOTH, task_id=self.task, status='progress'),
-                         (self.task, 'progress'))
+    def test_message_permissions(self):
+        require_send(Role.GHROTH, Role.AZATHOTH)       # ghroth reports to azathoth directly now
         with self.assertRaises(Denied):
             require_send(Role.SHUB, Role.GHROTH)
         with self.assertRaises(Denied):
-            require_send(Role.GHROTH, Role.OLD_ONE)
+            require_send(Role.GHROTH, Role.SHUB)

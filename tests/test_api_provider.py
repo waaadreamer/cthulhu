@@ -164,7 +164,7 @@ class RuntimeSafetyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DrainTests(unittest.TestCase):
-    def test_drain_waits_for_foreground_memory_and_patrol(self):
+    def test_drain_waits_for_foreground_and_memory(self):
         agent = object.__new__(Agent)
         agent.draining = True
         agent.inflight_runs = 0
@@ -176,9 +176,6 @@ class DrainTests(unittest.TestCase):
         self.assertFalse(agent.drain_status()["safe"])
         agent.inflight_runs = 0
         agent.memory_lock = SimpleNamespace(locked=lambda: True)
-        self.assertFalse(agent.drain_status()["safe"])
-        agent.memory_lock = SimpleNamespace(locked=lambda: False)
-        agent.patrol_busy = True
         self.assertFalse(agent.drain_status()["safe"])
 
 

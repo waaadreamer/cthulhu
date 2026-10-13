@@ -38,19 +38,17 @@ SEND = {
     Role.AZATHOTH: {Role.SHUB, Role.YOG, Role.GHROTH, Role.NYARLATHOTEP},
     Role.SHUB: {Role.AZATHOTH, Role.OLD_ONE, Role.NYARLATHOTEP},
     Role.YOG: {Role.AZATHOTH, Role.OLD_ONE, Role.SHUB, Role.NYARLATHOTEP},
-    Role.GHROTH: {Role.NYARLATHOTEP},
-    Role.OLD_ONE: {Role.SHUB, Role.OLD_ONE, Role.NYARLATHOTEP},
+    Role.GHROTH: {Role.AZATHOTH, Role.OLD_ONE, Role.NYARLATHOTEP},   # old_ones: only its own (temple.route)
+    Role.OLD_ONE: {Role.SHUB, Role.GHROTH, Role.OLD_ONE, Role.NYARLATHOTEP},
     Role.NYARLATHOTEP: {Role.AZATHOTH, Role.SHUB, Role.YOG, Role.GHROTH, Role.OLD_ONE},
 }
 
 # Capabilities beyond messaging.
-SPAWN = {Role.SHUB}                       # create / stop old_ones
+MANAGERS = {Role.SHUB, Role.GHROTH}       # take tasks from azathoth; create / stop / delete their own old_ones
 LATEST_RESULT = {Role.YOG}                # remote latest_result calls
 ADMIN_READ = {Role.AZATHOTH, Role.SHUB}   # full read access to the temple
 DEPLOY = {Role.AZATHOTH}                  # start deploys (the owner can too, from the web UI)
 DEPLOY_REQUEST = {Role.GHROTH}            # ask azathoth to deploy
-# Agents whose latest_result yog inspects on each patrol.
-SUPERVISED = {Role.OLD_ONE, Role.GHROTH, Role.NYARLATHOTEP}
 
 
 # Message priority: 0..URGENT, handled high to low. URGENT interrupts the receiver's running turn.

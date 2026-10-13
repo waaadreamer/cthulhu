@@ -33,7 +33,7 @@ def free_port():
 
 class HarnessServer(unittest.TestCase):
     runtimes: dict = {}
-    patrol_interval = 2
+    temple_extra: dict = {}
 
     @classmethod
     def setUpClass(cls):
@@ -43,11 +43,11 @@ class HarnessServer(unittest.TestCase):
         cls.secret = secrets.token_hex(16)
         gtoken = secrets.token_hex(16)
         cls.ids = {"azathoth": "az", "shub": "sh", "yog": "yo", "ghroth": "gh"}
-        temple = {"secret": cls.secret, "db": str(cls.dir / "temple.db"), "listen": ["127.0.0.1", cls.port],
+        temple = {"secret": cls.secret, "db": str(cls.dir / "temple.db"), "listen": ["127.0.0.1", cls.port], **cls.temple_extra,
                   "galaxies": [{"id": "g1", "name": "test", "token": gtoken}],
                   "gods": [{"id": v, "role": k, "galaxy": "g1"} for k, v in cls.ids.items()]}
         galaxy = {"id": "g1", "token": gtoken, "temple_ws": f"ws://127.0.0.1:{cls.port}/ws",
-                  "state": str(cls.dir / "galaxy"), "codex": FAKE, "cwd": str(cls.dir), "patrol_interval": cls.patrol_interval, "runtimes": cls.runtimes}
+                  "state": str(cls.dir / "galaxy"), "codex": FAKE, "cwd": str(cls.dir), "runtimes": cls.runtimes}
         (cls.dir / "temple.json").write_text(json.dumps(temple))
         (cls.dir / "galaxy.json").write_text(json.dumps(galaxy))
         salt = secrets.token_hex(16)
@@ -115,7 +115,7 @@ class Universe(HarnessServer):
         self.assertEqual(r["status"], 403)
 
     def test_azathoth_messages_shub_and_shub_memory_only_from_azathoth(self):
-        self.chat("az", 'CALL temple_send {"to": "sh", "title": "建 old_one", "text": "去建一个 old_one"}')
+        self.chat("az", 'CALL temple_send {"to": "sh", "text": "去建一个 old_one"}')
         msgs = self.wait(lambda: [m for m in self.api("messages?agent_id=sh") if m["sender"] == "az" and m["state"] == "handled"])
         self.assertEqual(msgs[0]["receiver"], "sh")
         self.wait(lambda: self.api("memory?agent_id=sh"))
@@ -126,36 +126,34 @@ class Universe(HarnessServer):
         self.wait(lambda: self.api("memory?agent_id=gh"))
 
     @staticmethod
-    def via_shub(report: dict) -> str:
-        """An owner prompt that makes azathoth send shub a task, and shub answer with `report` (tagged with that task)."""
+    def via_shub(report: dict, title="查磁盘") -> str:
+        """An owner prompt that makes azathoth create a task for shub, and shub answer with `report` (tagged with that task)."""
         inner = "CALL temple_send " + json.dumps({"to": "az", "task_id": "$TASK", **report}, ensure_ascii=False)
-        return "CALL temple_send " + json.dumps({"to": "sh", "title": "查磁盘", "text": inner}, ensure_ascii=False)
+        return "CALL task_create " + json.dumps({"executor": "sh", "title": title, "text": inner,
+                                                 "acceptance": "报告磁盘剩余空间"}, ensure_ascii=False)
 
     def notes(self):
         return [t for t in self.api("chat?agent_id=az&limit=200") if not t["user_text"]]
 
-    def test_task_progress_and_done_reports(self):
+    def test_task_progress_and_blocked_reports(self):
         tell = lambda s: "CALL tell_owner " + json.dumps({"text": s}, ensure_ascii=False)
         self.chat("az", self.via_shub({"status": "progress", "text": tell("步骤：已创建执行者")}))
         step = self.wait(lambda: next(t for t in self.notes() if t["reply"] == "步骤：已创建执行者"))
         self.assertEqual(step["kind"], "progress")
         self.assertEqual(step["task_title"], "查磁盘")
-        self.assertEqual(step["task_state"], "open")
-        # Follow-up on the same task; shub marks it done, so azathoth's note is the summary.
-        follow = "CALL temple_send " + json.dumps({"to": "sh", "task_id": step["task_id"], "text": "CALL temple_send " + json.dumps(
-            {"to": "az", "task_id": "$TASK", "status": "done", "text": tell("总结：磁盘剩 4.9G")}, ensure_ascii=False)}, ensure_ascii=False)
-        self.chat("az", follow)
-        final = self.wait(lambda: next(t for t in self.notes() if t["reply"] == "总结：磁盘剩 4.9G"))
-        self.assertEqual((final["kind"], final["task_id"], final["task_state"]), ("summary", step["task_id"], "done"))
+        self.assertEqual(step["task_state"], "active")
+        # A report label never closes a task; "done" is not even a valid label any more.
+        self.chat("az", self.via_shub({"status": "done", "text": "磁盘查完了"}, title="自称完成"))
+        task = self.wait(lambda: next(t for t in self.api("tasks?search=" + urllib.parse.quote("自称完成"))))
+        self.assertEqual(task["state"], "active")
         # Azathoth forgets tell_owner: the program reminds it, then delivers the reply itself.
-        self.chat("az", self.via_shub({"status": "done", "text": "磁盘查完了"}))
-        self.wait(lambda: next(t for t in self.notes() if "tell_owner" in t["reply"] and t["kind"] == "summary"), 30)
+        self.chat("az", self.via_shub({"status": "blocked", "text": "需要主人决定"}, title="受阻"))
+        self.wait(lambda: next(t for t in self.notes() if "tell_owner" in t["reply"] and t["kind"] == "blocked"), 30)
 
-    def test_shub_report_needs_task_status(self):
-        turn = self.chat("az", "CALL temple_send " + json.dumps({"to": "sh", "title": "无状态", "text": "CALL temple_send " + json.dumps(
-            {"to": "az", "task_id": "$TASK", "text": "没写状态"}, ensure_ascii=False)}, ensure_ascii=False))
-        self.wait(lambda: next(m for m in self.api("messages?agent_id=sh") if "没写状态" in m["text"] and m["state"] == "handled"))
-        self.assertFalse([m for m in self.api("messages?agent_id=az") if m["text"] == "没写状态"])
+    def test_task_needs_contract(self):
+        turn = self.chat("az", "CALL task_create " + json.dumps({"executor": "sh", "title": "无验收", "text": "x"}))
+        self.assertIn("acceptance", turn["reply"])
+        self.assertFalse(self.api("tasks?search=" + urllib.parse.quote("无验收")))
 
     def test_memory_revised_in_place_and_pushed_to_live_thread(self):
         self.chat("az", "记一下这个")
@@ -201,20 +199,19 @@ class Universe(HarnessServer):
         self.assertIn('"galaxies"', turn["reply"])
         self.assertIn('"g1"', turn["reply"])
 
-    def test_spawn_and_patrol(self):
-        self.chat("az", 'CALL temple_send {"to": "sh", "title": "建研究员", "text": "CALL temple_spawn {\\"name\\": \\"研究员\\", \\"galaxy_id\\": \\"g1\\", \\"task\\": \\"调研\\", \\"skill\\": \\"你是研究员\\"}"}')
+    def test_spawn_binds_a_task(self):
+        spawn = json.dumps({"name": "研究员", "galaxy_id": "g1", "task": "调研", "skill": "你是研究员",
+                            "title": "调研", "acceptance": "写出报告"}, ensure_ascii=False)
+        self.chat("az", "CALL temple_send " + json.dumps({"to": "sh", "text": "CALL temple_spawn " + spawn}, ensure_ascii=False))
         old = self.wait(lambda: next(a for a in self.api("directory")["agents"] if a["role"] == "old_one" and a["online"]), 30)
-        # The old_one starts on its task by itself.
+        # The old_one starts on its task by itself, and that task names it as the executor.
         self.wait(lambda: self.api(f"latest?agent_id={old['id']}").get("last_status") == "completed")
-        # yog's patrol eventually logs a summary
-        self.wait(lambda: self.api("patrols"), 30)
+        task = next(t for t in self.api("tasks?search=" + urllib.parse.quote("调研")) if t["executor"] == old["id"])
+        self.assertEqual((task["manager"], task["creator"], task["state"]), ("sh", "sh", "active"))
 
-    def test_yog_always_reports_working_ghroth(self):
-        # Ghroth answers no one; while it works, every patrol must reach azathoth (program-enforced).
-        self.api("send", {"to": "gh", "text": "SLEEP 8"})
-        msg = self.wait(lambda: next(m for m in self.api("messages?agent_id=az") if m["sender"] == "yo"
-                                     and "Ghroth is working" in m["text"]), 20)
-        self.assertIn("SLEEP 8", msg["text"])
+    def test_ghroth_reports_to_azathoth_directly(self):
+        self.chat("gh", 'CALL temple_send {"to": "az", "text": "harness fix ready"}')
+        self.wait(lambda: next(m for m in self.api("messages?agent_id=az") if m["sender"] == "gh" and m["state"] == "handled"))
 
     def test_latest_result_survives_restart(self):
         # Yog reads the last finished turn from the temple log, so a restart right after finishing loses nothing.

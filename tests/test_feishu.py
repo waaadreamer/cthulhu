@@ -178,16 +178,11 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         await self.t.route('azathoth','ghroth','related',task_id=task)
         await self.t.route('nyarlathotep','ghroth','coordinate',task_id=task)
         await self.t.route('ghroth','nyarlathotep','receipt',task_id=task)
-        self.assertEqual(self.t.store.task(task)['state'],'open')
+        self.assertEqual(self.t.store.task(task)['state'],'active')
 
-    async def test_task_supervision_observes_active_nyarl(self):
+    async def test_task_supervision_reaches_nyarl_task(self):
         task=self.t.store.add_task('Feishu task')['id']
         await self.t.route('shub','nyarlathotep','authorized task',task_id=task)
-        self.n.current_task=task
-        self.n.state='working'
-        row=await self.t.continuations.snapshot(task)
-        self.assertEqual([r['agent_id'] for r in row['executors']],['nyarlathotep'])
-        self.assertTrue(row['active'])
         await self.t.route('nyarlathotep','yog','task supervision',task_id=task)
 
     async def test_channel_never_receives_web_memory_and_scope_auth_is_server_side(self):

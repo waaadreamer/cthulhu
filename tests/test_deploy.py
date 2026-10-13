@@ -137,7 +137,7 @@ class EndToEnd(unittest.TestCase):
                   "deploy": {"repo": str(origin)}}
         fake = str(cls.node / "tests" / "fake_codex.py")
         galaxy = {"id": "g1", "token": gtoken, "temple_ws": f"ws://127.0.0.1:{cls.port}/ws", "state": str(cls.dir / "state"),
-                  "codex": fake, "cwd": str(cls.dir), "patrol_interval": 3600, "runtimes": {}}
+                  "codex": fake, "cwd": str(cls.dir), "runtimes": {}}
         (cls.dir / "temple.json").write_text(json.dumps(temple))
         (cls.dir / "galaxy.json").write_text(json.dumps(galaxy))
         os.chmod(fake, 0o755)

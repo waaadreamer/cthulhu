@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowRight, Loader2 } from 'lucide-react'
-import { api, Directory, Message, Task, Role, ROLE_META, timeLabel } from '../api'
+import { api, Directory, Message, Task, Role, ROLE_META, TASK_STATE, timeLabel } from '../api'
 import { Avatar } from './Avatar'
+import { TaskPanel } from './TaskPanel'
 
-export function Messages({ dir, live }: { dir: Directory; live: Message[] }) {
+export function Messages({ dir, live, taskTick }: { dir: Directory; live: Message[]; taskTick: number }) {
   const [filter, setFilter] = useState('')
   const [task, setTask] = useState<Task | null>(null)
   return (
     <div className="flex h-full min-h-0 flex-col lg:flex-row">
-      <TaskList selected={task?.id} onSelect={setTask} live={live} />
+      <TaskList selected={task?.id} onSelect={setTask} taskTick={taskTick} />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-4xl px-4 py-6 sm:px-8">
           <h2 className="mb-2 font-semibold text-white">{task?.title ?? '全部消息'}</h2>
           {task && <p className="mb-3 break-all text-xs text-slate-500">{task.id}</p>}
+          {task && <TaskPanel key={task.id} taskId={task.id} dir={dir} tick={taskTick} />}
           <div className="mb-5 flex flex-wrap gap-2">
             <FilterChip active={!filter} onClick={() => setFilter('')}>全部角色</FilterChip>
             {dir.agents.map((a) => (
@@ -26,7 +28,7 @@ export function Messages({ dir, live }: { dir: Directory; live: Message[] }) {
   )
 }
 
-function TaskList({ selected, onSelect, live }: { selected?: string; onSelect: (t: Task | null) => void; live: Message[] }) {
+function TaskList({ selected, onSelect, taskTick }: { selected?: string; onSelect: (t: Task | null) => void; taskTick: number }) {
   const [tasks, setTasks] = useState<Task[]>([])
   const [state, setState] = useState('')
   const [search, setSearch] = useState('')
@@ -47,6 +49,10 @@ function TaskList({ selected, onSelect, live }: { selected?: string; onSelect: (
     }, 150)
     return () => { cancelled = true; clearTimeout(timer) }
   }, [query, refresh])
+  // Live state changes (checkpoints, verdicts) refresh the list in place without resetting it.
+  useEffect(() => {
+    if (taskTick) api<Task[]>(query).then((rows) => setTasks((prev) => prev.map((t) => rows.find((r) => r.id === t.id) ?? t))).catch(() => {})
+  }, [taskTick])
   const older = async () => {
     const current = generation.current
     setBusy(true); setError('')
@@ -61,15 +67,16 @@ function TaskList({ selected, onSelect, live }: { selected?: string; onSelect: (
     <input aria-label="搜索历史任务" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索任务或消息"
       className="mb-2 w-full rounded-lg border border-white/10 bg-black/20 p-2 text-sm" />
     <select aria-label="任务状态" value={state} onChange={(e) => setState(e.target.value)} className="mb-3 w-full rounded-lg bg-abyss-800 p-2 text-sm">
-      <option value="">全部状态</option><option value="open">进行中</option><option value="done">已完成</option>
+      <option value="">全部状态</option>
+      {Object.entries(TASK_STATE).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
     </select>
     <button onClick={() => onSelect(null)} className={`mb-2 w-full rounded-lg p-2 text-left text-sm ${!selected ? 'bg-white/10 text-white' : 'text-slate-400'}`}>全部消息</button>
     {tasks.map((t) => {
-      const update = [...live].reverse().find((m) => m.task_id === t.id && m.status === 'done')
+      const st = TASK_STATE[t.state] ?? TASK_STATE.active
       return <button key={t.id} onClick={() => onSelect(t)} data-history-task={t.id}
         className={`mb-1 w-full rounded-lg p-2 text-left ${selected === t.id ? 'bg-white/10 text-white' : 'text-slate-400 hover:bg-white/5'}`}>
         <span className="block break-words text-sm">{t.title}</span>
-        <span className="text-xs text-slate-500">{update || t.state === 'done' ? '已完成' : '进行中'} · {timeLabel(t.created_at)}</span>
+        <span className="text-xs text-slate-500"><span className={`chip ${st.chip}`}>{st.label}</span> · {timeLabel(t.created_at)}</span>
       </button>
     })}
     {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}

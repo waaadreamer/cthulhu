@@ -499,7 +499,7 @@ class Agent:
 
     async def preempt(self) -> None:
         """An urgent message arrived: abort the running batch. Its unfinished messages are requeued
-        behind the urgent one; background turns (memory, patrol) are left alone."""
+        behind the urgent one; background turns (memory) are left alone."""
         if not self.in_batch or self.preempted or any(m["priority"] >= URGENT for m in self.batch):
             return
         log.info("%s preempting the current batch for an urgent message", self.name)
@@ -640,7 +640,7 @@ class Agent:
 
     def drain_status(self):
         memory_busy = hasattr(self, "memory_lock") and self.memory_lock.locked()
-        background_busy = memory_busy or getattr(self, "patrol_busy", False)
+        background_busy = memory_busy
         return {"draining": self.draining, "active_runs": self.inflight_runs,
                 "state": self.state, "queued": len(self.queue), "background_busy": background_busy,
                 "safe": self.draining and self.inflight_runs == 0 and not background_busy and not getattr(self, "in_batch", False)}

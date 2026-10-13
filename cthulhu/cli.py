@@ -65,7 +65,7 @@ def main() -> None:
         launch["token"] = os.environ.pop("CTHULHU_AGENT_TOKEN")
         role = Role(launch["role"])
         models = cfg.get("models", {})
-        kw = {"patrol_interval": cfg.get("patrol_interval", 300)} if role == Role.YOG else {}
+        kw = {}
         agent = CLASSES[role](cfg["temple_ws"], launch, cfg["codex"], cfg.get("cwd") or str(Path.home()),
                               Path(cfg["state"]) / launch["id"], model=models.get(role.value, cfg.get("model")),
                               effort=cfg.get("effort"), runtime=cfg.get("runtimes", {}).get(role.value),
