@@ -156,6 +156,8 @@ class Temple:
     def __init__(self, config: dict):
         self.config = config
         self.secret: str = config["secret"]
+        # Browsers share cookies across ports of one host: a second temple on the same host needs its own name.
+        self.cookie: str = config.get("session_cookie", "cthulhu_session")
         self.store = Store(Path(config["db"]))
         self.agents: dict[str, Conn] = {}
         self.galaxies: dict[str, Conn] = {}
@@ -1118,7 +1120,7 @@ class Temple:
     # HTTP API for the owner
 
     def _session(self, request: Request) -> str | None:
-        token = request.cookies.get("cthulhu_session")
+        token = request.cookies.get(self.cookie)
         sess = token and self.store.session(sha256(token))
         return sess["username"] if sess else None
 
@@ -1141,10 +1143,10 @@ class Temple:
             body = await request.json() if request.method == "POST" else {}
             q = request.query_params
             if path == "logout":
-                token = request.cookies.get("cthulhu_session", "")
+                token = request.cookies.get(self.cookie, "")
                 self.store.drop_session(sha256(token))
                 resp = JSONResponse({"ok": True})
-                resp.delete_cookie("cthulhu_session")
+                resp.delete_cookie(self.cookie)
                 return resp
             if path == "maintenance":
                 return JSONResponse(await self.maintenance_state(
@@ -1284,12 +1286,12 @@ class Temple:
         token = secrets.token_urlsafe(32)
         self.store.add_session(sha256(token), acct["username"], SESSION_TTL)
         resp = JSONResponse({"user": acct["username"]})
-        resp.set_cookie("cthulhu_session", token, max_age=SESSION_TTL, httponly=True, secure=True, samesite="strict")
+        resp.set_cookie(self.cookie, token, max_age=SESSION_TTL, httponly=True, secure=True, samesite="strict")
         return resp
 
     async def owner_ws(self, ws: WebSocket) -> None:
         # Browser websocket: authenticated by cookie, read-only event stream.
-        token = ws.cookies.get("cthulhu_session", "")
+        token = ws.cookies.get(self.cookie, "")
         if not self.store.session(sha256(token)):
             await ws.close(4003)
             return
