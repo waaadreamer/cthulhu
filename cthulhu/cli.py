@@ -87,11 +87,16 @@ def main() -> None:
         cfg["galaxies"].append(g)
         Path(args.config).write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
         der = ssl.PEM_cert_to_DER_cert(Path(public["cert"]).read_text())
-        galaxy = {"id": args.id, "token": token, "temple_ws": public["ws"], "tls_pin": hashlib.sha256(der).hexdigest()}
+        # galaxy_defaults: config every new galaxy of this temple starts with (e.g. galaxy_ai).
+        galaxy = cfg.get("galaxy_defaults", {}) | {"id": args.id, "name": args.name, "token": token, "temple_ws": public["ws"],
+                                                  "tls_pin": hashlib.sha256(der).hexdigest()}
         blob = base64.urlsafe_b64encode(json.dumps(galaxy).encode()).decode()
-        print(f"galaxy {args.id} registered; restart the temple (systemctl restart cthulhu-v2-temple) to accept it.\n")
+        ref = public.get("ref", "main")
+        env = " ".join(f"{k}={v}" for k, v in (public.get("install_env") or {}).items())
+        print(f"galaxy {args.id} registered; restart the temple to accept it.\n")
         print("Run on the target machine, as the user the agents should run as (no root needed):\n")
-        print(f"curl -fsSL https://raw.githubusercontent.com/{public['repo']}/main/deploy/install-galaxy.sh | bash -s -- {blob}")
+        print(f"curl -fsSL https://raw.githubusercontent.com/{public['repo']}/{ref}/deploy/install-galaxy.sh | "
+              f"{env + ' ' if env else ''}CTHULHU_REF={ref} bash -s -- {blob}")
     elif args.cmd in ("stop", "resume"):
         from .ops import call
         r = asyncio.run(call(args.config, f"maintenance_{args.cmd}", agent_id=args.agent_id))

@@ -10,21 +10,25 @@
 # Environment overrides:
 #   CTHULHU_HOME   install directory            (default ~/.cthulhu)
 #   CTHULHU_REPO   git URL                      (default github.com/waaadreamer/cthulhu)
+#   CTHULHU_REF    branch to run                (default main)
+#   CTHULHU_SERVICE  systemd --user unit name   (default cthulhu-galaxy; set another to run next to it)
 #   CODEX_BIN      existing codex binary         (default: download @openai/codex via npm, else skip)
 set -euo pipefail
 
 BLOB="${1:?usage: install-galaxy.sh <provision-blob>}"
 HOME_DIR="${CTHULHU_HOME:-$HOME/.cthulhu}"
 REPO="${CTHULHU_REPO:-https://github.com/waaadreamer/cthulhu.git}"
+REF="${CTHULHU_REF:-main}"
+SERVICE="${CTHULHU_SERVICE:-cthulhu-galaxy}"
 say() { printf '\033[1;35m[cthulhu]\033[0m %s\n' "$*"; }
 
 mkdir -p "$HOME_DIR" && cd "$HOME_DIR"
 
 # 1. code
 if [ -d src/.git ]; then
-  say "updating code"; git -C src pull -q --ff-only
+  say "updating code"; git -C src fetch -q origin "$REF" && git -C src checkout -q "$REF" && git -C src pull -q --ff-only
 else
-  say "cloning $REPO"; git clone -q "$REPO" src
+  say "cloning $REPO ($REF)"; git clone -q -b "$REF" "$REPO" src
 fi
 
 # 2. python >= 3.11 venv (uv if present, else system python)
@@ -93,7 +97,7 @@ chmod +x run.sh
 # 6. keep it running: systemd --user if available, else nohup
 if systemctl --user status >/dev/null 2>&1; then
   mkdir -p ~/.config/systemd/user
-  cat > ~/.config/systemd/user/cthulhu-galaxy.service <<EOF
+  cat > ~/.config/systemd/user/$SERVICE.service <<EOF
 [Unit]
 Description=Cthulhu galaxy
 [Service]
@@ -104,9 +108,9 @@ KillMode=control-group
 WantedBy=default.target
 EOF
   systemctl --user daemon-reload
-  systemctl --user enable --now cthulhu-galaxy >/dev/null
+  systemctl --user enable --now "$SERVICE" >/dev/null
   loginctl enable-linger "$USER" 2>/dev/null || true
-  say "running as systemd --user service cthulhu-galaxy"
+  say "running as systemd --user service $SERVICE"
 else
   pkill -f "$HOME_DIR/run.sh" 2>/dev/null || true
   nohup setsid "$HOME_DIR/run.sh" >/dev/null 2>&1 < /dev/null &
