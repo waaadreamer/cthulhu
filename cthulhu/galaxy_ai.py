@@ -93,7 +93,9 @@ class GalaxyAI:
         req = urllib.request.Request(self.anthropic["base_url"].rstrip("/") + "/v1/messages",
                                      data=json.dumps(body).encode(), method="POST",
                                      headers={"content-type": "application/json", "x-api-key": key,
-                                              "authorization": f"Bearer {key}", "anthropic-version": "2023-06-01"})
+                                              "authorization": f"Bearer {key}", "anthropic-version": "2023-06-01",
+                                              # Relays commonly reject urllib's default agent with a bare 403.
+                                              "user-agent": "cthulhu-galaxy-ai/1"})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             data = json.loads(r.read())
         return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
