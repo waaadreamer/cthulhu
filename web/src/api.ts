@@ -42,6 +42,7 @@ export interface RuntimeStatus {
   fallback_active: boolean
   config: RuntimeCfg
   default: RuntimeCfg
+  pending?: RuntimeCfg | null
 }
 
 export interface Galaxy { id: string; name: string; online: boolean; created_at: number; revision?: string; deployable?: boolean; draining?: boolean; hub?: boolean; spawn?: boolean }

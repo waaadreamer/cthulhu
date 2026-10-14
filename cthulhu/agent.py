@@ -147,6 +147,7 @@ class Agent:
                 **({"recovery": self.recovery} if self.recovery else {}),
                 **({"background_recovery": self.background_recovery} if self.background_recovery else {}),
                 "api_result": getattr(self.runtime, "api_result", None),
+                "pending": self.pending_runtime,
                 "default": self.default_runtime}
 
     # system prompt and tools
@@ -758,6 +759,7 @@ class Agent:
             # Owner changed this role's backend; applied before the next turn.
             self.pending_runtime = frame["config"] or self.default_runtime
             self.wake.set()
+            asyncio.create_task(self.report(self.state))     # the settings page shows it as pending
         elif t == "rpc":
             if frame["method"] == "drain":
                 self.draining = bool(frame.get("params", {}).get("enabled", True))

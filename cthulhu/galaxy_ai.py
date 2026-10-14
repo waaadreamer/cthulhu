@@ -61,6 +61,9 @@ class GalaxyAI:
 
     def configure(self, cfg: dict) -> None:
         """Local galaxy.json settings, replaced by the temple's when it sends them."""
+        if cfg:
+            log.info("galaxy AI: %s via %s", cfg.get("model", DEFAULT_MODEL),
+                     cfg.get("provider") or (cfg.get("anthropic") or {}).get("base_url") or "nothing")
         self.provider = cfg.get("provider")
         self.model = cfg.get("model", DEFAULT_MODEL)
         self.anthropic = cfg.get("anthropic")        # {"base_url": ..., "api_key_env": ...}

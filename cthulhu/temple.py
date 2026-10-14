@@ -751,12 +751,49 @@ class Temple:
 
     # runtime settings (owner-editable per role, or per agent for old_ones)
 
+    def galaxy_ai_for(self, gid: str) -> tuple[dict | None, str]:
+        """A hub's Galaxy AI settings and where they come from: owner setting > temple config for the galaxy > temple default."""
+        owner = (self.store.setting("galaxy_ai") or {}).get(gid)
+        if owner:
+            return owner, "owner"
+        gcfg = next((x for x in self.config.get("galaxies", []) if x["id"] == gid), {})
+        if gcfg.get("galaxy_ai"):
+            return gcfg["galaxy_ai"], "config"
+        return self.config.get("galaxy_ai"), "default" if self.config.get("galaxy_ai") else "none"
+
+    async def set_galaxy_ai(self, gid: str, cfg: dict | None) -> None:
+        if not self.store.galaxy(gid):
+            raise ValueError("unknown galaxy")
+        if cfg is not None:
+            provider, model = cfg.get("provider"), cfg.get("model")
+            offered = next((p for p in self.api_broker.catalog(gid) if p["id"] == provider), None)
+            if not offered or model not in offered["models"] or offered["model_backends"].get(model) != "claude":
+                raise ValueError("Galaxy AI needs a Claude model offered to this galaxy by an online provider")
+            cfg = {"provider": provider, "model": model}
+        overrides = self.store.setting("galaxy_ai") or {}
+        if cfg is None:
+            overrides.pop(gid, None)
+        else:
+            overrides[gid] = cfg
+        self.store.set_setting("galaxy_ai", overrides)
+        conn = self.galaxies.get(gid)
+        if conn and "hub_v1" in conn.capabilities:
+            await conn.send({"type": "galaxy_ai", "config": self.galaxy_ai_for(gid)[0]})
+
     def runtime_for(self, a: dict) -> dict | None:
         overrides = self.store.setting("runtimes") or {}
         default = (self.config.get('feishu') or {}).get('runtime') if a['role'] == Role.NYARLATHOTEP else None
         if a["role"] == Role.OLD_ONE:
-            default = self.config.get("old_one_runtime") or validate_runtime(OLD_ONE_RUNTIME)
+            # Per old_one > its galaxy's default ("galaxy:<id>") > all old_ones > temple config.
+            gid = a.get("galaxy_id") or (self.store.old_one(a["id"]) or {}).get("galaxy_id")
+            default = (overrides.get(f"galaxy:{gid}") or overrides.get(Role.OLD_ONE)
+                       or self.config.get("old_one_runtime") or validate_runtime(OLD_ONE_RUNTIME))
+            return overrides.get(a["id"]) or default
         return overrides.get(a["id"]) or overrides.get(a["role"]) or default
+
+    def covers(self, key: str, r: dict) -> bool:
+        """Whether a runtime setting key applies to this old_one (its own, its galaxy's, or all old_ones')."""
+        return r["id"] == key or key == Role.OLD_ONE or key == f"galaxy:{r['galaxy_id']}"
 
     async def set_runtime(self, key: str, cfg: dict | None) -> None:
         if cfg is not None:
@@ -776,7 +813,9 @@ class Temple:
                 if choice.get("provider"):
                     targets = [a for a in self.store.agents(include_stopped=False)
                                if a["id"] == key or a["role"] == key] + [
-                        r | {"role": Role.OLD_ONE} for r in self.store.roster() if r["id"] == key or key == Role.OLD_ONE]
+                        r | {"role": Role.OLD_ONE} for r in self.store.roster() if self.covers(key, r)]
+                    if key.startswith("galaxy:") and self.store.galaxy(key[7:]):
+                        targets.append({"id": key, "role": Role.OLD_ONE, "galaxy_id": key[7:]})
                     for a in targets:
                         conn = self.agents.get(a["id"]) if a["role"] != Role.OLD_ONE else self.galaxies.get(a["galaxy_id"])
                         capability = "galaxy_api_claude_v1" if choice["backend"] == "claude" else "galaxy_api_v1"
@@ -797,11 +836,11 @@ class Temple:
                 if conn:
                     await conn.send({"type": "runtime", "config": self.runtime_for(a)})
         for r in self.store.roster():
-            if r["id"] == key or key == Role.OLD_ONE:
+            if self.covers(key, r):
                 conn = self.galaxies.get(r["galaxy_id"])
                 if conn:
                     await conn.send({"type": "runtime", "agent_id": r["id"],
-                                     "config": self.runtime_for({"id": r["id"], "role": Role.OLD_ONE})})
+                                     "config": self.runtime_for({"id": r["id"], "role": Role.OLD_ONE, "galaxy_id": r["galaxy_id"]})})
 
     # owner
 
@@ -898,10 +937,8 @@ class Temple:
             self.galaxies[cid] = conn
             if old:
                 await old.ws.close(4002, "replaced")
-            # Galaxy AI settings are central: a galaxy's own entry, else the temple default.
-            gcfg = next((x for x in self.config.get("galaxies", []) if x["id"] == cid), {})
             await conn.send({"type": "welcome", "id": cid, "name": g["name"], "api_version": API_VERSION, "version": BUILD,
-                             "galaxy_ai": gcfg.get("galaxy_ai") or self.config.get("galaxy_ai")})
+                             "galaxy_ai": self.galaxy_ai_for(cid)[0]})
             await self.sync_galaxy(cid)
             if "hub_v1" in conn.capabilities:
                 await conn.send({"type": "bindings", "rows": self.bindings()})
@@ -1254,8 +1291,24 @@ class Temple:
                 choices = {k: v for k, v in MODEL_CHOICES.items() if k != "galaxy_api"}
                 if providers:
                     choices["galaxy_api"] = sorted({m for p in providers for m in p["models"]})
+                defaults = {f"galaxy:{g['id']}": self.runtime_for({"id": "", "role": Role.OLD_ONE, "galaxy_id": g["id"]})
+                            for g in self.store.galaxies() if g["id"] not in self.closed_galaxies}
                 return JSONResponse({"overrides": self.store.setting("runtimes") or {},
-                                     "models": choices, "providers": providers})
+                                     "models": choices, "providers": providers, "old_one_defaults": defaults})
+            if path == "galaxy_ai":
+                if request.method == "POST":
+                    await self.set_galaxy_ai(body["galaxy"], body.get("config"))
+                rows = []
+                for g in self.store.galaxies():
+                    conn = self.galaxies.get(g["id"])
+                    if conn is None or "hub_v1" not in conn.capabilities:
+                        continue
+                    cfg, source = self.galaxy_ai_for(g["id"])
+                    models = sorted({(p["id"], m) for p in self.api_broker.catalog(g["id"])
+                                     for m, b in p["model_backends"].items() if b == "claude"})
+                    rows.append({"id": g["id"], "name": g["name"], "config": cfg, "source": source,
+                                 "choices": [{"provider": p, "model": m} for p, m in models]})
+                return JSONResponse(rows)
             if path == "file":
                 # Text preview: up to 2 MB inline. Media and downloads go through /api/raw.
                 r = await self.read_file(q["path"], q.get("galaxy") or None, FILE_PREVIEW_BYTES)

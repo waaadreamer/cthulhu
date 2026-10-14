@@ -117,3 +117,29 @@ class ClaudePreemption(Preemption):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OldOneRuntimeDefaults(unittest.TestCase):
+    """An old_one runs its own setting, else its galaxy's default, else the all-old_ones default, else temple config."""
+
+    def test_precedence(self):
+        tmp = tempfile.TemporaryDirectory()
+        cfg = {"backend": "codex", "model": "cfg-model"}
+        t = Temple({"secret": "s", "db": str(Path(tmp.name) / "t.db"), "old_one_runtime": cfg,
+                    "galaxies": [{"id": "g1", "name": "a", "token": "x"}, {"id": "g2", "name": "b", "token": "y"}],
+                    "gods": [{"id": "azathoth", "role": "azathoth", "galaxy": "g1"}]})
+        try:
+            t.store.set_roster("g1", [{"id": "o1", "name": "o1"}])
+            t.store.set_roster("g2", [{"id": "o2", "name": "o2"}])
+            run = lambda aid: t.runtime_for({"id": aid, "role": Role.OLD_ONE})["model"]
+            self.assertEqual((run("o1"), run("o2")), ("cfg-model", "cfg-model"))
+            asyncio.run(t.set_runtime("old_one", {"backend": "codex", "model": "gpt-6-luna"}))
+            asyncio.run(t.set_runtime("galaxy:g1", {"backend": "codex", "model": "gpt-6.1-sol"}))
+            self.assertEqual((run("o1"), run("o2")), ("gpt-6.1-sol", "gpt-6-luna"))
+            asyncio.run(t.set_runtime("o1", {"backend": "codex", "model": "gpt-6-astra"}))
+            self.assertEqual(run("o1"), "gpt-6-astra")
+            # A new old_one (no roster row yet) gets its galaxy's default.
+            self.assertEqual(t.runtime_for({"id": "new", "role": Role.OLD_ONE, "galaxy_id": "g1"})["model"], "gpt-6.1-sol")
+        finally:
+            t.store.db.close()
+            tmp.cleanup()

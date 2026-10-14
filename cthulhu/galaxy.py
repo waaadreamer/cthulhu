@@ -156,6 +156,8 @@ class Galaxy:
             await self.reconcile(frame["agents"])
         elif frame.get("type") in ("bindings", "runtime") and self.hub:
             await self.hub.frame(frame)
+        elif frame.get("type") == "galaxy_ai" and self.hub:
+            self.hub.ai.configure(frame.get("config") or self.config.get("galaxy_ai") or {})
         elif frame.get("type") == "rpc" and frame["method"].startswith("hub_"):
             if not self.hub:
                 raise ValueError("this galaxy has no hub")
