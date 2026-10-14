@@ -136,6 +136,8 @@ class Galaxy:
         if self.provider and w.get("api_version") == 1:
             asyncio.create_task(self._register_provider())
         if self.hub:
+            if w.get("galaxy_ai"):
+                self.hub.ai.configure(w["galaxy_ai"])
             asyncio.create_task(self.hub.on_temple())
 
     async def _register_provider(self):

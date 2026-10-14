@@ -57,7 +57,10 @@ def extract_json(text: str) -> dict:
 class GalaxyAI:
     def __init__(self, link, config: dict):
         self.link = link
-        cfg = config.get("galaxy_ai") or {}
+        self.configure(config.get("galaxy_ai") or {})
+
+    def configure(self, cfg: dict) -> None:
+        """Local galaxy.json settings, replaced by the temple's when it sends them."""
         self.provider = cfg.get("provider")
         self.model = cfg.get("model", DEFAULT_MODEL)
         self.anthropic = cfg.get("anthropic")        # {"base_url": ..., "api_key_env": ...}

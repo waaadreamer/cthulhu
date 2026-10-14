@@ -898,7 +898,10 @@ class Temple:
             self.galaxies[cid] = conn
             if old:
                 await old.ws.close(4002, "replaced")
-            await conn.send({"type": "welcome", "id": cid, "name": g["name"], "api_version": API_VERSION, "version": BUILD})
+            # Galaxy AI settings are central: a galaxy's own entry, else the temple default.
+            gcfg = next((x for x in self.config.get("galaxies", []) if x["id"] == cid), {})
+            await conn.send({"type": "welcome", "id": cid, "name": g["name"], "api_version": API_VERSION, "version": BUILD,
+                             "galaxy_ai": gcfg.get("galaxy_ai") or self.config.get("galaxy_ai")})
             await self.sync_galaxy(cid)
             if "hub_v1" in conn.capabilities:
                 await conn.send({"type": "bindings", "rows": self.bindings()})
