@@ -337,8 +337,9 @@ OLD_ONE_TOOLS = [
           "stage_note": {"type": "string", "description": "仅更新时必填：上一阶段做到哪了、为什么换"}}, ["command", "rationale"]),
     tool("finish_task", "任务完成：提交可核验的证据（产物路径、命令输出、提交号），交阿撒托斯审核。检查点随即暂停。",
          {"evidence": STR}, ["evidence"]),
-    tool("report", "向阿撒托斯汇报。blocker=true 表示卡住、需要它决定。每 10 分钟只能一次（和找同伴的限流互不影响），一次写完整。",
-         {"text": STR, "blocker": {"type": "boolean"}}, ["text"]),
+    tool("report", "向阿撒托斯汇报，或回答阿撒托斯的问题。blocker=true 表示卡住、需要它决定。每 10 分钟只能一次"
+         "（和找同伴的限流互不影响），一次写完整；回答阿撒托斯发来的消息时填 reply_to（消息 ID），每条免限一次。",
+         {"text": STR, "blocker": {"type": "boolean"}, "reply_to": {"type": "string", "description": "被回答的消息 ID"}}, ["text"]),
     tool("list_tasks", "列出全局在途任务及其执行者（找谁问问题用）。"),
     tool("task_view", "查看一个任务的明细（你自己的任务，或其他任务的公开状态）。", {"task_id": STR}, ["task_id"]),
 ]

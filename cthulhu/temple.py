@@ -374,8 +374,35 @@ class Temple:
                        f"({t['executor'] or '—'}) | {t['state']}{off} | {t['line'] or '—'} | {clip(t['description'], 60)}")
         return "\n".join(out)
 
+    def galaxies_text(self) -> str:
+        """Every galaxy azathoth can reach, what it is for, and its old_ones (idle ones can take a quick send)."""
+        cfg = {g["id"]: g for g in self.config.get("galaxies", [])}
+        busy = {t["executor"]: t["id"] for t in self.store.tasks(open_only=True, limit=500) if t["executor"]}
+        me = (self.god(Role.AZATHOTH) or {}).get("galaxy_id")
+        out = []
+        for g in self.store.galaxies():
+            conn = self.galaxies.get(g["id"])
+            if g["id"] == me:
+                kind = "你所在的机器（中心神殿），不接任务"
+            elif g["id"] in self.closed_galaxies:
+                kind = "不接任务"
+            elif conn is None:
+                kind = "离线：new_task / send 会失败"
+            elif "hub_v1" not in conn.capabilities:
+                kind = "在线但未升级到 v3，不能派任务"
+            else:
+                kind = "在线，可派任务"
+            olds = [f"{r['name']}({r['id']})·" + (f"在途 {busy[r['id']]}" if r["id"] in busy else
+                                                   "空闲" if r["state"] != "offline" else "离线")
+                    for r in self.store.roster(g["id"]) if r["desired"] == "running"]
+            desc = cfg.get(g["id"], {}).get("description", "")
+            out.append(f"- {g['id']}（{g['name']}）：{kind}" + (f"。用途：{desc}" if desc else "")
+                       + (f"\n  旧日支配者：{'；'.join(olds)}" if olds else ""))
+        return "\n".join(out) or "（没有星系）"
+
     async def azathoth_header(self) -> str:
-        return ("<bindings>\n任务绑定表（在途任务 + 24 小时内结束的任务）：\n"
+        return ("<galaxies>\n星系（new_task 的 galaxy 参数用 ID）：\n" + self.galaxies_text() + "\n</galaxies>\n"
+                "<bindings>\n任务绑定表（在途任务 + 24 小时内结束的任务）：\n"
                 "task | 星系 | 执行者 | 状态 | 检查点 | 描述\n" + self.bindings_text() + "\n</bindings>\n\n")
 
     async def hub_report(self, galaxy_id: str, p: dict) -> bool:

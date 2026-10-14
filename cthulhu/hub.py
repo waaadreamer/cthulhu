@@ -419,16 +419,22 @@ class Hub:
             "通过：close_task；不通过：continue_task（附新指令）。"))
         return {"submitted": True, "state": "review", "note": "已提交阿撒托斯审核，等待结果；被驳回会收到新指令。"}
 
-    async def report_up(self, agent_id: str, text: str, blocker: bool) -> dict:
+    async def report_up(self, agent_id: str, text: str, blocker: bool, reply_to: str | None = None) -> dict:
+        # Answering azathoth's (or the owner's) message is exempt once per message, like peer replies.
+        orig = reply_to and self.store.message(reply_to)
+        exempt = bool(orig and orig["receiver"] == agent_id and orig["sender_role"] in (Role.AZATHOTH.value, OWNER)
+                      and not orig["replied"])
         last = (self.store.setting("report_at") or {}).get(agent_id, 0)
-        wait = last + roles.REPORT_INTERVAL - time.time()
-        if wait > 0:
+        if not exempt and last + roles.REPORT_INTERVAL > time.time():
             return {"error": "rate_limited", "next_allowed_at": stamp(last + roles.REPORT_INTERVAL),
-                    "note": "向阿撒托斯汇报每 10 分钟一次；把要说的合并成一次写完整。"}
+                    "note": "向阿撒托斯汇报每 10 分钟一次；把要说的合并成一次写完整。回复阿撒托斯发来的消息时填 reply_to，每条免限一次。"}
         if not text.strip():
             raise ValueError("empty report")
         t = self.current_task(agent_id)
-        self.store.set_setting("report_at", (self.store.setting("report_at") or {}) | {agent_id: time.time()})
+        if exempt:
+            self.store.x("UPDATE messages SET replied=1 WHERE id=?", (reply_to,))
+        else:
+            self.store.set_setting("report_at", (self.store.setting("report_at") or {}) | {agent_id: time.time()})
         name = self.store.old_one(agent_id)["name"]
         if t and blocker:
             async with self.lock(t["id"]):
@@ -436,8 +442,10 @@ class Hub:
                 t["data"]["blocker"] = {"text": text, "at": time.time()}
                 self.event(t, "blocker", "报告阻塞：" + clip(text, 500))
                 await self.save(t)
+        label = "阻塞" if blocker else "回复" if exempt else "汇报"
         await self.to_temple("report", task_id=t and t["id"], kind="blocker" if blocker else "report",
-                             text=f"[{'阻塞' if blocker else '汇报'} · {name}" + (f" · 任务 {t['id']}" if t else "") + f"]\n{text}",
+                             text=f"[{label} · {name}（{agent_id}）" + (f" · 任务 {t['id']}" if t else "")
+                                  + (f" · 回复 {reply_to}" if exempt else "") + f"]\n{text}",
                              attention=True, direct=True)
         return {"sent": True}
 
@@ -684,7 +692,7 @@ class Hub:
         if method == "send":
             return await self.peer_send(aid, p["to"], p["text"], int(p.get("priority") or 0), p.get("reply_to"))
         if method == "report":
-            return await self.report_up(aid, p["text"], bool(p.get("blocker")))
+            return await self.report_up(aid, p["text"], bool(p.get("blocker")), p.get("reply_to"))
         if method == "register_task_probe":
             return await self.register_task_probe(aid, p["command"], p.get("rationale", ""), p.get("stage_note", ""))
         if method == "finish_task":

@@ -33,7 +33,8 @@ class V3(unittest.TestCase):
         cls.port = free_port()
         gtoken = secrets.token_hex(16)
         temple = {"secret": secrets.token_hex(16), "db": str(cls.dir / "temple.db"), "listen": ["127.0.0.1", cls.port],
-                  "digest_every": 3, "galaxies": [{"id": "g1", "name": "test", "token": gtoken}],
+                  "digest_every": 3, "galaxies": [{"id": "g1", "name": "test", "token": gtoken,
+                                                   "description": "测试用星系：跑测试任务"}],
                   "gods": [{"id": "az", "role": "azathoth", "galaxy": "g1"}],
                   "old_one_runtime": {"backend": "codex", "model": "fake"}}
         (cls.dir / "work").mkdir()
@@ -164,10 +165,14 @@ class V3(unittest.TestCase):
         self.wait(lambda: self.task(tid)["state"] == "review")
         self.chat("CALL close_task " + json.dumps({"task_id": tid, "note": "好"}, ensure_ascii=False))
         self.wait(lambda: self.task(tid)["state"] == "closed")
-        # The bindings table is in azathoth's turn header.
+        # The galaxy table and the bindings table are in azathoth's turn header.
         turn = self.chat("SHOW_CONTEXT")
         self.assertIn("<bindings>", turn["reply"])
         self.assertIn(tid, turn["reply"])
+        self.assertIn("<galaxies>", turn["reply"])
+        self.assertIn("g1（test）", turn["reply"])
+        self.assertIn("用途：测试用星系", turn["reply"])
+        self.assertIn(f"{aid}", turn["reply"].split("</galaxies>")[0])
         # A related task reuses the now-free old_one; an unrelated one would not.
         t2 = self.new_task("继续 REPOalpha 的工作")
         self.assertTrue(t2["reused"], t2)
@@ -222,6 +227,13 @@ class V3(unittest.TestCase):
         # The reply is exempt once per incoming message.
         self.tell(bid, "send", {"to": aid, "text": "在 /tmp", "reply_to": q["id"]})
         self.wait(lambda: any(m["sender"] == bid for m in self.api(f"hub_messages?agent_id={aid}")))
+        # Answering azathoth's question is exempt once, even with the report bucket used up.
+        self.chat("CALL temple_send " + json.dumps({"to": aid, "text": "问题：产物在哪？"}, ensure_ascii=False))
+        q = self.wait(lambda: next(m for m in self.api(f"hub_messages?agent_id={aid}") if m["text"].startswith("问题：产物在哪")))
+        self.tell(aid, "report", {"text": "在 stage.txt", "reply_to": q["id"]})
+        self.wait(lambda: any("在 stage.txt" in m["text"] and "回复" in m["text"] for m in self.az_messages()))
+        self.tell(aid, "report", {"text": "再答一次", "reply_to": q["id"]})
+        self.wait(lambda: "rate_limited" in (self.api(f"latest?agent_id={aid}").get("last_reply") or ""))
         # Old_ones cannot message azathoth directly.
         self.tell(aid, "send", {"to": "az", "text": "hi"})
         self.wait(lambda: "report" in (self.api(f"latest?agent_id={aid}").get("last_reply") or ""))
