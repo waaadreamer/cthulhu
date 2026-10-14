@@ -94,7 +94,7 @@ class ControlledRuntime(CodexRuntime):
 
 
 class SteeringAgent(Agent):
-    role = Role.GHROTH
+    role = Role.OLD_ONE
 
 
 class SteeringTests(unittest.IsolatedAsyncioTestCase):

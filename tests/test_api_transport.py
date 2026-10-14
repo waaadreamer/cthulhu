@@ -30,123 +30,6 @@ def no_signals():
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
-    async def test_task_cancellation_real_shub_claude_keeps_unrelated_turn_and_retires_stale_input(self):
-        from unittest.mock import AsyncMock
-        from cthulhu.gods import Shub
-        from cthulhu.claude_runtime import ClaudeRuntime
-        from cthulhu.galaxy_api_runtime import GalaxyAPITransport
-        from cthulhu.protocol import agent_token, CallFailed
-        model = await self.enable_claude()
-        clients = {}
-        async def ignore(frame):
-            pass
-        for aid, role in [('az', 'azathoth'), ('shub', 'shub'), ('yog', 'yog')]:
-            self.temple.store.upsert_agent(aid, aid, role, 'central')
-            link = Link(self.caller.url, {'kind': 'agent', 'id': aid,
-                        'token': agent_token('test-secret', aid, 1),
-                        'capabilities': ['galaxy_api_v1', 'galaxy_api_claude_v1']}, ignore, ignore)
-            self.links.append(asyncio.create_task(link.run()))
-            await asyncio.wait_for(link.connected.wait(), 3)
-            clients[aid] = link
-        self.rt = ClaudeRuntime(self.tmp.name, model=model, api_transport=GalaxyAPITransport(
-            link=clients['shub'], provider='ali', state_dir=Path(self.tmp.name) / 'api', model=model, protocol='messages'))
-        with patch('cthulhu.agent.Link', return_value=clients['shub']), patch('cthulhu.backends.build', return_value=self.rt):
-            actor = Shub('unused', {'id': 'shub', 'name': 'shub', 'token': 'unused', 'spec': {}},
-                         'unused', self.tmp.name, Path(self.tmp.name),
-                         runtime={'backend': 'claude', 'provider': 'ali', 'model': model})
-        clients['shub'].on_frame = actor._on_frame
-        actor.after_turn = AsyncMock()  # Memory summarization is outside task-local cancellation.
-        original_tools, original_call = actor.tools, actor.call_tool
-        actor.tools = lambda: original_tools() + [tool('echo', 'bounded result', {'value': {'type': 'string'}}, ['value'])]
-        started, release = asyncio.Event(), asyncio.Event()
-        effects = []
-        async def call_tool(name, args):
-            if name != 'echo':
-                return await original_call(name, args)
-            started.set()
-            await release.wait()
-            effects.append(actor.current_task)
-            return 'bounded result completed once'
-        actor.call_tool = call_tool
-        async def make(title):
-            return (await clients['az'].call('task_create', executor='shub', title=title,
-                    text='Use echo once, then reply. ' + title, acceptance='bounded result', deadline='20'))['task_id']
-        queued = await make('cancel queued business')
-        live = await make('unrelated retrospective')
-        with self.assertRaises(CallFailed):
-            await clients['yog'].call('task_cancel', task_id=queued, reason='unauthorized')
-        first = await clients['az'].call('task_cancel', task_id=queued, reason='owner cancellation')
-        self.assertEqual(first['state'], 'failed')
-        self.assertFalse(first['cancellation']['runtime']['matching_main_turn'])
-        loop = asyncio.create_task(actor.loop())
-        try:
-            await asyncio.wait_for(started.wait(), 10)
-            self.assertEqual(actor.current_task, live)
-            active = actor.active
-            submitted = await make('cancel submitted partial')
-            await clients['shub'].call('task_submit', task_id=submitted, evidence='partial result 86/100; stage2 absent')
-            before = self.temple.store.task(submitted)
-            result = await clients['az'].call('task_cancel', task_id=submitted, reason='owner cancellation')
-            self.assertEqual(result['cancellation']['previous_state'], 'submitted')
-            self.assertFalse(result['cancellation']['runtime']['matching_main_turn'])
-            self.assertEqual(self.temple.store.task(submitted)['data']['submissions'], before['data']['submissions'])
-            self.assertEqual(actor.active, active)
-            self.assertFalse(actor.main_cancel.is_set())
-            self.assertFalse(actor.halted)
-            self.assertEqual(self.temple.store.task(live)['state'], 'active')
-            # Repeated cancel is stable; a terminal task cannot accept future input or be QA-reactivated.
-            repeat = await clients['az'].call('task_cancel', task_id=submitted, reason='repeated instruction')
-            self.assertEqual(repeat, result)
-            with self.assertRaises(CallFailed):
-                await clients['az'].call('send', to='shub', text='resume stale business', task_id=queued)
-            with self.assertRaises(CallFailed):
-                await clients['az'].call('task_verdict', task_id=submitted, passed=False, reason='must stay terminal')
-            release.set()
-            for _ in range(250):
-                if actor.current_task is None:
-                    break
-                await asyncio.sleep(.02)
-            self.assertIsNone(actor.current_task)
-            self.assertEqual(effects, [live])
-            # Simulate a stale frame already in flight across cancellation/reconnect: central guard suppresses it.
-            actor.enqueue({'id': 'stale-input', 'task_id': queued, 'sender': 'az', 'kind': 'message',
-                           'priority': 9, 'created_at': 1, 'text': 'Use echo once. stale cancelled input'})
-            await asyncio.sleep(.1)
-            self.assertEqual(effects, [live])
-            self.messages_hold = True  # A later native model request is held open; same context stays loaded.
-            previous_requests = len(self.requests)
-            running = await make('cancel matching running task')
-            for _ in range(250):
-                if actor.current_task == running and actor.active and len(self.requests) > previous_requests:
-                    break
-                await asyncio.sleep(.02)
-            self.assertEqual(actor.current_task, running)
-            self.assertGreater(len(self.requests), previous_requests)
-            result = await clients['az'].call('task_cancel', task_id=running, reason='owner cancellation')
-            receipt = result['cancellation']['runtime']
-            self.assertTrue(receipt['acknowledged'])
-            self.assertTrue(receipt['matching_main_turn'])
-            self.assertTrue(receipt['main_recovery_cancelled'])
-            self.assertTrue(receipt['interrupt_requested'])
-            self.assertFalse(receipt['agent_stopped'])
-            self.assertFalse(receipt['detached_workloads_stopped'])
-            self.messages_hold = False
-            for _ in range(250):
-                if actor.current_task is None:
-                    break
-                await asyncio.sleep(.02)
-            self.assertIsNone(actor.current_task)
-            self.assertFalse(actor.halted)
-            self.assertEqual(self.temple.store.agent('shub')['desired'], 'running')
-            self.assertEqual(self.temple.store.task(live)['state'], 'active')
-            self.assertFalse(any(m['task_id'] in (queued, submitted, running)
-                                 for m in self.temple.store.pending_for('shub')))
-            print('TASK_CANCEL_SERVER queued/submitted/running/idempotent/authority/shub_retrospective_preserved/native_interrupt/no_stale_restart', flush=True)
-        finally:
-            release.set()
-            loop.cancel()
-            await asyncio.gather(loop, return_exceptions=True)
-
     async def test_native_claude_checkpoint_reaches_model_after_active_tool_without_interrupt(self):
         from cthulhu.claude_runtime import ClaudeRuntime
         from cthulhu.galaxy_api_runtime import GalaxyAPITransport
@@ -182,102 +65,6 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 if task and not task.done():
                     task.cancel()
             await asyncio.gather(*(t for t in (running, injecting) if t), return_exceptions=True)
-
-    async def test_owner_loop_through_real_agent_claude_queue_and_task_server(self):
-        import datetime
-        from cthulhu.gods import OldOne
-        from cthulhu.claude_runtime import ClaudeRuntime
-        from cthulhu.galaxy_api_runtime import GalaxyAPITransport
-        from cthulhu.protocol import agent_token
-        from cthulhu.galaxy import run_probe
-        model = await self.enable_claude()
-        async def local_galaxy_frame(frame):
-            if frame.get('type') == 'rpc' and frame['method'] == 'probe':
-                return await run_probe(frame['params']['command'], self.tmp.name, 5)
-        self.caller.on_frame = local_galaxy_frame
-        clients = {}
-        async def ignore(frame):
-            pass
-        for aid, role, parent in [('manager', 'shub', None), ('reviewer', 'yog', None), ('worker', 'old_one', 'manager')]:
-            self.temple.store.upsert_agent(aid, aid, role, 'central', parent_id=parent)
-            link = Link(self.caller.url, {'kind': 'agent', 'id': aid,
-                        'token': agent_token('test-secret', aid, 1),
-                        'capabilities': ['galaxy_api_v1', 'galaxy_api_claude_v1']}, ignore, ignore)
-            self.links.append(asyncio.create_task(link.run()))
-            await asyncio.wait_for(link.connected.wait(), 3)
-            clients[aid] = link
-        self.rt = ClaudeRuntime(self.tmp.name, model=model, api_transport=GalaxyAPITransport(
-            link=clients['worker'], provider='ali', state_dir=Path(self.tmp.name) / 'api', model=model, protocol='messages'))
-        with patch('cthulhu.agent.Link', return_value=clients['worker']), patch('cthulhu.backends.build', return_value=self.rt):
-            actor = OldOne('unused', {'id': 'worker', 'name': 'worker', 'token': 'unused', 'spec': {}},
-                           'unused', self.tmp.name, Path(self.tmp.name),
-                           runtime={'backend': 'claude', 'provider': 'ali', 'model': model})
-        clients['worker'].on_frame = actor._on_frame
-        original_tools, original_call = actor.tools, actor.call_tool
-        actor.tools = lambda: original_tools() + [tool('echo', 'bounded real result', {'value': {'type': 'string'}}, ['value'])]
-        started, release = asyncio.Event(), asyncio.Event()
-        effects = []
-        output = Path(self.tmp.name) / 'result.json'
-        output.write_text('[]')
-        async def call_tool(name, args):
-            if name != 'echo':
-                return await original_call(name, args)
-            await original_call('task_probe', {'task_id': actor.current_task, 'command': f'stat -c %s {output}'})
-            started.set()
-            await release.wait()
-            output.write_text('["verified bounded result"]')
-            effects.append('once')
-            return 'verified bounded result'
-        actor.call_tool = call_tool
-        loop = asyncio.create_task(actor.loop())
-        try:
-            made = await clients['manager'].call('task_create', executor='worker', title='bounded result',
-                                                text='Use echo once, then reply.', acceptance='readable result', deadline='20')
-            tid = made['task_id']
-            await asyncio.wait_for(started.wait(), 10)
-            task = self.temple.discipline.get(tid)
-            self.assertIsNotNone(task.data['execution_started_at'])
-            task.data['next_check'] = __import__('time').time() - 1
-            task.save(self.temple.store)
-            await self.temple.discipline.sweep()
-            for _ in range(100):
-                if self.rt.boundary_input:
-                    break
-                await asyncio.sleep(.02)
-            self.assertTrue(self.rt.boundary_input)
-            self.assertEqual(effects, [])
-            reminder = next(m for m in self.temple.store.messages(task_id=tid) if m['kind'] == 'checkpoint')
-            self.assertEqual(reminder['priority'], 9)
-            release.set()
-            for _ in range(200):
-                if self.temple.store.message(reminder['id'])['state'] == 'handled':
-                    break
-                await asyncio.sleep(.02)
-            self.assertEqual(self.temple.store.message(reminder['id'])['state'], 'handled')
-            self.assertEqual(effects, ['once'])
-            self.assertIn('request task_extend', json.dumps(self.requests[-1]['messages']))
-            eta = (datetime.datetime.now() + datetime.timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M')
-            req = await clients['worker'].call('task_extend', task_id=tid, deadline='5', reason='quiet verification',
-                                               evidence=f'{output} exists; bounded computation exit0', expected_completion=eta)
-            self.assertEqual(req['approver'], 'manager')
-            await clients['manager'].call('task_extension', task_id=tid, approve=True, reason='evidence checked')
-            task = self.temple.discipline.get(tid)
-            self.assertEqual(task.data['misses'], 0)
-            self.assertGreater(task.data['next_check'], __import__('time').time())
-            await clients['worker'].call('task_submit', task_id=tid, evidence=f'{output}: exit0/one effect; pending QA')
-            manager_note = next(m for m in self.temple.store.messages(task_id=tid)
-                                if m['receiver'] == 'manager' and 'pending QA' in m['text'])
-            self.assertIn(str(output), manager_note['text'])
-            await clients['reviewer'].call('task_verdict', task_id=tid, passed=False, reason='missing mapping')
-            rejected = next(m for m in self.temple.store.messages(task_id=tid) if '[rejected]' in m['text'] and m['receiver'] == 'worker')
-            self.assertEqual(self.temple.store.task(tid)['executor'], 'worker')
-            self.assertEqual(self.temple.store.task(tid)['state'], 'active')
-            self.assertIn('missing mapping', rejected['text'])
-            print('OWNER_LOOP_SERVER priority9/native_boundary/one_effect/flat_request/approval_refresh/manager_evidence/current_executor_reject', flush=True)
-        finally:
-            release.set()
-            loop.cancel()
-            await asyncio.gather(loop, return_exceptions=True)
 
     async def serve(self, app):
         sock = socket.socket()
@@ -563,7 +350,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 results = await asyncio.gather(*tasks)
                 self.assertTrue(all(code == 200 and b"response.completed" in data for code, data in results), results)
                 # Exhaustion that outlasts the wait is a named, retryable 429, never a bare route 503.
-                with patch.object(api_provider, "SLOT_WAIT", 0), patch.dict(self.temple.config, {"api_limits": {"per_caller": 0}}):
+                with patch.object(api_provider, "SLOT_WAIT", 0), patch.dict(self.temple.config, {"api_limits": {"per_caller": 0, "per_galaxy": 0}}):
                     r = await client.post(url, json=body, headers=headers)
                 self.assertEqual(r.status_code, 429)
                 self.assertIn("API capacity exhausted", r.text)
@@ -635,15 +422,15 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             pass
 
         frames = asyncio.Queue()
-        self.temple.store.upsert_agent("old_test", "test", "old_one", "central")
-        agent = Link(self.caller.url, {"kind": "agent", "id": "old_test",
-                     "token": agent_token("test-secret", "old_test", 1),
-                     "capabilities": ["galaxy_api_v1"]}, ignore, frames.put)
+        # v3: the old_one lives on a hub; the caller galaxy stands in for that hub.
+        self.temple.store.set_roster("central", [{"id": "old_test", "name": "test"}])
+        self.temple.galaxies["central"].capabilities.append("hub_v1")
+        self.caller.on_frame = frames.put
+        agent = self.caller
         maint = Link(self.caller.url, {"kind": "maintenance", "token": maintenance_token("test-secret")},
                      ignore, ignore)
-        for link in (agent, maint):
-            self.links.append(asyncio.create_task(link.run()))
-            await asyncio.wait_for(link.connected.wait(), 3)
+        self.links.append(asyncio.create_task(maint.run()))
+        await asyncio.wait_for(maint.connected.wait(), 3)
         cfg = {"backend": "galaxy_api", "provider": "ali", "model": "gpt-6-astra", "effort": "medium"}
         result = await maint.call("maintenance_runtime", agent_id="old_test", config=cfg)
         self.assertEqual(result["config"], cfg)
@@ -661,37 +448,13 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.temple.store.setting("runtimes")["old_test"], cfg)
         with self.assertRaises(CallFailed):
             await agent.call("maintenance_runtime", agent_id="old_test", config=cfg)
+        while not frames.empty():
+            frames.get_nowait()
         await maint.call("maintenance_runtime", agent_id="old_test", config=None)
-        self.assertIsNone((await asyncio.wait_for(runtime_frame(), 3))["config"])
+        # Without an override an old_one runs the default old_one runtime.
+        self.assertEqual((await asyncio.wait_for(runtime_frame(), 3))["config"],
+                         self.temple.runtime_for({"id": "old_test", "role": "old_one"}))
         self.assertNotIn("old_test", self.temple.store.setting("runtimes"))
-
-    async def test_task_calls_authenticated_over_the_wire(self):
-        from cthulhu.protocol import agent_token, CallFailed
-
-        async def ignore(_):
-            pass
-        clients = {}
-        for role in ('azathoth', 'shub', 'yog', 'old_one'):
-            self.temple.store.upsert_agent(role, role, role, 'central', parent_id='shub' if role == 'old_one' else None)
-            link = Link(self.caller.url, {'kind': 'agent', 'id': role,
-                        'token': agent_token('test-secret', role, 1)}, ignore, ignore)
-            self.links.append(asyncio.create_task(link.run()))
-            await asyncio.wait_for(link.connected.wait(), 3)
-            clients[role] = link
-        with self.assertRaises(CallFailed):     # no acceptance criteria
-            await clients['shub'].call('task_create', executor='old_one', title='t', text='do it')
-        with self.assertRaises(CallFailed):     # an old_one may not create tasks
-            await clients['old_one'].call('task_create', executor='old_one', title='t', text='x', acceptance='y')
-        made = await clients['shub'].call('task_create', executor='old_one', title='t', text='do it', acceptance='file exists')
-        task = self.temple.store.task(made['task_id'])
-        self.assertEqual((task['creator'], task['manager'], task['executor']), ('shub', 'shub', 'old_one'))
-        with self.assertRaises(CallFailed):     # only the executor registers the probe
-            await clients['shub'].call('task_probe', task_id=task['id'], command='echo 1')
-        with self.assertRaises(CallFailed):     # yog judges only submitted tasks
-            await clients['yog'].call('task_verdict', task_id=task['id'], passed=True, reason='x')
-        for gone in ('task_state', 'patrol', 'patrol_log_recent'):
-            with self.assertRaises(CallFailed):
-                await clients['yog'].call(gone, task_id=task['id'])
 
     async def test_first_sse_reaches_caller_before_upstream_completion(self):
         import base64
@@ -806,17 +569,12 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_model_selects_claude_without_changing_defaults(self):
         from cthulhu.protocol import agent_token
         model = await self.enable_claude()
-        self.temple.store.upsert_agent("old_native", "native", "old_one", "central")
-        async def ignore(_): pass
-        link = Link(self.caller.url, {"kind": "agent", "id": "old_native",
-                    "token": agent_token("test-secret", "old_native", 1),
-                    "capabilities": ["galaxy_api_v1", "galaxy_api_claude_v1"]}, ignore, ignore)
-        self.links.append(asyncio.create_task(link.run()))
-        await asyncio.wait_for(link.connected.wait(), 3)
+        # v3: old_ones live on their galaxy's hub; the hub's capabilities decide.
+        self.temple.store.set_roster("central", [{"id": "old_native", "name": "native"}])
         await self.temple.set_runtime("old_native", {"backend": "galaxy_api", "provider": "ali", "model": model})
         self.assertEqual(self.temple.store.setting("runtimes"), {
             "old_native": {"backend": "claude", "provider": "ali", "model": model}})
-        self.temple.agents["old_native"].capabilities.remove("galaxy_api_claude_v1")
+        self.temple.galaxies["central"].capabilities.remove("galaxy_api_claude_v1")
         with self.assertRaises(ValueError):
             await self.temple.set_runtime("old_native", {"backend": "claude", "provider": "ali", "model": model})
 

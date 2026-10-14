@@ -1,9 +1,11 @@
-"""Temple: the central server.
+"""Temple: the central server (v3, docs/design-v3.md).
 
-Holds the agent registry, routes every message, enforces the authority matrix
-and serves the owner web UI. Agents and galaxies connect over websockets and
-are identified by the token in their hello frame; nothing they claim about
-themselves is trusted.
+Serves azathoth, the owner and the galaxies' hubs. Old_ones never connect here:
+their hub forwards bindings, the task index, reports and cross-galaxy relays.
+The temple keeps the global index (task_index, roster), turns checkpoint results
+into one digest for azathoth every 10 minutes, and runs the owner-approved sudo queue.
+Agents and galaxies are identified by the token in their hello frame; nothing
+they claim about themselves is trusted.
 """
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ from .api_provider import ProviderBroker, API_VERSION
 from . import BUILD
 from . import roles
 from .protocol import agent_token, dumps, sha256, maintenance_token
-from .roles import OWNER, Denied, Role
+from .roles import OWNER, SYSTEM, Denied, Role
 from .store import Store, new_id
 
 
@@ -44,9 +46,10 @@ def clip(text: str | None, n: int) -> str:
 log = logging.getLogger(__name__)
 
 SESSION_TTL = 30 * 86400
-OWNER_PRIORITY = 9
-TASK_STATUSES = ("progress", "blocked")   # labels on a manager's report; tasks close only by verdict
-SYSTEM = "temple"   # sender id of the temple's own notices
+OWNER_PRIORITY = roles.OWNER_PRIORITY
+DIGEST_EVERY = 600         # temple config "digest_every" overrides (tests)
+SUDO_WAIT = 1800
+TERMINAL = ("closed", "cancelled", "assign_failed")
 FILE_PREVIEW_BYTES = 2 * 1024 * 1024
 FILE_RAW_BYTES = 40 * 1024 * 1024    # base64 over the galaxy websocket stays under its 64 MB frame limit
 MEDIA_EXT = {
@@ -154,8 +157,6 @@ class Temple:
         self.config = config
         self.secret: str = config["secret"]
         self.store = Store(Path(config["db"]))
-        from .tasks import Discipline
-        self.discipline = Discipline(self)
         self.agents: dict[str, Conn] = {}
         self.galaxies: dict[str, Conn] = {}
         self.maintainers: set[Conn] = set()
@@ -164,6 +165,8 @@ class Temple:
         self.login_failures: dict[str, list[float]] = {}
         self.api_broker = ProviderBroker(self)
         self.maintenance = set(self.store.setting("maintenance") or [])
+        self.sudo_waiters: dict[str, asyncio.Future] = {}
+        self.offline_since: dict[str, float] = {}
         self._seed()
         from .deploy import Deployer
         self.deployer = Deployer(self)
@@ -183,10 +186,12 @@ class Temple:
     # lookups
 
     def role_of(self, agent_id: str) -> str | None:
-        if agent_id == OWNER:
-            return OWNER
+        if agent_id in (OWNER, SYSTEM):
+            return agent_id
         a = self.store.agent(agent_id)
-        return a["role"] if a else None
+        if a:
+            return a["role"]
+        return Role.OLD_ONE if self.store.old_one(agent_id) else None
 
     def god(self, role: str) -> dict | None:
         return next((a for a in self.store.agents() if a["role"] == role), None)
@@ -201,16 +206,26 @@ class Temple:
                 "stopped_by": (self.store.setting("force_stopped") or {}).get(a["id"]) if a["desired"] != "running" else None,
                 "created_at": a["created_at"], "updated_at": a["updated_at"]}
 
+    def public_old_one(self, r: dict) -> dict:
+        d = r["data"]
+        return {"id": r["id"], "name": r["name"], "role": Role.OLD_ONE.value, "galaxy_id": r["galaxy_id"], "parent_id": None,
+                "desired": r["desired"], "task": "", "task_id": r["task_id"],
+                "online": r["state"] != "offline" and r["galaxy_id"] in self.galaxies, "state": r["state"],
+                "current": d.get("current"), "context_fill": d.get("context_fill"), "runtime": d.get("runtime"),
+                "admission": None, "stopped_by": None, "queued": 0, "memory": {"entries": 0, "tokens": 0},
+                "created_at": d.get("created_at") or r["updated_at"], "updated_at": r["updated_at"]}
+
     def directory(self) -> dict:
         pending = self.store.pending_counts()
         memory = self.store.memory_stats()
         agents = [self.public_agent(a) | {"queued": pending.get(a["id"], 0),
                                           "memory": memory.get(a["id"], {"entries": 0, "tokens": 0})}
-                  for a in self.store.agents()]
+                  for a in self.store.agents()] + [self.public_old_one(r) for r in self.store.roster()]
         galaxies = [g | {"online": g["id"] in self.galaxies, "version": getattr(self.galaxies.get(g["id"]), "version", ""),
                          "revision": (getattr(self.galaxies.get(g["id"]), "deploy", None) or {}).get("revision", ""),
                          "deployable": bool(getattr(self.galaxies.get(g["id"]), "deploy", None)),
-                         "draining": g["id"] in self.maintenance, "spawn": g["id"] not in self.closed_galaxies}
+                         "draining": g["id"] in self.maintenance, "spawn": g["id"] not in self.closed_galaxies,
+                         "hub": "hub_v1" in getattr(self.galaxies.get(g["id"]), "capabilities", [])}
                     for g in self.store.galaxies()]
         return {"agents": agents, "galaxies": galaxies}
 
@@ -223,55 +238,39 @@ class Temple:
 
     async def route(self, sender: str, receiver: str, text: str, *, kind="message",
                     priority=0, reply_to=None, message_id=None, task_id=None, status=None) -> dict:
-        task = self.store.task(task_id) if task_id else None
-        if task and task['data'].get('cancellation') and receiver == task['executor']:
-            raise Denied('cancelled task cannot receive new executor input')
         sender_role, receiver_role = self.role_of(sender), self.role_of(receiver)
         if receiver_role is None:
             raise Denied(f"unknown agent {receiver}")
+        if sender != SYSTEM:
+            roles.require_send(sender_role, receiver_role)
+            roles.require_priority(sender_role, int(priority))
+        if not text.strip():
+            raise ValueError("empty message")
+        if receiver_role == Role.OLD_ONE:
+            return await self.to_old_one(sender, receiver, text, kind=kind, priority=int(priority),
+                                         reply_to=reply_to, message_id=message_id, task_id=task_id)
         target = self.store.agent(receiver)
         if target and target["desired"] != "running":
             raise Denied(f"{target['name']} is stopped; messages are rejected until it is resumed")
-        if sender != SYSTEM:                     # the temple's own notices (deploys, task discipline)
-            roles.require_send(sender_role, receiver_role)
-            # A manager and an old_one talk only within the manager's own team.
-            for manager, worker in ((sender, receiver), (receiver, sender)):
-                if self.role_of(manager) in roles.MANAGERS and self.role_of(worker) == Role.OLD_ONE \
-                        and self.store.agent(worker)["parent_id"] != manager:
-                    raise Denied(f"{worker} belongs to another manager")
-        priority = int(priority)
-        roles.require_priority(sender_role, priority)
-        if Role.NYARLATHOTEP in (sender_role, receiver_role):
-            other = receiver if sender_role == Role.NYARLATHOTEP else sender
-            other_role = self.role_of(other)
-            if other_role not in (OWNER, Role.AZATHOTH, Role.SHUB, SYSTEM):
-                if not task_id or not self.store.task(task_id):
-                    raise Denied('Nyarl peer communication requires a task')
-                links = self.store.q("SELECT sender,receiver FROM messages WHERE task_id=? AND kind!='deploy_request'", (task_id,))
-                linked = {m[k] for m in links for k in ('sender', 'receiver')}
-                associated = self.store.agent(other)
-                if other_role != Role.YOG and other not in linked and (associated or {}).get('spec', {}).get('task_id') != task_id:
-                    raise Denied('peer is not associated with this task')
-                nyarl = sender if sender_role == Role.NYARLATHOTEP else receiver
-                if nyarl not in linked:
-                    raise Denied('Nyarl has not been delegated this task')
-        if not text.strip():
-            raise ValueError("empty message")
-        msg = self.store.add_message(sender, receiver, text, kind, priority, reply_to, message_id, task_id, status)
+        msg = self.store.add_message(sender, receiver, text, kind, int(priority), reply_to, message_id, task_id, status)
         await self.deliver(msg)
         await self.broadcast({"type": "message", "message": msg})
         return msg
 
-    def task_fields(self, sender_role: str, receiver_role: str | None, p: dict) -> tuple[str | None, str | None]:
-        """A message may name an existing task; tasks themselves are made only by task_create / spawn.
-        A manager's report to azathoth may carry a display label; it never changes the task."""
-        task_id = p.get("task_id") or None
-        if task_id and not self.store.task(task_id):
-            raise ValueError(f"unknown task {task_id}")
-        status = p.get("status")
-        if sender_role in roles.MANAGERS and receiver_role == Role.AZATHOTH and task_id and status in TASK_STATUSES:
-            return task_id, status
-        return task_id, None
+    async def to_old_one(self, sender: str, receiver: str, text: str, *, kind="message", priority=0,
+                         reply_to=None, message_id=None, task_id=None) -> dict:
+        """Azathoth's or the owner's message for an old_one: recorded here, delivered by its hub."""
+        r = self.store.old_one(receiver)
+        if not r or r["desired"] != "running":
+            raise Denied(f"{receiver} is not a running old_one")
+        hub = self.galaxies.get(r["galaxy_id"])
+        if hub is None:
+            raise Denied(f"galaxy {r['galaxy_id']} is offline; the message cannot be delivered now")
+        msg = self.store.add_message(sender, receiver, text, kind, priority, reply_to, message_id, task_id)
+        await hub.rpc("hub_deliver", timeout=30, envelope=msg | self.sender_meta(sender))
+        self.store.mark(msg["id"], "delivered")
+        await self.broadcast({"type": "message", "message": msg})
+        return msg
 
     async def deliver(self, msg: dict) -> None:
         current = self.store.message(msg['id'])
@@ -287,11 +286,199 @@ class Temple:
         envelope = msg | self.sender_meta(msg["sender"])
         if msg.get("task_id"):
             task = self.store.task(msg["task_id"])
-            envelope["task_title"] = task and task["title"]
+            envelope["task_title"] = task and clip(task["description"], 40)
         if await conn.send({"type": "message", "message": envelope}):
             # Cancellation may retire this input while the socket send is in flight.
             if self.store.message(msg['id'])['state'] == 'queued':
                 self.store.mark(msg["id"], "delivered")
+
+    # v3 tasks: the temple indexes, the hubs run them
+
+    def azathoth_id(self) -> str:
+        return self.god(Role.AZATHOTH)["id"]
+
+    def galaxy_by(self, key: str) -> dict:
+        g = self.store.galaxy(key) or next((g for g in self.store.galaxies() if g["name"] == key), None)
+        if not g:
+            raise ValueError(f"unknown galaxy {key}; known: " + ", ".join(f"{x['id']}（{x['name']}）" for x in self.store.galaxies()))
+        return g
+
+    def hub(self, galaxy_id: str) -> Conn:
+        conn = self.galaxies.get(galaxy_id)
+        if conn is None:
+            raise Denied(f"galaxy {galaxy_id} is offline")
+        if "hub_v1" not in conn.capabilities:
+            raise Denied(f"galaxy {galaxy_id} has no hub; upgrade it")
+        return conn
+
+    async def new_task(self, galaxy: str, description: str, acceptance: str = "", cwd: str | None = None) -> dict:
+        g = self.galaxy_by(galaxy)
+        if g["id"] in self.closed_galaxies:
+            raise Denied(f"galaxy {g['name']} does not take tasks")
+        if not description.strip():
+            raise ValueError("description is required")
+        conn = self.hub(g["id"])
+        task_id = new_id("t")
+        self.store.index_task(task_id, g["id"], description.strip(), acceptance.strip())
+        await self.task_changed(task_id)
+        try:
+            r = await conn.rpc("hub_assign", timeout=180, task_id=task_id, description=description.strip(),
+                               acceptance=acceptance.strip(), cwd=cwd)
+        except Exception as e:
+            self.store.set_task(task_id, state="assign_failed", closed_at=time.time(), line=f"派单失败：{clip(str(e), 120)}")
+            await self.task_changed(task_id)
+            raise RuntimeError(f"assign failed: {e}; task {task_id} marked assign_failed") from e
+        return {"task_id": task_id, "galaxy": g["id"]} | {k: r.get(k) for k in ("agent_id", "agent_name", "reused", "reason")}
+
+    async def task_command(self, method: str, task_id: str, **params) -> dict:
+        t = self.store.task(task_id)
+        if not t:
+            raise ValueError(f"unknown task {task_id}")
+        return await self.hub(t["galaxy_id"]).rpc(method, timeout=60, task_id=task_id, **params)
+
+    async def task_view(self, task_id: str) -> dict:
+        t = self.store.task(task_id)
+        if not t:
+            raise ValueError(f"unknown task {task_id}")
+        try:
+            return await self.hub(t["galaxy_id"]).rpc("hub_task", timeout=30, task_id=task_id) | {"galaxy_id": t["galaxy_id"]}
+        except Exception as e:
+            return t | {"details": f"明细不可用：{e}"}
+
+    async def task_changed(self, task_id: str | None = None) -> None:
+        if task_id:
+            await self.broadcast({"type": "task", "task_id": task_id})
+        frame = {"type": "bindings", "rows": self.bindings()}
+        for conn in list(self.galaxies.values()):
+            if "hub_v1" in conn.capabilities:
+                await conn.send(frame)
+
+    def bindings(self) -> list[dict]:
+        return [{"task_id": t["id"], "galaxy_id": t["galaxy_id"], "executor": t["executor"], "executor_name": t["executor_name"],
+                 "state": t["state"], "description": clip(t["description"], 80)}
+                for t in self.store.tasks(open_only=True, limit=200)]
+
+    def bindings_text(self) -> str:
+        now = time.time()
+        rows = self.store.tasks(open_only=True, limit=100) + [
+            t for t in self.store.tasks(limit=100) if t["state"] in TERMINAL and (t["closed_at"] or 0) > now - 86400]
+        if not rows:
+            return "（暂无任务）"
+        names = {g["id"]: g["name"] for g in self.store.galaxies()}
+        out = []
+        for t in rows:
+            off = " · 星系离线" if t["galaxy_id"] not in self.galaxies and t["state"] not in TERMINAL else ""
+            out.append(f"{t['id']} | {names.get(t['galaxy_id'], t['galaxy_id'])} | {t['executor_name'] or '—'}"
+                       f"({t['executor'] or '—'}) | {t['state']}{off} | {t['line'] or '—'} | {clip(t['description'], 60)}")
+        return "\n".join(out)
+
+    async def azathoth_header(self) -> str:
+        return ("<bindings>\n任务绑定表（在途任务 + 24 小时内结束的任务）：\n"
+                "task | 星系 | 执行者 | 状态 | 检查点 | 描述\n" + self.bindings_text() + "\n</bindings>\n\n")
+
+    async def hub_report(self, galaxy_id: str, p: dict) -> bool:
+        """A hub's report for azathoth: old_ones' reports go direct, checkpoint results into the digest."""
+        if p.get("direct"):
+            pr = roles.BLOCKER_PRIORITY if p.get("kind") == "blocker" else roles.REPORT_PRIORITY
+            await self.route(SYSTEM, self.azathoth_id(), p["text"], kind="report", priority=pr, task_id=p.get("task_id"))
+        else:
+            self.store.add_digest(p.get("task_id"), p["text"], bool(p.get("attention")))
+        return True
+
+    async def digest_clock(self) -> None:
+        while True:
+            await asyncio.sleep(float(self.config.get("digest_every", DIGEST_EVERY)))
+            try:
+                self.expire_sudo()
+                await self.watch_galaxies()
+                await self.send_digest()
+            except Exception:
+                log.exception("digest failed")
+
+    async def send_digest(self) -> None:
+        rows = self.store.unsent_digest()
+        if not rows:
+            return
+        az = self.azathoth_id()
+        open_n = len(self.store.tasks(open_only=True, limit=500))
+        start = min(r["created_at"] for r in rows)
+        lines = [f"[进度汇总 {time.strftime('%H:%M', time.localtime(start))}–{time.strftime('%H:%M')}] "
+                 f"在途 {open_n} · 需关注 {sum(r['attention'] for r in rows)}"]
+        lines += [("⚠ " if r["attention"] else "✓ ") + r["text"] for r in rows]
+        text = "\n".join(lines)
+        # A digest azathoth has not picked up yet is folded into the new one, so digests never pile up.
+        stale = self.store.one("SELECT * FROM messages WHERE receiver=? AND kind='digest' AND state='queued'"
+                               " ORDER BY created_at DESC LIMIT 1", (az,))
+        if stale:
+            text += "\n（上一条未处理的汇总并入）\n" + stale["text"].split("\n", 1)[-1]
+            self.store.mark(stale["id"], "cancelled")
+        msg = await self.route(SYSTEM, az, text, kind="digest", priority=roles.DIGEST_PRIORITY)
+        self.store.mark_digest([r["id"] for r in rows], msg["id"])
+
+    async def watch_galaxies(self) -> None:
+        now = time.time()
+        for g in self.store.galaxies():
+            if g["id"] in self.galaxies or not self.store.tasks(open_only=True, galaxy_id=g["id"], limit=1):
+                self.offline_since.pop(g["id"], None)
+                continue
+            since = self.offline_since.setdefault(g["id"], now)
+            if now - since >= float(self.config.get("digest_every", DIGEST_EVERY)) and not self.offline_since.get(g["id"] + ":told"):
+                self.offline_since[g["id"] + ":told"] = now
+                self.store.add_digest(None, f"星系 {g['name']}（{g['id']}）已离线超过 10 分钟，其上任务的检查点上报会延后到达。", True)
+        for key in [k for k in self.offline_since if k.endswith(":told") and k[:-5] in self.galaxies]:
+            self.offline_since.pop(key)
+
+    # v3 sudo approvals (design §1.1.1b): the owner approves each command in the web UI
+
+    async def sudo_request(self, caller_galaxy: str, p: dict) -> dict:
+        command = str(p.get("command", "")).strip().removeprefix("sudo ").strip()
+        if not command:
+            raise ValueError("command is required")
+        timeout = max(10.0, min(float(p.get("timeout") or 600), 3600.0))
+        a = self.store.add_approval(command, str(p.get("reason", "")), p.get("cwd"), timeout)
+        fut = asyncio.get_running_loop().create_future()
+        self.sudo_waiters[a["id"]] = fut
+        await self.broadcast({"type": "approval", "approval": a})
+        try:
+            decision = await asyncio.wait_for(fut, SUDO_WAIT)
+        except asyncio.TimeoutError:
+            self.store.set_approval(a["id"], state="expired", decided_at=time.time())
+            await self.broadcast({"type": "approval", "approval": self.store.approval(a["id"])})
+            return {"approved": False, "state": "expired", "note": "主人 30 分钟内没有批准，请求作废"}
+        finally:
+            self.sudo_waiters.pop(a["id"], None)
+        if not decision["approve"]:
+            return {"approved": False, "state": "rejected", "note": "主人拒绝" + (f"：{decision['note']}" if decision.get("note") else "")}
+        target = self.galaxies.get(caller_galaxy)
+        try:
+            if target is None:
+                raise RuntimeError("galaxy offline")
+            # Exactly the text the owner saw, read back from the record.
+            r = await target.rpc("sudo_exec", timeout=timeout + 30, command=a["command"], cwd=a["cwd"], limit=timeout)
+            state = "done" if r.get("code") == 0 else "failed"
+        except Exception as e:
+            r, state = {"code": None, "stdout": "", "stderr": str(e)}, "failed"
+        self.store.set_approval(a["id"], state=state, finished_at=time.time(), result=json.dumps(r, ensure_ascii=False)[:20000])
+        await self.broadcast({"type": "approval", "approval": self.store.approval(a["id"])})
+        return {"approved": True, "state": state, **r}
+
+    async def sudo_decide(self, approval_id: str, approve: bool, note: str = "") -> dict:
+        a = self.store.approval(approval_id)
+        fut = self.sudo_waiters.get(approval_id)
+        if not a or a["state"] != "pending" or not fut or fut.done():
+            if a and a["state"] == "pending":
+                self.store.set_approval(approval_id, state="expired", decided_at=time.time())
+            raise ValueError("no pending approval with this id (it may have expired)")
+        self.store.set_approval(approval_id, state="approved" if approve else "rejected", note=note, decided_at=time.time())
+        fut.set_result({"approve": approve, "note": note})
+        await self.broadcast({"type": "approval", "approval": self.store.approval(approval_id)})
+        return self.store.approval(approval_id)
+
+    def expire_sudo(self) -> None:
+        # Requests orphaned by a temple restart can never be executed.
+        for a in self.store.approvals("pending"):
+            if a["id"] not in self.sudo_waiters:
+                self.store.set_approval(a["id"], state="expired", decided_at=time.time())
 
     # agent calls: (conn, params) -> result
 
@@ -305,25 +492,15 @@ class Temple:
             return await self.handle_api_call(conn, method, p)
         me = self.store.agent(conn.id)
         role = me["role"]
-        if method.startswith("task_"):
-            return await self.discipline.call(conn.id, method, p)
         if method == "send":
-            task_id, status = self.task_fields(role, self.role_of(p["to"]), p)
             msg = await self.route(conn.id, p["to"], p["text"], kind=p.get("kind", "message"),
-                                   priority=int(p.get("priority") or 0), reply_to=p.get("reply_to"),
-                                   task_id=task_id, status=status)
-            return {"id": msg["id"], "task_id": task_id}
+                                   priority=int(p.get("priority") or 0), reply_to=p.get("reply_to"), task_id=p.get("task_id"))
+            return {"id": msg["id"]}
         if method == "handled":
             msg = self.store.message(p["id"])
             if msg and msg["receiver"] == conn.id and msg['state'] != 'cancelled':
                 self.store.mark(p["id"], "handled")
             return True
-        if method == "directory":
-            d = self.directory()
-            if role not in roles.ADMIN_READ:
-                # Others only see whom they can talk to, without Nyarl's admission policy.
-                d["agents"] = [a | {"admission": None} for a in d["agents"] if roles.can_send(role, a["role"]) or a["id"] == conn.id]
-            return d
         if method == "status":
             self.status[conn.id] = p
             await self.broadcast({"type": "status", "agent_id": conn.id, "status": p})
@@ -358,43 +535,56 @@ class Temple:
             return True
         if method == "chat_history":
             return self.store.turns(conn.id, limit=int(p.get("limit", 20)))
-        if method == "latest_result":
-            if role not in roles.LATEST_RESULT:
-                raise Denied("latest_result is reserved for yog")
-            return await self.latest_result(p["agent_id"])
-        if method == "patrol_log":
-            if role != Role.YOG:
-                raise Denied("only yog writes the patrol log")
-            self.store.add_patrol(p["summary"])
-            await self.broadcast({"type": "patrol"})
-            return True
-        if method in ("deploy", "deploy_request", "deploy_requests", "deploy_status"):
-            return await self.deploy_call(role, conn.id, method, p)
+        if method == "task_input_guard":
+            return {"allowed": True}
+        if role != Role.AZATHOTH:
+            raise Denied(f"unknown or forbidden call {method}")
+        # azathoth only below
         if method == "notify_owner":
-            if role != Role.AZATHOTH:
-                raise Denied("only azathoth speaks to the owner unprompted")
             await self.note_owner(p["text"], model=p.get("model"), origin=p.get("origin"), task_id=p.get("task_id"),
                                   kind=p.get("kind"), **({"activity": p["activity"]} if p.get("activity") else {}))
             return True
-        if method in ("spawn", "stop", "restart", "delete"):
-            if role not in roles.MANAGERS:
-                raise Denied(f"{role} may not manage old_ones")
-            return await getattr(self, method)(p, conn.id)
-        if role in roles.ADMIN_READ:
-            if method == "messages":
-                return self.store.messages(p.get("agent_id"), limit=min(int(p.get("limit", 50)), 500),
-                                           search=p.get("search"), task_id=p.get("task_id"))
-            if method == "tasks":
-                return self.store.tasks(p.get("search"), limit=min(int(p.get("limit", 20)), 100))
-            if method == "agent":
-                a = self.store.agent(p["agent_id"])
-                return a and (self.public_agent(a) | {"spec": a["spec"]})
-            if method == "owner_chat":
-                az = self.god(Role.AZATHOTH)
-                return self.store.turns(az["id"], limit=int(p.get("limit", 20)), search=p.get("search"))
+        if method in ("deploy", "deploy_status"):
+            return await self.deploy_call(role, conn.id, method, p)
+        if method == "azathoth_header":
+            return await self.azathoth_header()
+        if method == "new_task":
+            return await self.new_task(p["galaxy"], p["description"], p.get("acceptance", ""), p.get("cwd"))
+        if method == "close_task":
+            return await self.task_command("hub_close", p["task_id"], note=p.get("note", ""))
+        if method == "continue_task":
+            return await self.task_command("hub_continue", p["task_id"], instruction=p["instruction"])
+        if method == "cancel_task":
+            return await self.task_command("hub_cancel", p["task_id"], reason=p.get("reason", ""))
+        if method == "manage_old_one":
+            return await self.control_old_one(p["action"], p["agent_id"])
+        if method == "latest_result":
+            return await self.latest_result(p["agent_id"])
+        if method == "sudo_request":
+            return await self.sudo_request(me["galaxy_id"], p)
+        if method == "messages":
+            return self.store.messages(p.get("agent_id"), limit=min(int(p.get("limit", 50)), 500),
+                                       search=p.get("search"), task_id=p.get("task_id"))
+        if method == "list_tasks":
+            return [{k: t[k] for k in ("id", "galaxy_id", "state", "executor", "executor_name", "line", "summary", "description")}
+                    for t in self.store.tasks(p.get("search"), limit=min(int(p.get("limit", 50)), 200), state=p.get("state"),
+                                              galaxy_id=p.get("galaxy_id"), open_only=not p.get("all"))]
+        if method == "task_view":
+            return await self.task_view(p["task_id"])
+        if method == "owner_chat":
+            return self.store.turns(conn.id, limit=int(p.get("limit", 20)), search=p.get("search"))
         raise Denied(f"unknown or forbidden call {method}")
 
+    async def control_old_one(self, action: str, agent_id: str) -> dict:
+        r = self.store.old_one(agent_id)
+        if not r:
+            raise ValueError(f"unknown old_one {agent_id}")
+        return await self.hub(r["galaxy_id"]).rpc("hub_control", timeout=30, action=action, agent_id=agent_id)
+
     async def latest_result(self, agent_id: str) -> dict:
+        r = self.store.old_one(agent_id)
+        if r:
+            return await self.hub(r["galaxy_id"]).rpc("hub_latest", timeout=30, agent_id=agent_id)
         a = self.store.agent(agent_id)
         if not a:
             raise Denied(f"unknown agent {agent_id}")
@@ -449,57 +639,26 @@ class Temple:
 
     # lifecycle
 
-    async def spawn(self, p: dict, creator: str) -> dict:
-        """An old_one belongs to the manager that created it and is born bound to a task. Ghroth's work in
-        their own git worktree of the harness on ghroth's galaxy (the galaxy creates it)."""
-        harness = self.role_of(creator) == Role.GHROTH
-        galaxy = self.store.galaxy(self.store.agent(creator)["galaxy_id"] if harness else p["galaxy_id"])
-        if not galaxy:
-            raise Denied(f"unknown galaxy {p.get('galaxy_id')}")
-        if galaxy["id"] in self.closed_galaxies and not harness:
-            raise Denied(f"galaxy {galaxy['name']} does not host old_ones")
-        if not p.get("task", "").strip():
-            raise ValueError("an old_one needs a task")
-        aid = new_id("old")
-        if p.get('task_id'):
-            await self.discipline.prepare_handover(creator, p['task_id'])
-        task = self.discipline.bind_spawn(creator, p, aid)
-        spec = {"task": p["task"], "skill": p.get("skill", ""), "model": p.get("model"),
-                "task_id": task.id, "acceptance": task.acceptance, "deadline": task.deadline,
-                **({"worktree": f"old/{aid}"} if harness else {"cwd": p.get("cwd")})}
-        a = self.store.upsert_agent(aid, p["name"], Role.OLD_ONE, galaxy["id"], creator, spec)
-        # Recorded before the galaxy launches it, so its first welcome already carries this runtime.
-        overrides = self.store.setting("runtimes") or {}
-        overrides[a["id"]] = validate_runtime(OLD_ONE_RUNTIME)
-        self.store.set_setting("runtimes", overrides)
-        await self.sync_galaxy(galaxy["id"])
-        await self.broadcast({"type": "directory", **self.directory()})
-        await self.discipline.changed(task)
-        return {"id": a["id"], "name": a["name"], "galaxy_id": galaxy["id"], "task_id": task.id}
-
-    async def stop(self, p: dict, by: str) -> bool:
-        return await self.halt(self._managed(p["agent_id"], by)["id"], by)
-
     async def delete(self, p: dict, by: str) -> bool:
         """A stopped agent leaves the directory; its messages and tasks stay in history."""
-        a = self._managed(p["agent_id"], by) if by != OWNER else self.store.agent(p["agent_id"])
+        if self.store.old_one(p["agent_id"]):
+            await self.control_old_one("delete", p["agent_id"])
+            return True
+        a = self.store.agent(p["agent_id"])
         if not a or a["desired"] != "stopped":
             raise ValueError("only a stopped agent can be deleted")
         self.store.set_agent(a["id"], desired="deleted")
         await self.broadcast({"type": "directory", **self.directory()})
         return True
 
-    async def restart(self, p: dict, by: str) -> bool:
-        a = self._managed(p["agent_id"], by)
-        if a["id"] in (self.store.setting("force_stopped") or {}):
-            raise Denied(f"{a['name']} was force-stopped by the owner; only the owner can resume it")
-        return await self.relaunch(a["id"], by)
-
-    # Shub's old_one stop/restart, and the owner's / maintenance force-stop and resume of any agent.
+    # The owner's / maintenance force-stop and resume of any agent.
 
     async def halt(self, agent_id: str, by: str, force: bool = False) -> bool:
         """Stop an agent now: revoke it (persisted), abort its turn, cancel its pending work, kill its processes.
         A force stop (owner / maintenance) can only be lifted by the owner or maintenance."""
+        if self.store.old_one(agent_id):
+            await self.control_old_one("stop", agent_id)
+            return True
         a = self.store.agent(agent_id)
         if not a:
             raise Denied(f"unknown agent {agent_id}")
@@ -521,16 +680,13 @@ class Temple:
         await self.drop_agent_conn(a["id"])
         self.status.pop(a["id"], None)
         await self.sync_galaxy(a["galaxy_id"])     # the galaxy kills its process tree
-        for row in self.store.q("SELECT id FROM tasks WHERE executor=? AND state IN ('active','submitted','blocked_on_owner')", (agent_id,)):
-            task = self.discipline.get(row['id'])
-            task.log('executor_stopped', '执行者已撤权，未完成合同待实名改派或结束；原截止保留', by=by)
-            task.save(self.store)
-            await self.discipline.tell(self.discipline.superior(task), f'[executor stopped] {task.brief()}\n'
-                                       'Preserve artifacts and reassign or end this contract; other work is not canceled.', task)
         await self.broadcast({"type": "directory", **self.directory()})
         return True
 
     async def relaunch(self, agent_id: str, by: str, only_stopped: bool = False) -> bool:
+        if self.store.old_one(agent_id):
+            await self.control_old_one("resume", agent_id)
+            return True
         a = self.store.agent(agent_id)
         if not a:
             raise Denied(f"unknown agent {agent_id}")
@@ -547,12 +703,6 @@ class Temple:
         await self.sync_galaxy(a["galaxy_id"])
         await self.broadcast({"type": "directory", **self.directory()})
         return True
-
-    def _managed(self, agent_id: str, manager: str) -> dict:
-        a = self.store.agent(agent_id)
-        if not a or a["role"] != Role.OLD_ONE or a["parent_id"] != manager:
-            raise Denied("a manager manages only its own old_ones")
-        return a
 
     async def drop_agent_conn(self, agent_id: str) -> None:
         conn = self.agents.pop(agent_id, None)
@@ -575,6 +725,8 @@ class Temple:
     def runtime_for(self, a: dict) -> dict | None:
         overrides = self.store.setting("runtimes") or {}
         default = (self.config.get('feishu') or {}).get('runtime') if a['role'] == Role.NYARLATHOTEP else None
+        if a["role"] == Role.OLD_ONE:
+            default = self.config.get("old_one_runtime") or validate_runtime(OLD_ONE_RUNTIME)
         return overrides.get(a["id"]) or overrides.get(a["role"]) or default
 
     async def set_runtime(self, key: str, cfg: dict | None) -> None:
@@ -594,9 +746,10 @@ class Temple:
             for choice in (cfg, cfg.get("fallback") or {}):
                 if choice.get("provider"):
                     targets = [a for a in self.store.agents(include_stopped=False)
-                               if a["id"] == key or a["role"] == key]
+                               if a["id"] == key or a["role"] == key] + [
+                        r | {"role": Role.OLD_ONE} for r in self.store.roster() if r["id"] == key or key == Role.OLD_ONE]
                     for a in targets:
-                        conn = self.agents.get(a["id"])
+                        conn = self.agents.get(a["id"]) if a["role"] != Role.OLD_ONE else self.galaxies.get(a["galaxy_id"])
                         capability = "galaxy_api_claude_v1" if choice["backend"] == "claude" else "galaxy_api_v1"
                         if not conn or capability not in conn.capabilities:
                             raise ValueError("target agent requires the Galaxy API protocol upgrade")
@@ -614,45 +767,26 @@ class Temple:
                 conn = self.agents.get(a["id"])
                 if conn:
                     await conn.send({"type": "runtime", "config": self.runtime_for(a)})
+        for r in self.store.roster():
+            if r["id"] == key or key == Role.OLD_ONE:
+                conn = self.galaxies.get(r["galaxy_id"])
+                if conn:
+                    await conn.send({"type": "runtime", "agent_id": r["id"],
+                                     "config": self.runtime_for({"id": r["id"], "role": Role.OLD_ONE})})
 
     # owner
 
-    # deployment: the owner and azathoth deploy; ghroth asks and azathoth decides
+    # deployment: the owner and azathoth deploy
 
     async def deploy_call(self, role: str, agent_id: str, method: str, p: dict):
         d = self.deployer
-        if method == "deploy_status":
-            if role not in roles.DEPLOY | roles.DEPLOY_REQUEST:
-                raise Denied(f"{role} may not deploy")
-            return d.status()
-        if method == "deploy_request":
-            if role not in roles.DEPLOY_REQUEST:
-                raise Denied(f"{role} may not request deploys")
-            req = d.request(p.get("galaxies") or "all", str(p.get("reason", "")))
-            az = self.god(Role.AZATHOTH)
-            await self.route(agent_id, az["id"], kind="deploy_request", text=f"[deploy request {req['id']}] Ghroth asks to deploy the latest main "
-                             f"to {req['galaxies']}. Reason: {req['reason']}\nApprove with temple_deploy(request_id="
-                             f"\"{req['id']}\"), or reject with temple_deploy(request_id=..., reject=true).",
-                             task_id=p.get("task_id"))
-            return req
         if role not in roles.DEPLOY:
             raise Denied(f"{role} may not deploy")
+        if method == "deploy_status":
+            return d.status()
         if p.get("recover_job_id"):
             return await d.recover(p["recover_job_id"], by=agent_id)
-        if method == "deploy_requests":
-            return [r for r in d.requests.values() if r["state"] == "pending"]
-        if p.get("request_id"):
-            req = d.requests.get(p["request_id"])
-            if not req or req["state"] != "pending":
-                raise ValueError(f"no pending deploy request {p['request_id']}")
-            if p.get("reject"):
-                req["state"] = "rejected"
-                return req
-            req["state"] = "approved"
-            return await d.start(req["galaxies"], by=f"{agent_id}（批准格赫罗斯的请求）", reason=req["reason"],
-                                 task_id=p.get("task_id"))
-        return await d.start(p.get("galaxies") or "all", by=agent_id, reason=str(p.get("reason", "")),
-                             task_id=p.get("task_id"))
+        return await d.start(p.get("galaxies") or "all", by=agent_id, reason=str(p.get("reason", "")))
 
     async def notify_deploy(self, job: dict) -> None:
         """Tell azathoth how a deploy ended (it relays to the owner like any report)."""
@@ -667,6 +801,8 @@ class Temple:
             log.exception("could not report deploy result")
 
     async def owner_send(self, to: str, text: str, priority: int = OWNER_PRIORITY) -> dict:
+        if self.store.old_one(to):
+            return await self.route(OWNER, to, text, kind="message", priority=priority)
         target = self.store.agent(to)
         if target and target["desired"] != "running":
             raise Denied(f"{target['name']} is stopped; resume it first")
@@ -677,6 +813,8 @@ class Temple:
         return msg
 
     async def owner_stop(self, agent_id: str) -> bool:
+        if self.store.old_one(agent_id):
+            return bool((await self.control_old_one("interrupt", agent_id)).get("ok"))
         conn = self.agents.get(agent_id)
         if conn is None:
             return False
@@ -733,6 +871,8 @@ class Temple:
                 await old.ws.close(4002, "replaced")
             await conn.send({"type": "welcome", "id": cid, "name": g["name"], "api_version": API_VERSION, "version": BUILD})
             await self.sync_galaxy(cid)
+            if "hub_v1" in conn.capabilities:
+                await conn.send({"type": "bindings", "rows": self.bindings()})
         elif kind == "agent":
             a = self.store.agent(cid)
             if not a or a["desired"] != "running" or not hmac.compare_digest(
@@ -768,6 +908,9 @@ class Temple:
             return {"sender_name": a["name"], "sender_role": a["role"]}
         if sender_id == SYSTEM:
             return {"sender_name": "中心神殿", "sender_role": SYSTEM}
+        r = self.store.old_one(sender_id)
+        if r:
+            return {"sender_name": r["name"], "sender_role": Role.OLD_ONE.value}
         if sender_id == OWNER:
             return {"sender_name": "主人", "sender_role": OWNER}
         # Verified external Feishu delegates (feishu:<open_id>) never read as the owner.
@@ -807,11 +950,10 @@ class Temple:
             return {"version": BUILD, **self.directory(), "providers": self.api_broker.catalog(),
                     "active_streams": len(self.api_broker.streams)}
         if method == "maintenance_runtime":
-            agent = self.store.agent(p["agent_id"])
-            if not agent or agent["role"] != Role.OLD_ONE:
+            if not self.store.old_one(p["agent_id"]):
                 raise ValueError("maintenance runtime requires an existing old_one agent")
-            await self.set_runtime(agent["id"], p["config"])
-            return {"agent_id": agent["id"], "config": self.runtime_for(agent)}
+            await self.set_runtime(p["agent_id"], p["config"])
+            return {"agent_id": p["agent_id"], "config": self.runtime_for({"id": p["agent_id"], "role": Role.OLD_ONE})}
         if method == "maintenance_canary":
             galaxy = self.galaxies.get(p["galaxy"])
             if not galaxy or "galaxy_api_v1" not in galaxy.capabilities:
@@ -860,7 +1002,62 @@ class Temple:
                 self.status[a["id"]] = {"state": "crashed", "current": p.get("reason")}
                 await self.broadcast({"type": "directory", **self.directory()})
             return True
-        raise Denied(f"unknown galaxy call {method}")
+        if "hub_v1" not in conn.capabilities:
+            raise Denied(f"unknown galaxy call {method}")
+        return await self.handle_hub_call(conn, method, p)
+
+    async def handle_hub_call(self, conn: Conn, method: str, p: dict) -> Any:
+        """Calls from a galaxy's hub. A hub speaks only for its own galaxy's tasks and old_ones."""
+        gid = conn.id
+        if method == "roster_update":
+            self.store.set_roster(gid, p.get("old_ones") or [])
+            await self.broadcast({"type": "directory", **self.directory()})
+            return True
+        if method == "agent_status":
+            r = self.store.old_one(p["agent_id"])
+            if r and r["galaxy_id"] == gid:
+                self.store.roster_status(p["agent_id"], p["status"])
+                await self.broadcast({"type": "status", "agent_id": p["agent_id"], "status": p["status"]})
+            return True
+        if method == "old_one_runtime":
+            r = self.store.old_one(p["agent_id"])
+            if r and r["galaxy_id"] != gid:
+                raise Denied("old_one belongs to another galaxy")
+            return self.runtime_for({"id": p["agent_id"], "role": Role.OLD_ONE})
+        if method in ("bound", "task_index_update", "report", "task_finished", "tell_owner"):
+            t = self.store.task(p["task_id"]) if p.get("task_id") else None
+            if p.get("task_id") and not t:
+                raise ValueError(f"unknown task {p['task_id']}")
+            if t and t["galaxy_id"] != gid:
+                raise Denied("task belongs to another galaxy")
+        if method == "bound":
+            self.store.set_task(p["task_id"], executor=p["agent_id"], executor_name=p["agent_name"])
+            self.store.add_digest(p["task_id"], f"新绑定：{p['task_id']} → {p['agent_name']}"
+                                  f"（{'复用' if p['reused'] else '新建'}：{p['reason']}）", False)
+            await self.task_changed(p["task_id"])
+            return True
+        if method == "task_index_update":
+            self.store.set_task(p["task_id"], **(p.get("patch") or {}))
+            await self.task_changed(p["task_id"])
+            return True
+        if method == "report":
+            return await self.hub_report(gid, p)
+        if method == "task_finished":
+            await self.route(SYSTEM, self.azathoth_id(), p["text"], kind="task_finished", priority=roles.FINISH_PRIORITY,
+                             task_id=p["task_id"])
+            return True
+        if method == "tell_owner":
+            await self.note_owner(p["text"], origin="星系枢纽", task_id=p.get("task_id"), kind="blocked")
+            return True
+        if method == "relay":
+            r = self.store.old_one(p["to"])
+            sender = self.store.old_one(p["envelope"].get("sender", ""))
+            if not r or not sender or sender["galaxy_id"] != gid:
+                raise Denied("relay is only between old_ones")
+            return await self.hub(r["galaxy_id"]).rpc("hub_deliver", timeout=30, envelope=p["envelope"] | {"receiver": p["to"]})
+        if method == "task_view":
+            return await self.task_view(p["task_id"])
+        raise Denied(f"unknown hub call {method}")
 
     async def _disconnect(self, conn: Conn) -> None:
         await self.api_broker.disconnect(conn)
@@ -892,6 +1089,12 @@ class Temple:
                 self.maintenance.discard(gid)
             self.store.set_setting("maintenance", sorted(self.maintenance))
         results = []
+        conn = self.galaxies.get(gid)
+        if conn and "hub_v1" in conn.capabilities:
+            try:
+                results += await conn.rpc("hub_drain", timeout=30, enabled=enabled)
+            except Exception:
+                results.append({"id": f"hub:{gid}", "safe": False, "reason": "hub drain status unavailable"})
         for a in self.store.agents(gid, include_stopped=False):
             conn = self.agents.get(a["id"])
             result = {"id": a["id"], "safe": False, "reason": "offline or legacy agent; operator verification required"}
@@ -951,6 +1154,10 @@ class Temple:
                 return JSONResponse({"providers": self.api_broker.catalog(), "active_streams": len(self.api_broker.streams)})
             if path == "directory":
                 return JSONResponse(self.directory() | {"gods": {r: (self.god(r) or {}).get("id") for r in roles.GODS}})
+            if path == "approvals":
+                if request.method == "POST":
+                    return JSONResponse(await self.sudo_decide(body["id"], bool(body["approve"]), body.get("note", "")))
+                return JSONResponse(self.store.approvals(q.get("state") or None, limit=min(int(q.get("limit", 50)), 200)))
             if path == "chat":
                 agent = q.get("agent_id") or self.god(Role.AZATHOTH)["id"]
                 before = float(q["before"]) if q.get("before") else None
@@ -958,7 +1165,7 @@ class Temple:
                                                      search=q.get("search") or None))
             if path == "send":
                 if self.role_of(body["to"]) not in roles.SEND[OWNER]:
-                    raise Denied("this role does not accept owner chat")
+                    raise Denied("this role does not accept owner messages")
                 return JSONResponse(await self.owner_send(body["to"], body["text"],
                                                           roles.URGENT if body.get("urgent") else OWNER_PRIORITY))
             if path == "stop":
@@ -967,14 +1174,29 @@ class Temple:
                 return JSONResponse({"ok": await self.delete(body, OWNER)})
             if path == "task":
                 if request.method == "POST":
-                    return JSONResponse(await self.discipline.owner(body))
-                return JSONResponse(self.discipline.view(q["task_id"]))
+                    # The owner acts with azathoth's task powers.
+                    action = body["action"]
+                    if action == "close":
+                        return JSONResponse(await self.task_command("hub_close", body["task_id"], note=body.get("note", "主人验收")))
+                    if action == "continue":
+                        return JSONResponse(await self.task_command("hub_continue", body["task_id"], instruction=body["instruction"]))
+                    if action == "cancel":
+                        return JSONResponse(await self.task_command("hub_cancel", body["task_id"], reason=body.get("reason", "主人取消")))
+                    raise ValueError(f"unknown action {action}")
+                return JSONResponse(await self.task_view(q["task_id"]))
             if path in ("force_stop", "resume"):
                 if path == "force_stop":
                     await self.halt(body["agent_id"], "主人", force=True)
                 else:
                     await self.relaunch(body["agent_id"], "主人", only_stopped=True)
-                return JSONResponse(self.public_agent(self.store.agent(body["agent_id"])))
+                a = self.store.agent(body["agent_id"])
+                return JSONResponse(self.public_agent(a) if a else {"id": body["agent_id"], "ok": True})
+            if path == "hub_messages":
+                r = self.store.old_one(q["agent_id"])
+                if not r:
+                    raise ValueError("unknown old_one")
+                return JSONResponse(await self.hub(r["galaxy_id"]).rpc("hub_messages", timeout=30, agent_id=q["agent_id"],
+                                                                       limit=int(q.get("limit", 100))))
             if path == "messages":
                 before = float(q["before"]) if q.get("before") else None
                 return JSONResponse(self.store.messages(q.get("agent_id") or None,
@@ -983,7 +1205,7 @@ class Temple:
             if path == "tasks":
                 return JSONResponse(self.store.tasks(q.get("search") or None,
                     limit=max(1, min(int(q.get("limit", 50)), 100)), before_id=q.get("before_id") or None,
-                    state=q.get("state") or None, history=True))
+                    state=q.get("state") or None, galaxy_id=q.get("galaxy_id") or None))
             if path == "memory":
                 if request.method == "POST":
                     # The owner corrects or removes an entry by hand.
@@ -1034,8 +1256,6 @@ class Temple:
                 return JSONResponse(self.deployer.status())
             if path == "deploy_latest":
                 return JSONResponse({"revision": await self.deployer.latest()})
-            if path == "patrols":
-                return JSONResponse(self.store.patrols(int(q.get("limit", 10))))
             if path == "latest":
                 return JSONResponse(await self.latest_result(q["agent_id"]))
             return JSONResponse({"error": "not found"}, status_code=404)
@@ -1107,7 +1327,8 @@ class Temple:
         @contextlib.asynccontextmanager
         async def lifespan(_app):
             asyncio.create_task(self.deployer.resume())
-            clock = asyncio.create_task(self.discipline.run())
+            self.expire_sudo()
+            clock = asyncio.create_task(self.digest_clock())
             yield
             clock.cancel()
         return Starlette(routes=routes, lifespan=lifespan)

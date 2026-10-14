@@ -136,7 +136,7 @@ class ProviderBroker:
 
     def consumer(self, conn) -> str:
         if conn.kind == "maintenance" and conn in self.temple.maintainers:
-            maintainer = self.temple.god(Role.GHROTH)
+            maintainer = self.temple.god(Role.AZATHOTH)
             if maintainer:
                 return maintainer["galaxy_id"]
             raise Denied("maintenance consumer is not configured")
@@ -175,6 +175,9 @@ class ProviderBroker:
         policy, limits = self.policy(gid), self.temple.config.get("api_limits", {})
         limit = policy.get("max_streams", limits.get("per_provider", MAX_PROVIDER))
         per_caller = policy.get("max_per_caller", limits.get("per_caller", MAX_CALLER))
+        if conn.kind == "galaxy":
+            # A hub speaks for all of its galaxy's old_ones, so it gets the provider's whole budget.
+            per_caller = limits.get("per_galaxy", limit)
         total = limits.get("total", MAX_STREAMS)
         # Briefly queue for a slot: concurrent agents and forks routinely overlap.
         for attempt in range(SLOT_WAIT * 10 + 1):

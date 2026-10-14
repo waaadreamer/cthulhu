@@ -199,14 +199,14 @@ class RecoveryServerTests(universe.HarnessServer):
     def configure(self, fallback=True):
         # Unchanged runtime settings deliberately retain cooldown. Isolate each test
         # by applying the fixture's default before the requested recovery config.
-        self.api('runtimes', {'key': 'ghroth', 'config': None})
+        self.api('runtimes', {'key': 'nyarlathotep', 'config': None})
         self.wait(lambda: self.runtime()['config'] == self.runtime()['default'])
         cfg={'backend':'codex','model':'recovery-primary'}
         if fallback: cfg['fallback']={'backend':'codex','model':'recovery-fallback'}
-        self.api('runtimes',{'key':'ghroth','config':cfg})
+        self.api('runtimes',{'key':'nyarlathotep','config':cfg})
         self.wait(lambda: self.runtime()['model']=='recovery-primary' and self.runtime()['config'] == cfg)
         self.assertEqual(self.runtime()['recovery_policy'], {'retries': 1, 'fallback_hold_seconds': 1800})
-        self.assertEqual(self.api('runtimes')['overrides']['ghroth'], cfg)
+        self.assertEqual(self.api('runtimes')['overrides']['nyarlathotep'], cfg)
         self.assertEqual(self.runtime()['config'], cfg)
         return cfg
 
@@ -231,7 +231,7 @@ class RecoveryServerTests(universe.HarnessServer):
         self.assertEqual(self.runtime()['recovery']['retries'],1)
         self.assertEqual(self.runtime()['recovery']['phase'],'completed')
         self.assertTrue(self.runtime()['fallback_active'])
-        self.assertEqual(self.api('runtimes')['overrides']['ghroth'], cfg)
+        self.assertEqual(self.api('runtimes')['overrides']['nyarlathotep'], cfg)
         self.assertEqual(self.runtime()['config'], cfg)
         following = self.api('send', {'to': 'gh', 'text': 'RECOVERY_FIXTURE fallback task_fixture'})
         following_turn = self.wait(lambda: self.completed(following['id']))
@@ -255,10 +255,10 @@ class RecoveryServerTests(universe.HarnessServer):
         self.wait(lambda: all(a['online'] for a in self.api('directory')['agents']), 30)
         self.wait(lambda: self.runtime().get('config') == cfg)
         self.assertEqual(self.runtime()['recovery_policy'], {'retries': 1, 'fallback_hold_seconds': 1800})
-        self.assertEqual(self.api('runtimes')['overrides']['ghroth'], cfg)
+        self.assertEqual(self.api('runtimes')['overrides']['nyarlathotep'], cfg)
         store = universe.Store(self.dir / 'temple.db')
         try:
-            self.assertEqual(store.setting('runtimes')['ghroth'], cfg)
+            self.assertEqual(store.setting('runtimes')['nyarlathotep'], cfg)
         finally:
             store.db.close()
 

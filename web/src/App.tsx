@@ -11,6 +11,7 @@ import { Settings } from './components/Settings'
 import { Avatar, StatusDot } from './components/Avatar'
 import { Sigil } from './components/Sigil'
 import { FilePreview } from './components/FilePreview'
+import { SudoApprovals } from './components/SudoApprovals'
 import { FileRef, PreviewContext } from './preview'
 
 type View = { kind: 'chat'; agent: string } | { kind: 'universe' } | { kind: 'messages' } | { kind: 'settings' }
@@ -34,7 +35,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
   const [chats, setChats] = useState<Record<string, Turn[]>>({})
   const [more, setMore] = useState<Record<string, boolean>>({})
   const [liveMsgs, setLiveMsgs] = useState<Message[]>([])
-  const [patrolTick, setPatrolTick] = useState(0)
+  const [approvalTick, setApprovalTick] = useState(0)
   const [deployTick, setDeployTick] = useState(0)
   const [taskTick, setTaskTick] = useState(0)
   const [preview, setPreview] = useState<FileRef | null>(null)
@@ -53,12 +54,12 @@ function Temple({ onLogout }: { onLogout: () => void }) {
   const { dir, connected, streams } = useTemple({
     onChat: upsertTurn,
     onMessage: (m) => setLiveMsgs((l) => [...l.slice(-200), m]),
-    onPatrol: () => setPatrolTick((x) => x + 1),
+    onApproval: () => setApprovalTick((x) => x + 1),
     onDeploy: () => setDeployTick((x) => x + 1),
     onTask: () => setTaskTick((x) => x + 1),
   })
 
-  const chatAgents = ['azathoth', 'ghroth', 'nyarlathotep'].map((r) => dir.agents.find((a) => a.role === r)).filter(Boolean) as Agent[]
+  const chatAgents = ['azathoth', 'nyarlathotep'].map((r) => dir.agents.find((a) => a.role === r)).filter(Boolean) as Agent[]
   useEffect(() => {
     if (view.kind === 'chat' && !view.agent && chatAgents[0]) setView({ kind: 'chat', agent: chatAgents[0].id })
   }, [chatAgents, view])
@@ -147,7 +148,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
           {view.kind === 'chat' && !active && (
             <div className="grid h-full place-items-center text-slate-500"><MessagesSquare className="h-8 w-8 animate-pulseDot" /></div>
           )}
-          {view.kind === 'universe' && <Universe dir={dir} patrolTick={patrolTick} deployTick={deployTick} />}
+          {view.kind === 'universe' && <Universe dir={dir} deployTick={deployTick} />}
           {view.kind === 'messages' && <Messages dir={dir} live={liveMsgs} taskTick={taskTick} />}
           {view.kind === 'settings' && <Settings dir={dir} />}
         </div>
@@ -164,6 +165,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
           </div>
         </>
       )}
+      <SudoApprovals tick={approvalTick + (connected ? 1 : 0)} />
     </div>
     </PreviewContext.Provider>
   )

@@ -26,11 +26,13 @@ from . import backends
 from .backends import Backends
 from . import BUILD
 from .protocol import Link
-from .roles import DISPLAY, OWNER, URGENT, Role
+from .roles import DISPLAY, OWNER, SYSTEM, URGENT, Role
 from .runtime import TurnResult, tool
 
 RECOVERY = ContextVar("recovery", default=None)
 PREEMPTED = "preempted by a priority-10 message"
+# Message kinds that may be steered into a running turn of the same task.
+STEERABLE = ('message', 'checkpoint', 'task_control')
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +83,8 @@ class Agent:
         self.threads: dict[str, str] = {}     # backend label -> thread id
         self.loaded: set[str] = set()         # threads open in the current runtime instances
         self.last_turn: tuple | None = None   # (runtime, thread) of the last main-thread turn
-        self.link = Link(temple_url, {"kind": "agent", "id": self.id, "token": launch["token"], "capabilities": ["galaxy_api_v1", "galaxy_api_claude_v1", "drain_v1"], "version": BUILD},
+        # Old_ones connect to their galaxy's hub; gods to the temple.
+        self.link = Link(launch.get("hub_url") or temple_url, {"kind": "agent", "id": self.id, "token": launch["token"], "capabilities": ["galaxy_api_v1", "galaxy_api_claude_v1", "drain_v1"], "version": BUILD},
                          self._on_welcome, self._on_frame, tls_pin=tls_pin)
         self.build_kw["api_link"] = self.link
         self.backends = Backends(self.default_runtime, **self.build_kw)
@@ -166,33 +169,29 @@ class Agent:
     async def extra_context(self) -> str:
         return ""
 
+    async def turn_header(self) -> str:
+        """Program-written context prepended to every main turn (bindings table etc., design §4)."""
+        return ""
+
     def skill_fingerprint(self) -> str:
         text = load_role("contract") + self.skill() + json.dumps(self.tools(), sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(text.encode()).hexdigest()[:16]
 
     def send_tool(self, extra: dict | None = None) -> dict:
-        return tool("temple_send", "通过中心神殿给另一个 agent 发消息。接收方由程序校验权限；对方回复会作为新消息到达，不要等待或轮询。",
+        return tool("temple_send", "给另一个 agent 发消息。接收方由程序校验权限；对方回复会作为新消息到达，不要等待或轮询。",
                     {"to": {"type": "string", "description": "接收方 agent ID"},
                      "text": {"type": "string"},
-                     "priority": {"type": "integer", "description": "0–10，默认 0，越大越先处理；10 立即打断对方当前任务，仅限真正的紧急情况"
-                                  + ("（你不能用 10）" if self.role == Role.OLD_ONE else "")}, **(extra or {})},
+                     "priority": {"type": "integer", "description": "0–10，默认 0，越大越先处理；10 立即打断对方当前任务，仅限真正的紧急情况"},
+                     **(extra or {})},
                     ["to", "text"])
 
     def tools(self) -> list[dict]:
-        return [
-            self.send_tool(),
-            tool("temple_agents", "列出你可以联系的 agent 及其状态，以及所有星系（是否在线、能否创建旧日支配者）。"),
-        ]
+        return [self.send_tool()]
 
     async def call_tool(self, name: str, args: dict) -> Any:
         if name == "temple_send":
             return await self.send(args["to"], args["text"], priority=int(args.get("priority") or 0),
-                                   task_id=args.get("task_id"), status=args.get("status"), title=args.get("title"))
-        if name == "temple_agents":
-            d = await self.link.call("directory")
-            return {"agents": [{k: a[k] for k in ("id", "name", "role", "state", "online", "task", "galaxy_id")}
-                               for a in d["agents"]],
-                    "galaxies": [{k: g[k] for k in ("id", "name", "online", "spawn")} for g in d["galaxies"]]}
+                                   **{k: args[k] for k in ("task_id", "reply_to") if args.get(k)})
         raise ValueError(f"unknown tool {name}")
 
     # public interface
@@ -200,10 +199,10 @@ class Agent:
     async def send(self, to: str, text: str, priority: int = 0, kind: str = "message", **task) -> dict:
         r = await self.link.call("send", to=to, text=text, priority=priority, kind=kind,
                                  **{k: v for k, v in task.items() if v})
-        if r.get('suppressed'):
-            return r
+        if r.get("error"):
+            return r                     # rate limited: the reason and next allowed time go back to the model
         await self.on_sent(to, text)
-        return {"sent": r["id"], **({"task_id": r["task_id"]} if r.get("task_id") else {})}
+        return {"sent": r.get("sent") or r.get("id")}
 
     async def receive(self, batch: list[dict]) -> None:
         """Handle a batch of queued messages in one turn."""
@@ -381,7 +380,7 @@ class Agent:
             if await self.current_task_cancelled():
                 return TurnResult('interrupted', error='Task cancelled')
             thread = await self.ensure_thread()
-            bridge = await self.handoff_context(thread) + await self.memory_delta(thread)
+            bridge = await self.handoff_context(thread) + await self.memory_delta(thread) + await self.turn_header()
             # Accepted inputs remain in the batch for retries and backend handoff.
             result = await self.run(thread, bridge + note + full_input(), on_event=on_event, runtime=rt, **kw)
             self.last_turn = (rt, thread)
@@ -703,7 +702,7 @@ class Agent:
         self.wake.set()
         if m.get("priority", 0) >= URGENT and (not self.draining or m.get("sender") == OWNER):
             asyncio.create_task(self.preempt())
-        elif self.batch is not None and m.get("kind", "message") in ('message', 'checkpoint', 'task_control') and not self.draining:
+        elif self.batch is not None and m.get("kind", "message") in STEERABLE and not self.draining:
             asyncio.create_task(self.steer(m))
 
     async def steer(self, m: dict) -> bool:
@@ -714,10 +713,9 @@ class Agent:
             # Exact task ownership; never inject into owner chats, scoped or background runs.
             if (not batch or not active or self.draining or m not in self.queue
                     or getattr(self, 'reporting', None) is not None
-                    or m.get('kind', 'message') not in ('message', 'checkpoint', 'task_control') or m['sender'] == OWNER
+                    or m.get('kind', 'message') not in STEERABLE or m['sender'] == OWNER
                     or m.get('task_id') != self.current_task
-                    or any(b.get('kind', 'message') not in ('message', 'checkpoint', 'task_control', 'discipline') or b['sender'] == OWNER
-                           or (b.get('kind') == 'discipline' and b['sender'] != 'temple')
+                    or any(b.get('kind', 'message') not in STEERABLE + ('task_brief',) or b['sender'] == OWNER
                            or b.get('task_id') != self.current_task for b in batch)
                     or active[1] not in self.threads.values()
                     or not (hasattr(active[0], 'steer') or hasattr(active[0], 'supply_task_context'))):
@@ -725,7 +723,7 @@ class Agent:
             rt, thread, turn = active
             from .claude_runtime import ClaudeRuntime
             if isinstance(rt, ClaudeRuntime):
-                if m.get('kind') not in ('checkpoint', 'task_control') or m['sender'] != 'temple':
+                if m.get('kind') not in ('checkpoint', 'task_control') or m['sender'] != SYSTEM:
                     return False
                 accepted = await rt.supply_task_context(thread, turn, self.render([m]), valid=lambda: m in self.queue and not self.draining)
             else:

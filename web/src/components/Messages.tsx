@@ -12,7 +12,7 @@ export function Messages({ dir, live, taskTick }: { dir: Directory; live: Messag
       <TaskList selected={task?.id} onSelect={setTask} taskTick={taskTick} />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-4xl px-4 py-6 sm:px-8">
-          <h2 className="mb-2 font-semibold text-white">{task?.title ?? '全部消息'}</h2>
+          <h2 className="mb-2 break-words font-semibold text-white">{task ? task.description.slice(0, 120) : '全部消息'}</h2>
           {task && <p className="mb-3 break-all text-xs text-slate-500">{task.id}</p>}
           {task && <TaskPanel key={task.id} taskId={task.id} dir={dir} tick={taskTick} />}
           <div className="mb-5 flex flex-wrap gap-2">
@@ -72,11 +72,12 @@ function TaskList({ selected, onSelect, taskTick }: { selected?: string; onSelec
     </select>
     <button onClick={() => onSelect(null)} className={`mb-2 w-full rounded-lg p-2 text-left text-sm ${!selected ? 'bg-white/10 text-white' : 'text-slate-400'}`}>全部消息</button>
     {tasks.map((t) => {
-      const st = TASK_STATE[t.state] ?? TASK_STATE.active
+      const st = TASK_STATE[t.state] ?? TASK_STATE.running
       return <button key={t.id} onClick={() => onSelect(t)} data-history-task={t.id}
         className={`mb-1 w-full rounded-lg p-2 text-left ${selected === t.id ? 'bg-white/10 text-white' : 'text-slate-400 hover:bg-white/5'}`}>
-        <span className="block break-words text-sm">{t.title}</span>
-        <span className="text-xs text-slate-500"><span className={`chip ${st.chip}`}>{st.label}</span> · {timeLabel(t.created_at)}</span>
+        <span className="block break-words text-sm line-clamp-2">{t.description}</span>
+        <span className="text-xs text-slate-500"><span className={`chip ${st.chip}`}>{st.label}</span> · {t.executor_name ?? '—'} · {timeLabel(t.created_at)}</span>
+        {t.line && <span className="block truncate text-[11px] text-slate-600">{t.line}</span>}
       </button>
     })}
     {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}

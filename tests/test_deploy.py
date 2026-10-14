@@ -132,8 +132,7 @@ class EndToEnd(unittest.TestCase):
         gtoken = secrets.token_hex(16)
         temple = {"secret": secrets.token_hex(16), "db": str(cls.dir / "temple.db"), "listen": ["127.0.0.1", cls.port],
                   "galaxies": [{"id": "g1", "name": "test", "token": gtoken}],
-                  "gods": [{"id": v, "role": k, "galaxy": "g1"} for k, v in
-                           {"azathoth": "az", "shub": "sh", "yog": "yo", "ghroth": "gh"}.items()],
+                  "gods": [{"id": "az", "role": "azathoth", "galaxy": "g1"}],
                   "deploy": {"repo": str(origin)}}
         fake = str(cls.node / "tests" / "fake_codex.py")
         galaxy = {"id": "g1", "token": gtoken, "temple_ws": f"ws://127.0.0.1:{cls.port}/ws", "state": str(cls.dir / "state"),
@@ -243,23 +242,20 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(sh("git", "rev-parse", "HEAD", cwd=self.node), rev)
         # The galaxy came back on the new revision; the result was reported to azathoth.
         self.wait(lambda: self.api("directory")["galaxies"][0]["revision"] == rev)
-        self.wait(lambda: any(m["sender"] == "temple" and "[deploy" in m["text"] for m in self.api("messages?agent_id=az")))
+        self.wait(lambda: any(m["sender"] == "system" and "[deploy" in m["text"] for m in self.api("messages?agent_id=az")))
         self.assertEqual(self.api("deploy")["temple"]["revision"], rev)
 
-    def test_2_ghroth_requests_azathoth_approves(self):
+    def test_2_azathoth_deploys(self):
         rev = self.push("NOTE2.txt")
         self.wait(lambda: all(a["online"] for a in self.api("directory")["agents"]), 60)
-        self.api("send", {"to": "gh", "text": 'CALL temple_deploy_request {"reason": "ship NOTE2"}'})
-        req = self.wait(lambda: next(m for m in self.api("messages?agent_id=az") if "deploy request" in m["text"]))
-        rid = req["text"].split("deploy request ")[1].split("]")[0]
-        turn = self.chat('CALL temple_deploy {"request_id": "%s"}' % rid)
+        turn = self.chat('CALL temple_deploy {"reason": "ship NOTE2"}')
         self.assertIn(rev, turn["reply"])
         self.assertEqual(self.finished(rev)["state"], "done")
 
     def test_3_permissions(self):
         self.wait(lambda: all(a["online"] for a in self.api("directory")["agents"]), 60)
-        # Ghroth cannot deploy directly; it has no such tool.
-        turn = self.chat("CALL temple_deploy_status {}")       # azathoth lacks this ghroth-only tool name
+        # Removed v2 tool names are gone.
+        turn = self.chat("CALL temple_deploy_request {}")
         self.assertIn("error", turn["reply"])
         req = self.urllib.request.Request(f"http://127.0.0.1:{self.port}/api/deploy", method="POST", data=b"{}",
                                           headers={"content-type": "application/json", "x-cthulhu": "1"})

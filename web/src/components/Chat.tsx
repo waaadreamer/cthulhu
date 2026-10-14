@@ -109,7 +109,7 @@ export function Chat({ agent, turns, setTurns, streams, hasMore, loadMore }: Pro
             <RuntimeBadge runtime={agent.runtime} />
           </div>
           <p className="truncate text-xs text-slate-500">
-            {agent.desired === 'stopped' ? '已停止：拒收消息，恢复后才能对话' : agent.state === 'working' && agent.current ? `正在处理：${agent.current}` : agent.role === 'azathoth' ? '你意志的化身' : '独立维护者 · 只听你和阿撒托斯的'}
+            {agent.desired === 'stopped' ? '已停止：拒收消息，恢复后才能对话' : agent.state === 'working' && agent.current ? `正在处理：${agent.current}` : agent.role === 'azathoth' ? '你意志的化身 · 唯一的决策者' : '飞书入口'}
           </p>
         </div>
         <ForceStop agent={agent} />
@@ -184,7 +184,7 @@ function Empty({ agent }: { agent: Agent }) {
       <div className={`mb-5 grid h-20 w-20 place-items-center rounded-3xl bg-gradient-to-br ${m.grad} text-4xl text-white shadow-2xl`}>{m.glyph}</div>
       <h3 className="font-display text-xl tracking-wide text-white">{agent.name}</h3>
       <p className="mt-2 max-w-sm text-sm text-slate-400">
-        {agent.role === 'azathoth' ? '你意志的化身。给它目标与洞见，它会组织整个宇宙去实现。' : '独立的 harness 维护者。它只听你和阿撒托斯的。'}
+        {agent.role === 'azathoth' ? '你意志的化身。给它目标与洞见，它会把任务派到各星系并亲自验收。' : '飞书入口，只和你、阿撒托斯说话。'}
       </p>
     </div>
   )

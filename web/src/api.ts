@@ -1,4 +1,4 @@
-export type Role = 'azathoth' | 'shub' | 'yog' | 'ghroth' | 'nyarlathotep' | 'old_one'
+export type Role = 'azathoth' | 'nyarlathotep' | 'old_one'
 
 export interface Agent {
   id: string
@@ -6,6 +6,7 @@ export interface Agent {
   role: Role
   galaxy_id: string
   parent_id: string | null
+  task_id?: string | null
   desired: 'running' | 'stopped'
   stopped_by?: string | null
   task: string
@@ -43,7 +44,7 @@ export interface RuntimeStatus {
   default: RuntimeCfg
 }
 
-export interface Galaxy { id: string; name: string; online: boolean; created_at: number; revision?: string; deployable?: boolean; draining?: boolean }
+export interface Galaxy { id: string; name: string; online: boolean; created_at: number; revision?: string; deployable?: boolean; draining?: boolean; hub?: boolean; spawn?: boolean }
 
 export interface DeployJob {
   id: string; by: string; reason: string; revision: string; created_at: number; finished_at: number | null
@@ -73,24 +74,44 @@ export interface Turn {
   updated_at: number
 }
 
-export type TaskState = 'active' | 'blocked_on_owner' | 'submitted' | 'accepted' | 'failed'
-export interface TaskSample { at: number; value: number | null; progress: boolean | null; note?: string }
-export interface TaskExtension { at: number; by: string; until: number; reason: string; approver: string; state: 'pending' | 'approved' | 'denied' | 'refused'; decision?: string }
-export interface TaskEvent { at: number; kind: string; by: string; text: string }
+export type TaskState = 'assigning' | 'awaiting_probe' | 'running' | 'review' | 'suspended' | 'closed' | 'cancelled' | 'assign_failed'
+export interface TaskSample { ts: number; stage: number; value: number | null; error?: string | null; baseline?: boolean; final?: boolean }
+export interface TaskEvent { at: number; kind: string; text: string }
+export interface Probe { stage: number; command: string; rationale: string; verdict: string; reason: string; registered_at: number; baseline: number; stage_note?: string }
+/** Index row from the temple (task list). */
 export interface Task {
-  id: string; title: string; state: TaskState; created_at: number; updated_at: number
-  creator?: string | null; manager?: string | null; executor?: string | null; deadline?: number | null
-  acceptance?: string; probe?: string | null
-  data?: { samples?: TaskSample[]; extensions?: TaskExtension[]; events?: TaskEvent[]; next_check?: number; misses?: number
-           quiet?: boolean; submissions?: { at: number; by: string; evidence: string }[]; owner_verdict?: boolean; brief?: string }
+  id: string; galaxy_id: string; description: string; acceptance: string; state: TaskState
+  executor?: string | null; executor_name?: string | null; line?: string; summary?: string
+  created_at: number; updated_at: number; closed_at?: number | null
+}
+/** Full detail from the task's hub. */
+export interface TaskDetail extends Task {
+  details?: string
+  data?: {
+    reused?: boolean; reason?: string; probe?: Probe | null; probe_history?: (Probe & { to?: number })[]
+    samples?: TaskSample[]; events?: TaskEvent[]; respawns?: number; blocker?: { text: string; at: number } | null
+    checkpoint?: { n: number; next_at: number | null; paused: boolean; stall_streak: number }
+    submissions?: { at: number; evidence: string; verdict: string | null; note: string | null }[]
+    last_summary?: string; last_pace?: string; executors?: { agent_id: string; from: number; to: number | null; reason: string }[]
+  }
+  messages?: { id: string; sender: string; sender_name: string; receiver: string; kind: string; priority: number; text: string; created_at: number }[]
 }
 
 export const TASK_STATE: Record<TaskState, { label: string; chip: string }> = {
-  active: { label: '进行中', chip: 'bg-sky-400/15 text-sky-300' },
-  blocked_on_owner: { label: '等你决定', chip: 'bg-amber-400/15 text-amber-300' },
-  submitted: { label: '待验收', chip: 'bg-violet-400/15 text-violet-300' },
-  accepted: { label: '已验收', chip: 'bg-emerald-400/15 text-emerald-300' },
-  failed: { label: '已作废', chip: 'bg-rose-500/15 text-rose-300' },
+  assigning: { label: '派单中', chip: 'bg-slate-400/15 text-slate-300' },
+  awaiting_probe: { label: '待登记探针', chip: 'bg-amber-400/15 text-amber-300' },
+  running: { label: '进行中', chip: 'bg-sky-400/15 text-sky-300' },
+  review: { label: '待审核', chip: 'bg-violet-400/15 text-violet-300' },
+  suspended: { label: '已挂起', chip: 'bg-rose-500/15 text-rose-300' },
+  closed: { label: '已完成', chip: 'bg-emerald-400/15 text-emerald-300' },
+  cancelled: { label: '已取消', chip: 'bg-slate-500/15 text-slate-400' },
+  assign_failed: { label: '派单失败', chip: 'bg-rose-500/15 text-rose-300' },
+}
+
+export interface Approval {
+  id: string; command: string; reason: string; cwd?: string | null; timeout: number
+  state: 'pending' | 'approved' | 'rejected' | 'expired' | 'done' | 'failed'
+  note?: string | null; result?: string | null; created_at: number; decided_at?: number | null; finished_at?: number | null
 }
 
 export interface Message {
@@ -107,7 +128,6 @@ export interface Message {
 }
 
 export interface Memory { id: number; text: string; source?: string | null; created_at: number; updated_at?: number | null }
-export interface Patrol { id: number; summary: string; created_at: number }
 
 export class Unauthorized extends Error {}
 
@@ -127,9 +147,6 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
 
 export const ROLE_META: Record<Role, { label: string; glyph: string; color: string; ring: string; text: string; grad: string }> = {
   azathoth: { label: '阿撒托斯', glyph: '✺', color: 'bg-violet-500', ring: 'focus-within:ring-violet-500/15', text: 'text-violet-300', grad: 'from-violet-500 to-fuchsia-500' },
-  shub:     { label: '黑山羊',   glyph: '❦', color: 'bg-emerald-500', ring: 'focus-within:ring-emerald-500/15', text: 'text-emerald-300', grad: 'from-emerald-500 to-teal-500' },
-  yog:      { label: '尤格索托斯', glyph: '◉', color: 'bg-amber-500', ring: 'focus-within:ring-amber-500/15', text: 'text-amber-300', grad: 'from-amber-400 to-orange-500' },
-  ghroth:   { label: '格赫罗斯', glyph: '☄', color: 'bg-rose-500', ring: 'focus-within:ring-rose-500/15', text: 'text-rose-300', grad: 'from-rose-500 to-pink-500' },
   nyarlathotep: { label: '奈亚拉托提普', glyph: '✧', color: 'bg-indigo-500', ring: 'focus-within:ring-indigo-500/15', text: 'text-indigo-300', grad: 'from-indigo-500 to-cyan-500' },
   old_one:  { label: '旧日支配者', glyph: '◈', color: 'bg-cyan-500', ring: 'focus-within:ring-cyan-500/15', text: 'text-cyan-300', grad: 'from-cyan-500 to-sky-500' },
 }

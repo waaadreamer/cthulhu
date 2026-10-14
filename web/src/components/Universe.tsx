@@ -1,24 +1,22 @@
 import { Fragment, useEffect, useState } from 'react'
 import { Activity, Brain, Check, Cpu, Globe2, Loader2, Pencil, Radio, ShieldCheck, Trash2, X } from 'lucide-react'
-import { Agent, ago, api, Directory, Memory, Message, Patrol, ROLE_META, timeLabel, tokens } from '../api'
+import { Agent, ago, api, Directory, Memory, Message, ROLE_META, timeLabel, tokens } from '../api'
 import { Avatar, stateOf } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 import { MessageRow } from './Messages'
 import { Deploy } from './Deploy'
 import { ForceStop } from './ForceStop'
 
-const ROLE_TITLE: Record<string, string> = { azathoth: '意志的化身', shub: '万物之母 · 组织落地', yog: '门与钥匙 · 监督', ghroth: '维护者 · sudo' }
+const ROLE_TITLE: Record<string, string> = { azathoth: '唯一的决策者 · 维护者', nyarlathotep: '飞书入口' }
 
-export function Universe({ dir, patrolTick, deployTick }: { dir: Directory; patrolTick: number; deployTick: number }) {
+export function Universe({ dir, deployTick }: { dir: Directory; deployTick: number }) {
   const [selected, setSelected] = useState<Agent | null>(null)
-  const [patrols, setPatrols] = useState<Patrol[]>([])
   const gods = dir.agents.filter((a) => a.role !== 'old_one')
   const olds = dir.agents.filter((a) => a.role === 'old_one' && a.desired === 'running')
   const retired = dir.agents.filter((a) => a.role === 'old_one' && a.desired === 'stopped')
   const working = dir.agents.filter((a) => a.online && a.state === 'working').length
   const online = dir.agents.filter((a) => a.online).length
 
-  useEffect(() => { api<Patrol[]>('patrols?limit=5').then(setPatrols).catch(() => {}) }, [patrolTick])
   useEffect(() => { if (selected) setSelected(dir.agents.find((a) => a.id === selected.id) ?? null) }, [dir]) // eslint-disable-line
 
   return (
@@ -37,7 +35,7 @@ export function Universe({ dir, patrolTick, deployTick }: { dir: Directory; patr
           </div>
         </Section>
 
-        <Section title="旧日支配者" hint={olds.length ? undefined : '尚未创建。黑山羊会根据阿撒托斯的意志创建它们。'}>
+        <Section title="旧日支配者" hint={olds.length ? undefined : '尚未创建。阿撒托斯派任务时，星系枢纽会创建或复用它们。'}>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {olds.map((a) => <AgentCard key={a.id} agent={a} galaxies={dir} onClick={() => setSelected(a)} wide />)}
           </div>
@@ -53,21 +51,6 @@ export function Universe({ dir, patrolTick, deployTick }: { dir: Directory; patr
 
         <Deploy dir={dir} tick={deployTick} />
 
-        <Section title="尤格的巡检">
-          {patrols.length === 0 ? (
-            <p className="text-sm text-slate-500">还没有巡检记录。尤格每 5 分钟检查一次，宇宙无变化时保持安静。</p>
-          ) : (
-            <ol className="relative space-y-3 border-l border-amber-400/20 pl-5">
-              {patrols.slice().reverse().map((p) => (
-                <li key={p.id} className="relative">
-                  <span className="absolute -left-[25px] top-1.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-4 ring-amber-400/10" />
-                  <p className="text-xs text-amber-300/70">{timeLabel(p.created_at)}</p>
-                  <p className="mt-0.5 whitespace-pre-wrap text-sm text-slate-300">{p.summary}</p>
-                </li>
-              ))}
-            </ol>
-          )}
-        </Section>
       </div>
       {selected && <AgentDrawer agent={selected} dir={dir} onClose={() => setSelected(null)} />}
     </div>
@@ -136,13 +119,13 @@ function AgentDrawer({ agent, dir, onClose }: { agent: Agent; dir: Directory; on
   const [memory, setMemory] = useState<Memory[] | null>(null)
   const [msgs, setMsgs] = useState<Message[] | null>(null)
   const m = ROLE_META[agent.role]
-  const hasMemory = ['azathoth', 'shub', 'yog', 'ghroth', 'nyarlathotep'].includes(agent.role)
+  const hasMemory = ['azathoth', 'nyarlathotep'].includes(agent.role)
   const hasAdmission = agent.role === 'nyarlathotep'
 
   useEffect(() => {
     setLatest(null); setMemory(null); setMsgs(null)
     api<Record<string, unknown>>(`latest?agent_id=${agent.id}`).then(setLatest).catch((e) => setLatest({ error: e.message }))
-    api<Message[]>(`messages?agent_id=${agent.id}&limit=60`).then(setMsgs)
+    api<Message[]>(agent.role === 'old_one' ? `hub_messages?agent_id=${agent.id}&limit=60` : `messages?agent_id=${agent.id}&limit=60`).then(setMsgs)
   }, [agent.id])
 
   // Refetch whenever the directory reports a memory change for this agent.

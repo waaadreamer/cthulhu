@@ -1,7 +1,8 @@
-"""Roles and the authority matrix.
+"""Roles and the authority matrix (v3, see docs/design-v3.md).
 
-Every permission decision in the harness is made here, by the temple, from the
-sender identity bound to its websocket. Skills never carry authority rules.
+Two tiers: azathoth (and nyarlathotep) talk to the temple; old_ones talk only to
+their galaxy's hub. Every permission decision is made here, by the temple or a
+hub, from the sender identity bound to its websocket. Skills never carry authority rules.
 """
 from __future__ import annotations
 
@@ -10,55 +11,47 @@ from enum import StrEnum
 
 class Role(StrEnum):
     AZATHOTH = "azathoth"
-    SHUB = "shub"
-    YOG = "yog"
-    GHROTH = "ghroth"
     NYARLATHOTEP = "nyarlathotep"
     OLD_ONE = "old_one"
 
 
 # Singletons are declared in temple config and kept alive by their galaxy.
-GODS = (Role.AZATHOTH, Role.SHUB, Role.YOG, Role.GHROTH, Role.NYARLATHOTEP)
+GODS = (Role.AZATHOTH, Role.NYARLATHOTEP)
 
 DISPLAY = {
     Role.AZATHOTH: "阿撒托斯",
-    Role.SHUB: "黑山羊",
-    Role.YOG: "尤格索托斯",
-    Role.GHROTH: "格赫罗斯",
     Role.NYARLATHOTEP: "奈亚拉托提普",
     Role.OLD_ONE: "旧日支配者",
 }
 
 OWNER = "owner"
+SYSTEM = "system"      # the temple's and hubs' own notices
 
-# sender -> receivers it may message. The owner talks only through the web UI
-# and may reach azathoth and ghroth.
+# sender -> receivers it may message. Old_ones never reach azathoth by message: only through
+# report / finish_task, which the hub forwards (design §3.1).
 SEND = {
-    OWNER: {Role.AZATHOTH, Role.GHROTH, Role.NYARLATHOTEP},
-    Role.AZATHOTH: {Role.SHUB, Role.YOG, Role.GHROTH, Role.NYARLATHOTEP},
-    Role.SHUB: {Role.AZATHOTH, Role.OLD_ONE, Role.NYARLATHOTEP},
-    Role.YOG: {Role.AZATHOTH, Role.OLD_ONE, Role.SHUB, Role.NYARLATHOTEP},
-    Role.GHROTH: {Role.AZATHOTH, Role.OLD_ONE, Role.NYARLATHOTEP},   # old_ones: only its own (temple.route)
-    Role.OLD_ONE: {Role.SHUB, Role.GHROTH, Role.OLD_ONE, Role.NYARLATHOTEP},
-    Role.NYARLATHOTEP: {Role.AZATHOTH, Role.SHUB, Role.YOG, Role.GHROTH, Role.OLD_ONE},
+    OWNER: {Role.AZATHOTH, Role.NYARLATHOTEP, Role.OLD_ONE},
+    Role.AZATHOTH: {Role.OLD_ONE, Role.NYARLATHOTEP},
+    Role.NYARLATHOTEP: {Role.AZATHOTH},
+    Role.OLD_ONE: {Role.OLD_ONE},
 }
 
-# Capabilities beyond messaging.
-MANAGERS = {Role.SHUB, Role.GHROTH}       # take tasks from azathoth; create / stop / delete their own old_ones
-LATEST_RESULT = {Role.YOG}                # remote latest_result calls
-ADMIN_READ = {Role.AZATHOTH, Role.SHUB}   # full read access to the temple
 DEPLOY = {Role.AZATHOTH}                  # start deploys (the owner can too, from the web UI)
-DEPLOY_REQUEST = {Role.GHROTH}            # ask azathoth to deploy
-
-
-def can_cancel_task(caller: str, role: str | None, manager: str, executor_role: str | None) -> bool:
-    return (caller == OWNER or role == Role.AZATHOTH or
-            (role in MANAGERS and caller == manager and executor_role == Role.OLD_ONE))
-
 
 # Message priority: 0..URGENT, handled high to low. URGENT interrupts the receiver's running turn.
 URGENT = 10
-NO_URGENT = {Role.OLD_ONE}
+NUDGE = 9                                  # hub nudges, task briefs, continue instructions
+PEER_MAX = 8                               # old_one -> old_one
+# Direct deliveries to azathoth (design §3.4); checkpoint progress goes into the 10-minute digest.
+FINISH_PRIORITY = 8
+BLOCKER_PRIORITY = 8
+REPORT_PRIORITY = 5
+DIGEST_PRIORITY = 6
+OWNER_PRIORITY = 9
+
+# Rate limits enforced by the hub, two independent buckets per old_one (design §3.3).
+PEER_INTERVAL = 600        # per (sender, receiver) pair
+REPORT_INTERVAL = 600      # per old_one, report() to azathoth
 
 
 def can_send(sender: str, receiver: str) -> bool:
@@ -77,5 +70,5 @@ def require_send(sender: str, receiver: str) -> None:
 def require_priority(sender: str | None, priority: int) -> None:
     if not 0 <= priority <= URGENT:
         raise Denied(f"priority must be between 0 and {URGENT}")
-    if priority == URGENT and sender in NO_URGENT:
-        raise Denied(f"{sender} may not send priority {URGENT}")
+    if sender == Role.OLD_ONE and priority > PEER_MAX:
+        raise Denied(f"old_ones may send at most priority {PEER_MAX}")

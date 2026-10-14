@@ -19,11 +19,9 @@ except ImportError:
 class PriorityRules(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        gods = [{"id": r.value, "role": r.value, "galaxy": "g1"} for r in (Role.AZATHOTH, Role.SHUB, Role.GHROTH)]
+        gods = [{"id": r.value, "role": r.value, "galaxy": "g1"} for r in (Role.AZATHOTH, Role.NYARLATHOTEP)]
         self.t = Temple({"secret": "s", "db": str(Path(self.tmp.name) / "temple.db"),
                          "galaxies": [{"id": "g1", "name": "g", "token": "x"}], "gods": gods})
-        self.t.store.upsert_agent("old_a", "a", Role.OLD_ONE, "g1", "shub", spec={})
-        self.t.store.upsert_agent("old_b", "b", Role.OLD_ONE, "g1", "shub", spec={})
 
     def tearDown(self):
         self.t.store.db.close()
@@ -32,15 +30,19 @@ class PriorityRules(unittest.TestCase):
     def route(self, *a, **kw):
         return asyncio.run(self.t.route(*a, **kw))
 
-    def test_old_one_cannot_send_urgent(self):
-        with self.assertRaisesRegex(Denied, "may not send priority 10"):
-            self.route("old_a", "shub", "x", priority=10)
-        with self.assertRaisesRegex(Denied, "may not send priority 10"):
-            self.route("old_a", "old_b", "x", priority=10)
-        self.assertEqual(self.route("old_a", "shub", "x", priority=9)["priority"], 9)
-        self.assertEqual(self.route("shub", "old_a", "x", priority=10)["priority"], 10)
+    def test_old_one_priority_cap_and_matrix(self):
+        from cthulhu import roles
+        with self.assertRaisesRegex(Denied, "at most priority 8"):
+            roles.require_priority(Role.OLD_ONE, 9)
+        roles.require_priority(Role.OLD_ONE, 8)
+        roles.require_priority(Role.AZATHOTH, 10)
         with self.assertRaises(Denied):
-            self.route("shub", "old_a", "x", priority=11)
+            roles.require_priority(Role.AZATHOTH, 11)
+        # Old_ones reach only old_ones; azathoth only through report/finish_task on the hub.
+        self.assertFalse(roles.can_send(Role.OLD_ONE, Role.AZATHOTH))
+        self.assertTrue(roles.can_send(Role.OLD_ONE, Role.OLD_ONE))
+        self.assertTrue(roles.can_send(Role.AZATHOTH, Role.OLD_ONE))
+        self.assertTrue(roles.can_send("owner", Role.OLD_ONE))
 
     def test_owner_default_and_urgent(self):
         self.assertEqual(OWNER_PRIORITY, 9)
@@ -49,9 +51,9 @@ class PriorityRules(unittest.TestCase):
 
     def test_pending_ordered_by_priority_then_time(self):
         for text, p in [("a0", 0), ("b5", 5), ("c0", 0), ("d10", 10), ("e5", 5)]:
-            self.route("azathoth", "shub", text, priority=p)
+            self.route("azathoth", "nyarlathotep", text, priority=p)
             time.sleep(0.002)
-        self.assertEqual([m["text"] for m in self.t.store.pending_for("shub")], ["d10", "b5", "e5", "a0", "c0"])
+        self.assertEqual([m["text"] for m in self.t.store.pending_for("nyarlathotep")], ["d10", "b5", "e5", "a0", "c0"])
 
 
 class TakeBatch(unittest.TestCase):
@@ -93,8 +95,7 @@ class Preemption(HarnessServer):
         self.wait(lambda: next(m for m in self.api("messages?agent_id=gh") if m["id"] == slow["id"])["state"] == "handled")
 
     def test_urgent_interrupts_agent_message_batch(self):
-        # Azathoth hands ghroth a long job (priority 0); the owner's urgent message cuts in.
-        # (Yog's reports quote "SLEEP", which can keep fake azathoth asleep for a while; hence the long wait.)
+        # Azathoth hands nyarl a long job (priority 0); the owner's urgent message cuts in.
         self.api("send", {"to": "az", "text": 'CALL temple_send {"to": "gh", "text": "SLEEP 20"}'})
         job = self.wait(lambda: next(m for m in self.api("messages?agent_id=gh") if m["sender"] == "az"
                                      and m["text"] == "SLEEP 20" and m["state"] != "handled"), 60)
@@ -110,8 +111,8 @@ class Preemption(HarnessServer):
 
 
 class ClaudePreemption(Preemption):
-    """Same, with ghroth on the Claude runtime."""
-    runtimes = {"ghroth": {"backend": "claude", "model": "claude-opus-5-5"}}
+    """Same, with nyarl on the Claude runtime."""
+    runtimes = {"nyarlathotep": {"backend": "claude", "model": "claude-opus-5-5"}}
 
 
 if __name__ == "__main__":

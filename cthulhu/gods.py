@@ -29,46 +29,7 @@ MEMORY_SCHEMA = {
 
 STR = {"type": "string"}
 BOOL = {"type": "boolean"}
-TASK_ID = {"task_id": STR}
-# Task discipline (tasks.py). Each role is offered only the calls the temple lets it make.
-TASK = {
-    "get": tool("task_get", "读取任务合同、状态、探针历史、延期、事件和消息时间线。", TASK_ID, ["task_id"]),
-    "create": tool("task_create", "创建任务并把任务说明发给执行者。程序强制：执行者、验收标准必填，截止默认 120 分钟。",
-                   {"executor": {"type": "string", "description": "执行者 agent ID"}, "title": STR,
-                    "text": {"type": "string", "description": "任务说明：目标、边界、交付物"},
-                    "acceptance": {"type": "string", "description": "验收标准：可核验的完成条件"},
-                    "deadline": {"type": "string", "description": "分钟数，或 'YYYY-MM-DD HH:MM'；默认 120"}},
-                   ["executor", "title", "text", "acceptance"]),
-    "probe": tool("task_probe", "登记本任务的进度探针：一条 shell 命令，输出单个数字，数字增长即进展（如 `wc -l < out.jsonl`、"
-                  "`stat -c %s report.md`、`git -C repo rev-list --count HEAD`）。由所在星系每个检查点执行，是唯一的进度证据；"
-                  "实际执行后的首检查点前没有有效探针，任务作废、执行者被停止。",
-                  {"task_id": STR, "command": STR}, ["task_id", "command"]),
-    "extend": tool("task_extend", "申请延期。第 1 次由直接上级批准，第 2 次阿撒托斯，第 3 次只能主人；延长不超过原时长；"
-                   "静默工作须提供命令/进程/产物证据与预计完成；manager可代申请但不能自批。",
-                   {"task_id": STR, "deadline": {"type": "string", "description": "从现在或截止（取较晚）延长的分钟数，或 'YYYY-MM-DD HH:MM'"},
-                    "reason": STR, "evidence": STR, "expected_completion": STR}, ["task_id", "deadline", "reason"]),
-    "block": tool("task_block", "任务卡在只有主人能做的决定上：暂停计时并立即通知主人。", {"task_id": STR, "question": STR},
-                  ["task_id", "question"]),
-    "submit": tool("task_submit", "提交验收：附上可核验的证据（产物路径、命令输出、提交号）。证据提交后冻结。",
-                   {"task_id": STR, "evidence": STR}, ["task_id", "evidence"]),
-    "extension": tool("task_extension", "批准或拒绝等你决定的延期申请。", {"task_id": STR, "approve": BOOL, "reason": STR},
-                      ["task_id", "approve", "reason"]),
-    "verdict": tool("task_verdict", "验收裁决：通过则任务关闭；驳回则任务回到进行中，计时不重置。",
-                    {"task_id": STR, "passed": BOOL, "reason": STR}, ["task_id", "passed", "reason"]),
-    "probe_verdict": tool("task_probe_verdict", "判断探针是否真实度量了朝验收标准的进展。判为无效则任务作废。",
-                          {"task_id": STR, "ok": BOOL, "reason": STR}, ["task_id", "ok", "reason"]),
-    "unblock": tool("task_unblock", "解除任务的主人阻塞并恢复计时（程序抄送主人）。", {"task_id": STR, "note": STR}, ["task_id", "note"]),
-    "replace": tool("task_replace", "命令换人；manager可填executor绑定已有worker，须先清算原执行者。", {"task_id": STR, "reason": STR, "executor": STR}, ["task_id", "reason"]),
-    "cancel": tool("task_cancel", "取消有权管理的任务，保留部分证据与历史；仅清理该任务的队列和回合，不停止其他任务或分离进程。",
-                   {"task_id": STR, "reason": STR}, ["task_id", "reason"]),
-}
-EXECUTOR_TOOLS = [TASK[k] for k in ("get", "probe", "extend", "block", "submit")]
-
-
-async def task_call(link, name: str, args: dict):
-    if name in {t["name"] for t in TASK.values()}:
-        return await link.call(name, **args)
-    return None
+INT = {"type": "integer"}
 
 # Permanent memory holds high-level insights and rules only; details live in the temple's message history.
 MEMORY_RULES = ("永久上下文只记录高层次、长期有效的内容，只有五类：主人的目标与关注点、偏好、决定与授权、约束与规则、"
@@ -238,11 +199,12 @@ class OwnerChat:
 
 
 HISTORY_TOOLS = [
-    tool("temple_messages", "查阅中心神殿的消息历史：调查结果、数据、路径等细节都在这里。可按 agent、任务或关键词过滤。",
-         {"agent_id": STR, "task_id": STR, "search": {"type": "string", "description": "关键词"},
-          "limit": {"type": "integer"}}),
-    tool("temple_tasks", "列出任务及其状态（active / blocked_on_owner / submitted / accepted / failed），可按关键词搜索。",
-         {"search": STR, "limit": {"type": "integer"}}),
+    tool("temple_messages", "查阅中心神殿的消息历史（你和旧日支配者之间、汇总、汇报）。可按 agent、任务或关键词过滤。",
+         {"agent_id": STR, "task_id": STR, "search": {"type": "string", "description": "关键词"}, "limit": INT}),
+    tool("list_tasks", "列出任务（绑定表）：状态、执行者、最新一句总结。可按关键词、状态、星系过滤；默认只列在途任务。",
+         {"search": STR, "state": STR, "galaxy_id": STR, "all": {"type": "boolean", "description": "包含已结束的任务"},
+          "limit": INT}),
+    tool("task_view", "查看任务全部明细：探针与样本、检查点、事件时间线、AI 总结、提交记录、相关消息。", {"task_id": STR}, ["task_id"]),
 ]
 
 
@@ -250,66 +212,79 @@ async def history_call(link, name: str, args: dict):
     if name == "temple_messages":
         msgs = await link.call("messages", agent_id=args.get("agent_id"), task_id=args.get("task_id"),
                                search=args.get("search"), limit=args.get("limit", 30))
-        return [{k: m.get(k) for k in ("id", "sender", "receiver", "task_id", "status", "text", "created_at")} for m in msgs]
-    if name == "temple_tasks":
-        return await link.call("tasks", search=args.get("search"), limit=args.get("limit", 20))
-    return await task_call(link, name, args)
-
-
-# How a report to the owner is labelled, from the status a manager (or a verdict) attached to its message.
-NOTE_KIND = {"progress": "progress", "blocked": "blocked", "done": "summary"}
+        return [{k: m.get(k) for k in ("id", "sender", "receiver", "task_id", "text", "created_at")} for m in msgs]
+    if name == "list_tasks":
+        return await link.call("list_tasks", **args)
+    if name == "task_view":
+        return await link.call("task_view", task_id=args["task_id"])
+    return None
 
 
 class Azathoth(OwnerChat, MemoryAgent):
+    """The single standing decision-maker (design §1.1.1). Owner chats are answered in the web chat;
+    everything else (digests, reports, review requests) is handled as an internal turn whose outcome
+    the owner sees through tell_owner."""
     role = Role.AZATHOTH
     memory_sources = {OWNER}
-    # Reports from shub/yog may correct or drop entries, never add: details stay in the message history.
-    correction_sources = {Role.SHUB, Role.YOG}
     memory_brief = "刚才是你和主人的对话。只提取主人表达的意志、偏好、决定、授权、约束，以及主人告诉你的世界的稳定事实。"
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
-        self.reporting: dict | None = None   # set while handling messages from shub/yog
+        self.reporting: dict | None = None
+
+    async def turn_header(self) -> str:
+        try:
+            return await self.link.call("azathoth_header", timeout=15)
+        except Exception:
+            return ""
 
     def tools(self) -> list[dict]:
         return [
-            self.send_tool({"task_id": {"type": "string", "description": "跟进已有任务时填它的任务 ID；新工作用 task_create"}}),
-            *super().tools()[1:],
+            self.send_tool({"task_id": {"type": "string", "description": "这条消息所属的任务 ID（发给旧日支配者时填）"}}),
             *HISTORY_TOOLS,
-            *(TASK[k] for k in ("create", "get", "verdict", "extension", "unblock", "replace", "cancel")),
-            tool("temple_agent", "读取某个 agent 的完整注册信息（含初始化参数）。", {"agent_id": STR}, ["agent_id"]),
-            tool("temple_owner_history", "检索你和主人的历史聊天。", {"search": STR, "limit": {"type": "integer"}}),
-            tool("temple_deploy", "一键部署：把仓库 main 分支的最新版本部署到中心神殿和各星系。程序会先排空（等正在进行的回合结束）、"
-                 "更新代码、重启、确认上线，失败自动回滚；结果会作为消息发回给你。"
-                 "也用于批准或拒绝格赫罗斯的部署请求（request_id）。",
-                 {"galaxies": {"type": "array", "items": STR, "description": "星系 ID 列表；不填或 [\"all\"] 表示中心神殿和全部星系"},
-                  "reason": STR, "task_id": STR,
-                  "recover_job_id": {"type": "string", "description": "重新确认失败部署的回滚，仅恢复，不重新发布目标版本"},
-                  "request_id": {"type": "string", "description": "格赫罗斯部署请求的 ID"},
-                  "reject": {"type": "boolean", "description": "拒绝该请求"},
-                  "status_only": {"type": "boolean", "description": "只查看各星系当前版本和最近的部署记录"}}),
-            tool("tell_owner", "只在处理黑山羊/尤格的消息时使用：在主人的聊天窗口里告诉主人当前情况，每次都必须调用；"
-                 "进展只写一两句话，任务完成时写完整总结。",
-                 {"text": STR,
-                  "deliverable": {"type": "boolean", "description": "这条消息就是主人要的东西（报告、答复、结论），"
-                                  "要作为总结展开显示，而不是折叠成过程中的一步"}}, ["text"]),
+            tool("new_task", "把一个任务派到某个星系。星系枢纽会决定复用空闲的旧日支配者还是新建一个，绑定结果会作为消息通知你。"
+                 "描述要完整：目标、边界、交付物；验收标准写可核验的完成条件。",
+                 {"galaxy": {"type": "string", "description": "星系 ID 或名称"}, "description": STR,
+                  "acceptance": STR, "cwd": {"type": "string", "description": "工作目录，可选"}}, ["galaxy", "description"]),
+            tool("close_task", "验收通过：结束任务，执行者被释放、可被复用。", {"task_id": STR, "note": STR}, ["task_id"]),
+            tool("continue_task", "验收不通过或需要继续：恢复检查点，并把指令加急发给执行者。", {"task_id": STR, "instruction": STR},
+                 ["task_id", "instruction"]),
+            tool("cancel_task", "中止任务（任何状态）。执行者当前回合被中断，进程保留可复用。", {"task_id": STR, "reason": STR},
+                 ["task_id", "reason"]),
+            tool("manage_old_one", "停止 / 恢复 / 删除（须先停止）/ 打断当前回合 一个旧日支配者。",
+                 {"agent_id": STR, "action": {"type": "string", "enum": ["stop", "resume", "delete", "interrupt"]}},
+                 ["agent_id", "action"]),
+            tool("latest_result", "读取某个旧日支配者的最新工作状态与产出。", {"agent_id": STR}, ["agent_id"]),
+            tool("temple_owner_history", "检索你和主人的历史聊天。", {"search": STR, "limit": INT}),
+            tool("sudo_request", "需要 root 的命令只能走这里：主人在神殿网页上批准后，由程序以 root 执行原文并把结果返回给你。"
+                 "等待期间工具会阻塞，最长 30 分钟；被拒或超时会如实返回。理由要写清楚，让主人能直接判断。",
+                 {"command": {"type": "string", "description": "完整的 shell 命令，不要带 sudo 前缀"}, "reason": STR,
+                  "cwd": STR, "timeout": {"type": "integer", "description": "执行超时秒数，默认 600"}}, ["command", "reason"]),
+            tool("temple_deploy", "一键部署：把仓库 main 分支的最新版本部署到中心神殿和各星系。程序先排空、更新代码、重启、确认上线，"
+                 "失败自动回滚；结果会作为消息发回给你。",
+                 {"galaxies": {"type": "array", "items": STR, "description": "星系 ID 列表；不填或 [\"all\"] 表示全部"},
+                  "reason": STR, "recover_job_id": STR, "status_only": {"type": "boolean"}}),
+            tool("tell_owner", "只在处理宇宙内部消息（汇总、汇报、审核请求）时使用：在主人的聊天窗口里告诉主人当前情况。"
+                 "进展只写一两句；交付主人要的东西时写完整并设 deliverable=true。",
+                 {"text": STR, "deliverable": {"type": "boolean"}}, ["text"]),
         ]
 
     async def call_tool(self, name: str, args: dict):
         found = await history_call(self.link, name, args)
         if found is not None:
             return found
+        if name in ("new_task", "close_task", "continue_task", "cancel_task", "manage_old_one", "latest_result"):
+            return await self.link.call(name, timeout=120, **args)
+        if name == "sudo_request":
+            return await self.link.call("sudo_request", timeout=1800 + int(args.get("timeout") or 600) + 60, **args)
         if name == "temple_deploy":
             if args.get("status_only"):
                 return await self.link.call("deploy_status")
-            return await self.link.call("deploy", timeout=120, **{k: args[k] for k in
-                                        ("galaxies", "reason", "task_id", "request_id", "reject", "recover_job_id") if k in args})
-        if name == "temple_agent":
-            return await self.link.call("agent", agent_id=args["agent_id"])
+            return await self.link.call("deploy", timeout=120, **{k: args[k] for k in ("galaxies", "reason", "recover_job_id") if k in args})
         if name == "temple_owner_history":
             turns = await self.link.call("owner_chat", search=args.get("search"), limit=args.get("limit", 10))
             return [{"at": time.strftime("%Y-%m-%d %H:%M", time.localtime(t["created_at"])),
-                     "owner": t["user_text"] or f"（你主动告知：{t.get('task_title') or t.get('origin') or '内部消息'}）",
+                     "owner": t["user_text"] or f"（你主动告知：{t.get('origin') or '内部消息'}）",
                      "you": clip(t["reply"], 2000)} for t in turns]
         if name == "tell_owner":
             if self.reporting is None:
@@ -321,262 +296,82 @@ class Azathoth(OwnerChat, MemoryAgent):
     async def tell_owner(self, text: str, deliverable: bool = False) -> None:
         r = self.reporting or {}
         r["told"] = True
-        # A deliverable the owner asked for is shown as a summary even while its task stays open.
-        kind = "summary" if deliverable and r.get("kind") in ("progress", "notice") else r.get("kind")
         await self.link.call("notify_owner", text=text, origin=r.get("origin"), task_id=r.get("task_id"),
-                             kind=kind, model=self.latest.get("model"))
+                             kind="summary" if deliverable else r.get("kind", "progress"), model=self.latest.get("model"))
 
     async def receive(self, batch: list[dict]) -> None:
         owner = [m for m in batch if m["sender"] == OWNER]
         rest = [m for m in batch if m["sender"] != OWNER]
         for m in owner:
             await self.chat(m)
-        # One report turn per task, so each note to the owner belongs to exactly one task.
-        groups: dict[str | None, list[dict]] = {}
-        for m in rest:
-            groups.setdefault(m.get("task_id"), []).append(m)
-        for task_id, msgs in groups.items():
-            await self.internal(task_id, msgs)
+        if rest:
+            await self.internal(rest)
 
-    async def internal(self, task_id: str | None, batch: list[dict]) -> None:
-        """Reports from shub (tagged with a task and its status) or yog. Azathoth may answer them or not,
-        but the owner is told every time; the program decides whether it is a step or the final summary."""
-        statuses = [m.get("status") for m in batch if m.get("status")]
-        status = "done" if "done" in statuses else ("blocked" if "blocked" in statuses else statuses[-1] if statuses else None)
-        kind = NOTE_KIND.get(status, "notice")
-        title = next((m.get("task_title") for m in batch if m.get("task_title")), None)
-        # Task-discipline notices were already shown to the owner by the program: no forced tell_owner.
-        self.reporting = {"task_id": task_id, "kind": kind, "told": all(m.get("kind") == "discipline" for m in batch),
-                          "origin": title or "、".join(sorted({m["sender_name"] for m in batch}))}
-        guide = {
-            "progress": "这是任务过程中的进展。tell_owner 只写一两句话的进展（像思考过程里的一步：做了什么、发现了什么、下一步），不要展开细节。"
-                        "例外：如果这条消息交付的正是主人要的东西（报告、答复、结论），就写完整内容并设 deliverable=true，它会作为总结展开显示。",
-            "blocked": "任务受阻，需要主人决定。tell_owner 写一份阶段总结，会在界面上展开显示（之前的进展折叠在上面）："
-                       "先列出到目前为止已完成的结果和结论，再说清卡在哪里，最后用主人可以直接回答的具体问题结尾。",
-            "summary": "这个任务已验收通过。先核对结果是否满足主人的意图，再用 tell_owner 写给主人的完整总结："
-                       "结论先行，然后是关键结果、遗留问题；过程不用重复，主人可以展开查看之前的进展。",
-            "notice": "这是下属、尤格或神殿的消息（神殿的军纪通知程序已告诉主人，你只需采取行动，不必再 tell_owner）。"
-                      "其他消息 tell_owner 用一两句话告诉主人要点；需要主人决定时说清楚。"
-                      "如果它交付的正是主人要的东西，就写完整内容并设 deliverable=true。",
-        }[kind]
+    async def internal(self, batch: list[dict]) -> None:
+        """Digests, reports, finish requests and notices. Tell the owner only what matters; the program
+        does not force it (the owner can read every digest on the task page)."""
+        kinds = {m.get("kind") for m in batch}
+        review = "task_finished" in kinds
+        task_ids = {m.get("task_id") for m in batch if m.get("task_id")}
+        self.reporting = {"task_id": next(iter(task_ids)) if len(task_ids) == 1 else None,
+                          "kind": "summary" if review else "progress", "told": False,
+                          "origin": "、".join(sorted({m.get("sender_name") or m["sender"] for m in batch}))}
         try:
-            text = (f"【以下是宇宙内部的消息，不是主人说的。你可以用 temple_send 回复或继续安排下属，也可以不回复；"
-                    f"但必须调用一次 tell_owner 告诉主人。{guide}】\n\n" + self.render(batch))
+            text = ("【以下是宇宙内部的消息，不是主人说的。按需行动：审核请求用 close_task / continue_task 处理；"
+                    "阻塞和告警给出决定（send 指令、continue_task、cancel_task 或重新 new_task）；正常进展不必回应。"
+                    "主人需要知道的（任务完成的结论、需要主人决定的问题、重要异常）用 tell_owner 告诉主人，例行进展不用。】\n\n"
+                    + self.render(batch))
             result = await self.run_main(text)
-            if result.status == "completed" and not self.reporting["told"]:
-                result = await self.run_main(f"【程序提示】你还没有调用 tell_owner。现在调用它。{guide}")
             self.complete(batch, result)
-            if not self.reporting["told"] and not (self.preempted and result.status == "interrupted"):
-                reply = (result.text or "").strip() if result.status == "completed" else \
-                    f"（处理{self.reporting['origin']}的消息时出错：{result.error or result.status}）"
-                if reply:
-                    await self.tell_owner(reply)
             if result.status == "completed" and self.last_turn:
                 asyncio.create_task(self.distill(*self.last_turn, correct_only=True))
         finally:
             self.reporting = None
 
 
-SPAWN_FIELDS = {
-    "name": STR,
-    "task": {"type": "string", "description": "任务说明：目标、边界、交付物，完成后 task_submit"},
-    "skill": {"type": "string", "description": "它的职责设定（system prompt）：它是谁、负责什么领域、工作方式"},
-    "title": STR, "acceptance": {"type": "string", "description": "验收标准（新任务必填）"},
-    "deadline": {"type": "string", "description": "分钟数或 'YYYY-MM-DD HH:MM'，默认 120"},
-    "task_id": {"type": "string", "description": "仅更换执行者时填：接手的已有任务"},
-}
-
-
-class Manager:
-    """Mixin for shub and ghroth: they take tasks from azathoth and run their own old_ones."""
-
-    def take_batch(self, ready=None):
-        # Keep automatically inherited task IDs unambiguous when several tasks wake Shub together.
-        candidates = self.queue if ready is None else ready
-        first = min(candidates, key=lambda m: (-m['priority'], m['created_at']))
-        return super().take_batch([m for m in candidates if m.get('task_id') == first.get('task_id')])
-
-    def send_tool(self, extra: dict | None = None) -> dict:
-        return super().send_tool({
-            "task_id": {"type": "string", "description": "这条消息所属的任务 ID"},
-            "status": {"type": "string", "enum": ["progress", "blocked"],
-                       "description": "给阿撒托斯汇报时的标签。任务只由 task_submit 和验收关闭，不能靠汇报关闭"}})
-
-    def tools(self) -> list[dict]:
-        return super().tools() + [
-            self.spawn_tool(),
-            tool("temple_stop", "终止你自己的一个旧日支配者。", {"agent_id": STR}, ["agent_id"]),
-            tool("temple_restart", "重启你自己的一个旧日支配者（保留其上下文）。", {"agent_id": STR}, ["agent_id"]),
-            tool("temple_delete", "删除一个已终止的旧日支配者（历史保留）。", {"agent_id": STR}, ["agent_id"]),
-            *(TASK[k] for k in ("create", "extension", "replace", "cancel")), *EXECUTOR_TOOLS,
-        ]
-
-    async def send(self, to, text, priority=0, kind="message", **task):
-        if self.current_task and not task.get("task_id"):
-            task["task_id"] = self.current_task
-        return await super().send(to, text, priority, kind, **task)
-
-    async def call_tool(self, name: str, args: dict):
-        if name == "temple_spawn":
-            # A new old_one task hangs under the task this manager is working on.
-            return await self.link.call("spawn", **args, **({"parent_task_id": self.current_task}
-                                                            if self.current_task and not args.get("task_id") else {}))
-        if name in ("temple_stop", "temple_restart", "temple_delete"):
-            return await self.link.call(name.removeprefix("temple_"), agent_id=args["agent_id"])
-        found = await task_call(self.link, name, args)
-        return found if found is not None else await super().call_tool(name, args)
-
-
-class Shub(Manager, MemoryAgent):
-    role = Role.SHUB
-    memory_sources = {Role.AZATHOTH}
-    correction_sources = {Role.OLD_ONE}
-    memory_brief = "刚才是你和阿撒托斯的交流。只提取阿撒托斯定下的长期规则、授权，以及世界的稳定事实；具体任务的内容不记。"
-
-    def __init__(self, *a, **kw):
-        super().__init__(*a, **kw)
-        self.roster_seen: str | None = None
-
-    async def extra_context(self) -> str:
-        text = await self.roster()
-        self.roster_seen = text
-        return text
-
-    async def receive(self, batch: list[dict]) -> None:
-        # The roster is part of shub's permanent context; refresh it whenever it changed.
-        text = self.render(batch)
-        roster = await self.roster()
-        if roster != self.roster_seen:
-            self.roster_seen = roster
-            text = f"【名册已更新】\n{roster}\n\n{text}"
-        result = await self.run_main(text)
-        self.complete(batch, result)
-        await self.after_turn(batch, result)
-
-    async def roster(self) -> str:
-        d = await self.link.call("directory")
-        olds = [a for a in d["agents"] if a["role"] == Role.OLD_ONE and a["desired"] == "running" and a["parent_id"] == self.id]
-        galaxies = "\n".join(f"- {g['name']}（ID {g['id']}，{'在线' if g['online'] else '离线'}"
-                             f"{'' if g.get('spawn', True) else '，不可创建旧日支配者'}）" for g in d["galaxies"])
-        lines = []
-        for a in olds:
-            full = await self.link.call("agent", agent_id=a["id"])
-            spec = full["spec"]
-            lines.append(f"## {a['name']}（ID {a['id']}，星系 {a['galaxy_id']}）\n任务：{spec.get('task', '')}\n"
-                         f"职责设定：{clip(spec.get('skill', ''), 1500)}")
-        return (f"# 星系\n{galaxies or '（无）'}\n\n# 现役旧日支配者（初始化参数）\n" +
-                ("\n\n".join(lines) if lines else "（暂无）"))
-
-    def tools(self) -> list[dict]:
-        return super().tools() + HISTORY_TOOLS
-
-    def spawn_tool(self) -> dict:
-        return tool("temple_spawn", "在指定星系创建一个旧日支配者并同时建立它的任务合同；它会立即按 task 开始工作。"
-                    "更换执行者时填已有 task_id（不建新任务）。", SPAWN_FIELDS | {
-                        "galaxy_id": STR, "cwd": {"type": "string", "description": "工作目录，可选"}},
-                    ["name", "galaxy_id", "task", "skill"])
-
-    async def call_tool(self, name: str, args: dict):
-        found = await history_call(self.link, name, args)
-        return found if found is not None else await super().call_tool(name, args)
-
-
-class Yog(MemoryAgent):
-    """Independent QA. Woken only by the temple's task discipline: probe reviews, acceptance reviews and
-    diagnoses of escalated tasks. It decides nothing in the escalation ladder."""
-    role = Role.YOG
-    memory_sources = {Role.AZATHOTH}
-    correction_sources = {Role.OLD_ONE}
-    memory_brief = "刚才是你和阿撒托斯的交流。只提取阿撒托斯对质检工作定下的长期要求和关注点；具体某次的审查不记。"
-
-    def tools(self) -> list[dict]:
-        return super().tools() + [
-            tool("temple_latest_result", "远程读取某个 agent 的最新工作状态与产出。", {"agent_id": STR}, ["agent_id"]),
-            *(TASK[k] for k in ("get", "probe_verdict", "verdict")),
-        ]
-
-    def send_tool(self, extra=None):
-        return super().send_tool({"task_id": STR})
-
-    async def call_tool(self, name: str, args: dict):
-        if name == "temple_latest_result":
-            return await self.link.call("latest_result", agent_id=args["agent_id"])
-        found = await task_call(self.link, name, args)
-        return found if found is not None else await super().call_tool(name, args)
-
-    async def receive(self, batch: list[dict]) -> None:
-        # Each review turn's final reply is its Chinese conclusion, kept as the patrol log the owner reads.
-        result = await self.run_main(self.render(batch))
-        self.complete(batch, result)
-        if result.status == "completed" and (result.text or "").strip():
-            await self.link.call("patrol_log", summary=result.text.strip())
-        await self.after_turn(batch, result)
-
-
-class Ghroth(Manager, OwnerChat, MemoryAgent):
-    role = Role.GHROTH
-    # Azathoth carries the owner's will, so its standing rules and feedback count, as for Shub and Yog.
-    memory_sources = {OWNER, Role.AZATHOTH}
-    memory_brief = ("刚才是你和主人或阿撒托斯的交流。提取主人对 harness 维护的要求、决定、约束和偏好，以及你们达成的结论；"
-                    "阿撒托斯的消息只提取它转达或定下的长期规则、经验教训和应保持的做法，具体任务的内容不记。")
-
-    def tools(self) -> list[dict]:
-        # Maintenance can answer Nyarl only within an explicitly associated task.
-        return super().tools() + [
-            tool("temple_deploy_request", "请求阿撒托斯批准一键部署：把仓库 main 分支最新版本部署到中心神殿和各星系。"
-                 "先把修改提交并 push 到 GitHub。阿撒托斯批准后由神殿执行（排空、更新、重启、确认、失败回滚）。",
-                 {"galaxies": {"type": "array", "items": STR, "description": "星系 ID；不填表示全部"},
-                  "reason": {"type": "string", "description": "这次部署包含什么改动、为什么需要部署"},
-                  "task_id": STR}, ["reason"]),
-            tool("temple_deploy_status", "查看各星系当前代码版本、是否支持远程部署，以及最近的部署记录和进度。"),
-        ]
-
-    async def call_tool(self, name: str, args: dict):
-        if name == "temple_deploy_request":
-            return await self.link.call("deploy_request", **{k: args[k] for k in ("galaxies", "reason", "task_id") if k in args})
-        if name == "temple_deploy_status":
-            return await self.link.call("deploy_status")
-        return await super().call_tool(name, args)
-
-    def spawn_tool(self) -> dict:
-        return tool("temple_spawn", "创建一个旧日支配者做 harness 工作并同时建立任务合同。它在你的星系上、在 harness 仓库自己的 "
-                    "git worktree（分支 old/<ID>）里工作，不能推送或部署；由你审查合并。", SPAWN_FIELDS, ["name", "task", "skill"])
+OLD_ONE_TOOLS = [
+    tool("register_task_probe", "登记（或换阶段时更新）当前任务的进度探针：一条 shell 命令，输出单个数字，数字增长即进展"
+         "（如 `wc -l < out.jsonl`、`stat -c %s report.md`、`git -C repo rev-list --count HEAD`）。程序先试跑，再由 AI 判定是否合理。"
+         "任务进入新阶段、旧探针不再增长时，用它更新并填写 stage_note。",
+         {"command": STR, "rationale": {"type": "string", "description": "这个数字为什么能反映任务进展"},
+          "stage_note": {"type": "string", "description": "仅更新时必填：上一阶段做到哪了、为什么换"}}, ["command", "rationale"]),
+    tool("finish_task", "任务完成：提交可核验的证据（产物路径、命令输出、提交号），交阿撒托斯审核。检查点随即暂停。",
+         {"evidence": STR}, ["evidence"]),
+    tool("report", "向阿撒托斯汇报。blocker=true 表示卡住、需要它决定。每 10 分钟只能一次（和找同伴的限流互不影响），一次写完整。",
+         {"text": STR, "blocker": {"type": "boolean"}}, ["text"]),
+    tool("list_tasks", "列出全局在途任务及其执行者（找谁问问题用）。"),
+    tool("task_view", "查看一个任务的明细（你自己的任务，或其他任务的公开状态）。", {"task_id": STR}, ["task_id"]),
+]
 
 
 class OldOne(Agent):
     role = Role.OLD_ONE
-
-    def take_batch(self, ready=None):
-        candidates = self.queue if ready is None else ready
-        first = min(candidates, key=lambda m: (-m['priority'], m['created_at']))
-        return super().take_batch([m for m in candidates if m.get('task_id') == first.get('task_id')])
-
-    async def send(self, to, text, priority=0, kind="message", **task):
-        if self.current_task and not task.get('task_id'):
-            task['task_id'] = self.current_task
-        return await super().send(to, text, priority, kind, **task)
+    persistent_thread = True
 
     def tools(self) -> list[dict]:
-        return super().tools() + EXECUTOR_TOOLS
+        return [tool("send", "给另一个旧日支配者发消息（不能发给阿撒托斯，找它用 report）。同一个对象每 10 分钟只能发一条，"
+                     "所以问题要一次写完整：背景、你已经试过什么、你具体要什么答案、期望的格式。"
+                     "回复别人发来的消息时填 reply_to，每条来信可免限流回复一次。",
+                     {"to": {"type": "string", "description": "旧日支配者 ID"}, "text": STR,
+                      "priority": {"type": "integer", "description": "0–8"}, "reply_to": {"type": "string", "description": "被回复的消息 ID"}},
+                     ["to", "text"]), *OLD_ONE_TOOLS]
 
     async def call_tool(self, name: str, args: dict):
-        found = await task_call(self.link, name, args)
-        return found if found is not None else await super().call_tool(name, args)
+        if name == "send":
+            return await self.send(args["to"], args["text"], priority=int(args.get("priority") or 0),
+                                   **({"reply_to": args["reply_to"]} if args.get("reply_to") else {}))
+        if name in ("register_task_probe", "finish_task", "report", "list_tasks", "task_view"):
+            return await self.link.call(name, timeout=180, **args)
+        raise ValueError(f"unknown tool {name}")
+
+    async def turn_header(self) -> str:
+        try:
+            return await self.link.call("header", timeout=15)
+        except Exception:
+            return ""
 
     def skill(self) -> str:
-        deadline = self.spec.get("deadline")
-        return (load_role("old_one") + f"\n\n# 你的管理者为你设定的职责\n{self.spec.get('skill', '')}\n\n"
-                f"# 你的任务合同\n任务 ID：{self.spec.get('task_id')}\n"
-                f"截止：{time.strftime('%Y-%m-%d %H:%M', time.localtime(deadline)) if deadline else '见 task_get'}\n"
-                f"验收标准：{self.spec.get('acceptance', '')}\n\n# 你的初始任务\n{self.spec.get('task', '')}")
-
-    async def on_ready(self) -> None:
-        if self.thread_id is None:
-            # A fresh old_one starts on its task without waiting for a message.
-            self.enqueue({"id": f"start-{self.id}", "sender": "system", "sender_name": "中心神殿", "sender_role": "system",
-                          "task_id": self.spec.get("task_id"),
-                          "priority": 0, "created_at": time.time(),
-                          "text": "你刚被创建。先用 task_probe 登记进度探针（第一个检查点前没有就作废），然后开始执行你的初始任务。"})
+        return load_role("old_one")
 
 
 from .nyarl import NyarlBridge
@@ -585,4 +380,4 @@ from .nyarl import NyarlBridge
 class Nyarlathotep(NyarlBridge, OwnerChat, MemoryAgent):
     pass
 
-CLASSES = {c.role: c for c in (Azathoth, Shub, Yog, Ghroth, OldOne, Nyarlathotep)}
+CLASSES = {c.role: c for c in (Azathoth, OldOne, Nyarlathotep)}

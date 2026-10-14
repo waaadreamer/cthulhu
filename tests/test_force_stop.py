@@ -16,10 +16,9 @@ from cthulhu.temple import Temple
 class Access(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        gods = [{"id": r.value, "role": r.value, "galaxy": "g1"} for r in (Role.AZATHOTH, Role.SHUB, Role.YOG, Role.GHROTH)]
+        gods = [{"id": r.value, "role": r.value, "galaxy": "g1"} for r in (Role.AZATHOTH, Role.NYARLATHOTEP)]
         self.t = Temple({"secret": "s", "db": str(Path(self.tmp.name) / "db"),
                          "galaxies": [{"id": "g1", "name": "g1", "token": "t"}], "gods": gods})
-        self.t.store.upsert_agent("old_a", "a", Role.OLD_ONE, "g1", "shub", {"task": "t"})
 
     async def asyncTearDown(self):
         self.t.store.db.close()
@@ -32,42 +31,30 @@ class Access(unittest.IsolatedAsyncioTestCase):
         return c
 
     async def test_no_agent_can_force_stop_or_resume(self):
-        for who in ("azathoth", "shub", "yog", "ghroth"):
+        for who in ("azathoth", "nyarlathotep"):
             for method in ("force_stop", "resume", "halt", "relaunch", "maintenance_stop", "maintenance_resume"):
                 with self.assertRaises(Denied, msg=(who, method)):
-                    await self.t.handle_agent_call(self.conn(who), method, {"agent_id": "ghroth"})
-        # Shub's old_one tool still cannot reach management.
-        for target in ("azathoth", "yog", "ghroth"):
-            with self.assertRaisesRegex(Denied, "only its own old_ones"):
-                await self.t.handle_agent_call(self.conn("shub"), "stop", {"agent_id": target})
+                    await self.t.handle_agent_call(self.conn(who), method, {"agent_id": "nyarlathotep"})
+        # Old_ones are managed through their hub; azathoth's tool names only old_ones.
+        with self.assertRaisesRegex(ValueError, "unknown old_one"):
+            await self.t.handle_agent_call(self.conn("azathoth"), "manage_old_one", {"agent_id": "nyarlathotep", "action": "stop"})
         self.assertTrue(all(a["desired"] == "running" for a in self.t.store.agents()))
 
-    async def test_shub_keeps_old_one_control_but_not_over_a_force_stop(self):
-        shub = self.conn("shub")
-        await self.t.handle_agent_call(shub, "stop", {"agent_id": "old_a"})
-        await self.t.handle_agent_call(shub, "restart", {"agent_id": "old_a"})
-        self.assertEqual(self.t.store.agent("old_a")["desired"], "running")
-        await self.t.halt("old_a", "主人", force=True)
-        with self.assertRaisesRegex(Denied, "force-stopped"):
-            await self.t.handle_agent_call(shub, "restart", {"agent_id": "old_a"})
-        await self.t.relaunch("old_a", "主人")
-        self.assertEqual(self.t.store.agent("old_a")["desired"], "running")
-
     async def test_stopped_agent_rejects_and_cannot_act(self):
-        self.t.store.add_message("azathoth", "ghroth", "queued before the stop")
-        await self.t.halt("ghroth", "maintenance", force=True)
-        self.assertEqual(self.t.store.pending_for("ghroth"), [])
+        self.t.store.add_message("azathoth", "nyarlathotep", "queued before the stop")
+        await self.t.halt("nyarlathotep", "maintenance", force=True)
+        self.assertEqual(self.t.store.pending_for("nyarlathotep"), [])
         with self.assertRaisesRegex(Denied, "stopped"):
-            await self.t.route("azathoth", "ghroth", "hi")
+            await self.t.route("azathoth", "nyarlathotep", "hi")
         with self.assertRaisesRegex(Denied, "stopped"):
-            await self.t.owner_send("ghroth", "hi")
+            await self.t.owner_send("nyarlathotep", "hi")
         with self.assertRaisesRegex(Denied, "stopped"):
-            await self.t.handle_agent_call(self.conn("ghroth"), "send", {"to": "nyarlathotep", "text": "x"})
-        self.assertEqual(self.t.public_agent(self.t.store.agent("ghroth"))["stopped_by"], "maintenance")
+            await self.t.handle_agent_call(self.conn("nyarlathotep"), "send", {"to": "azathoth", "text": "x"})
+        self.assertEqual(self.t.public_agent(self.t.store.agent("nyarlathotep"))["stopped_by"], "maintenance")
         # Persisted: a new temple on the same db keeps it stopped and never launches it.
         t2 = Temple(self.t.config)
-        self.assertEqual(t2.store.agent("ghroth")["desired"], "stopped")
-        self.assertNotIn("ghroth", [a["id"] for a in t2.store.agents("g1", include_stopped=False)])
+        self.assertEqual(t2.store.agent("nyarlathotep")["desired"], "stopped")
+        self.assertNotIn("nyarlathotep", [a["id"] for a in t2.store.agents("g1", include_stopped=False)])
         t2.store.db.close()
 
 
@@ -105,7 +92,7 @@ class ForceStop(HarnessServer):
         return r.stdout
 
     def test_stop_mid_turn_reject_persist_resume(self):
-        # Ghroth is in a long turn with more work queued behind it.
+        # Nyarl is in a long turn with more work queued behind it.
         slow = self.api("send", {"to": "gh", "text": "SLEEP 120"})
         self.wait(lambda: self.turn("gh", slow["id"])["status"] == "running")
         queued = self.api("send", {"to": "gh", "text": "REPLY 不该在恢复后执行"})
@@ -127,22 +114,22 @@ class ForceStop(HarnessServer):
         self.assertIn("stopped", reply)
         self.assertFalse(self.agent("gh")["online"])
 
-        # Maintenance CLI stops yog too.
-        self.assertIn("stopped", self.cli("stop", "yo"))
-        self.wait(lambda: not alive(self.pids('"id": "yo"')), 15)
+        # Maintenance CLI stops azathoth too.
+        self.assertIn("stopped", self.cli("stop", "az"))
+        self.wait(lambda: not alive(self.pids('"id": "az"')), 15)
 
         # The temple restarts: both stay stopped and the galaxy does not relaunch them.
         self.restart_temple()
         time.sleep(3)
-        self.assertFalse(self.agent("gh")["online"] or self.agent("yo")["online"])
-        self.assertFalse(self.pids('"id": "gh"') or self.pids('"id": "yo"'))
+        self.assertFalse(self.agent("gh")["online"] or self.agent("az")["online"])
+        self.assertFalse(self.pids('"id": "gh"') or self.pids('"id": "az"'))
         self.assertEqual(self.agent("gh")["stopped_by"], "主人")
 
         # Resume: fresh start, the cancelled backlog does not run, new messages work.
-        self.assertIn("running", self.cli("resume", "yo"))
+        self.assertIn("running", self.cli("resume", "az"))
         r = self.api("resume", {"agent_id": "gh"})
         self.assertEqual((r["desired"], r["stopped_by"]), ("running", None))
-        self.wait(lambda: self.agent("gh")["online"] and self.agent("yo")["online"], 30)
+        self.wait(lambda: self.agent("gh")["online"] and self.agent("az")["online"], 30)
         self.assertEqual(self.chat("gh", "REPLY 已恢复")["reply"], "已恢复")
         self.assertEqual(self.turn("gh", queued["id"])["status"], "interrupted")
         self.assertEqual(next(m for m in self.api("messages?agent_id=gh") if m["id"] == queued["id"])["state"], "cancelled")
@@ -166,7 +153,7 @@ class ForceStop(HarnessServer):
         cls.temple = subprocess.Popen([str(ROOT / "venv" / "bin" / "python"), "-m", "cthulhu", "temple",
                                        "--config", str(cls.dir / "temple.json")], env=env)
         cls.cookie = cls.wait(cls.login, 30)
-        cls.wait(lambda: next(a for a in cls.api("directory")["agents"] if a["id"] == "az")["online"], 30)
+        cls.wait(lambda: next(a for a in cls.api("directory")["agents"] if a["id"] == "gh")["desired"], 30)
 
 
 if __name__ == "__main__":

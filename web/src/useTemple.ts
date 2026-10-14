@@ -6,7 +6,7 @@ export interface Stream { reply: string; activity: string[] }
 type Handlers = {
   onChat?: (t: Turn) => void
   onMessage?: (m: Message) => void
-  onPatrol?: () => void
+  onApproval?: () => void
   onDeploy?: () => void
   onTask?: (taskId: string) => void
 }
@@ -67,8 +67,8 @@ export function useTemple(handlers: Handlers) {
           case 'message':
             h.current.onMessage?.(f.message)
             break
-          case 'patrol':
-            h.current.onPatrol?.()
+          case 'approval':
+            h.current.onApproval?.()
             break
           case 'deploy':
             h.current.onDeploy?.()

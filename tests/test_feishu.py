@@ -30,7 +30,7 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         self.path = Path(self.tmp.name)
         self.t = Temple({'secret':'fixture-secret','db':str(self.path/'db'),
             'galaxies':[{'id':'g','name':'g','token':'fixture-galaxy'}],
-            'gods':[{'id':r,'role':r,'galaxy':'g'} for r in ('azathoth','shub','ghroth','yog')],
+            'gods':[{'id':'azathoth','role':'azathoth','galaxy':'g'}],
             'feishu':{'enabled':True,'app_id':'fixture-app','galaxy':'g',
                 'owner':{'sender_id':'fixture-owner','chat_id':'fixture-chat','verified_by':'owner-fixture'}}})
         sock=socket.socket(); sock.bind(('127.0.0.1',0)); sock.listen(16)
@@ -109,8 +109,8 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
                 await self.n.link.call('channel_ingress',**(self.event|change),prompt='bad',text='bad')
         self.assertEqual(self.t.store.q('select * from messages'),[])
         with self.assertRaises(Denied):
-            await self.t.handle_agent_call(SimpleNamespace(id='shub'),'channel_authorize',self.event)
-        for method in ('spawn','deploy','messages'):
+            await self.t.handle_agent_call(SimpleNamespace(id='azathoth'),'channel_authorize',self.event)
+        for method in ('new_task','deploy','messages','sudo_request'):
             with self.assertRaises((Denied,KeyError)):
                 await self.t.handle_agent_call(SimpleNamespace(id='nyarlathotep'),method,{})
         self.t.config['feishu']['owner'].pop('verified_by')
@@ -159,31 +159,21 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
             if shown and 'config' in shown: break
             await asyncio.sleep(.02)
         self.assertEqual(shown['config'],cfg)
-        # Agents outside ADMIN_READ never receive the policy through the directory.
-        d=await self.t.handle_agent_call(SimpleNamespace(id='ghroth'),'directory',{})
-        self.assertTrue(all(a.get('admission') is None for a in d['agents']))
-        d=await self.t.handle_agent_call(SimpleNamespace(id='shub'),'directory',{})
-        self.assertEqual(next(a for a in d['agents'] if a['id']=='nyarlathotep')['admission']['config'],cfg)
+        # No agent can read the directory (and with it the policy); only the owner's web UI does.
+        for who in ('azathoth','nyarlathotep'):
+            with self.assertRaises(Denied):
+                await self.t.handle_agent_call(SimpleNamespace(id=who),'directory',{})
         mid=self.t.store.remember('nyarlathotep','fixture rule','fixture')
         self.assertGreater(self.t.store.memory_stats()['nyarlathotep']['updated_at'],0)
 
     async def test_nyarl_memory_also_distills_azathoth(self):
         self.assertEqual(self.n.memory_sources,{'owner','azathoth'})
 
-    async def test_peer_permissions_task_association(self):
-        with self.assertRaises(Denied): await self.t.route('nyarlathotep','ghroth','unscoped')
-        task=self.t.store.add_task('migration')['id']
-        await self.t.route('shub','nyarlathotep','delegated',task_id=task)
-        with self.assertRaises(Denied): await self.t.route('nyarlathotep','ghroth','unrelated',task_id=task)
-        await self.t.route('azathoth','ghroth','related',task_id=task)
-        await self.t.route('nyarlathotep','ghroth','coordinate',task_id=task)
-        await self.t.route('ghroth','nyarlathotep','receipt',task_id=task)
-        self.assertEqual(self.t.store.task(task)['state'],'active')
-
-    async def test_task_supervision_reaches_nyarl_task(self):
-        task=self.t.store.add_task('Feishu task')['id']
-        await self.t.route('shub','nyarlathotep','authorized task',task_id=task)
-        await self.t.route('nyarlathotep','yog','task supervision',task_id=task)
+    async def test_peer_permissions(self):
+        # Nyarl talks to azathoth only; azathoth and the owner reach Nyarl.
+        await self.t.route('nyarlathotep','azathoth','coordinate')
+        await self.t.route('azathoth','nyarlathotep','delegated')
+        with self.assertRaises(Denied): await self.t.route('nyarlathotep','old_x','unknown peer')
 
     async def test_channel_never_receives_web_memory_and_scope_auth_is_server_side(self):
         self.t.store.remember('nyarlathotep','WEB_MEMORY_ONLY','fixture')

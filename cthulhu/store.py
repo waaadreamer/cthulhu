@@ -66,12 +66,57 @@ CREATE TABLE IF NOT EXISTS patrols (
     summary TEXT NOT NULL,
     created_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS tasks (          -- one contracted piece of work (see discipline.py)
+CREATE TABLE IF NOT EXISTS tasks (          -- v2 task contracts; unused since v3 (see task_index)
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'active',    -- see tasks.STATES
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_index (     -- v3: the temple's view of every task; details live on the hub
+    id TEXT PRIMARY KEY,
+    galaxy_id TEXT NOT NULL,
+    description TEXT NOT NULL,
+    acceptance TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'assigning',
+    executor TEXT,
+    executor_name TEXT,
+    line TEXT NOT NULL DEFAULT '',            -- one-line status for the bindings table
+    summary TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    closed_at REAL
+);
+CREATE TABLE IF NOT EXISTS roster (           -- v3: old_ones as reported by their hubs
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    galaxy_id TEXT NOT NULL,
+    desired TEXT NOT NULL DEFAULT 'running',
+    state TEXT NOT NULL DEFAULT 'offline',
+    task_id TEXT,
+    data TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS digest (           -- checkpoint results waiting for the next 10-minute digest
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT,
+    attention INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    sent_in TEXT
+);
+CREATE TABLE IF NOT EXISTS approvals (        -- azathoth's sudo requests, decided by the owner in the web UI
+    id TEXT PRIMARY KEY,
+    command TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    cwd TEXT,
+    timeout REAL NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',    -- pending | approved | rejected | expired | done | failed
+    note TEXT,
+    result TEXT,
+    created_at REAL NOT NULL,
+    decided_at REAL,
+    finished_at REAL
 );
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -110,6 +155,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at REAL NOT NULL
 );
 """
+
+
+TASK_FIELDS = {"state", "executor", "executor_name", "line", "summary", "closed_at", "acceptance"}
 
 
 def new_id(prefix: str) -> str:
@@ -258,45 +306,119 @@ class Store:
         return {r["receiver"]: r["n"] for r in
                 self.q("SELECT receiver, COUNT(*) n FROM messages WHERE state NOT IN ('handled','cancelled') GROUP BY receiver")}
 
-    # tasks
+    # v3 task index (the hub owns task details)
 
-    def add_task(self, title: str, **fields) -> dict:
-        tid, now = new_id("task"), time.time()
-        self.x("INSERT INTO tasks (id, title, state, created_at, updated_at) VALUES (?,?,?,?,?)",
-               (tid, title, "active", now, now))
-        if fields:
-            self.set_task(tid, **fields)
-        return self.task(tid)
-
-    @staticmethod
-    def _task(t: dict | None) -> dict | None:
-        if t:
-            t["data"] = json.loads(t["data"])
-        return t
+    def index_task(self, task_id: str, galaxy_id: str, description: str, acceptance: str = "") -> dict:
+        now = time.time()
+        self.x("INSERT INTO task_index (id, galaxy_id, description, acceptance, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+               (task_id, galaxy_id, description, acceptance, now, now))
+        return self.task(task_id)
 
     def task(self, task_id: str) -> dict | None:
-        return self._task(self.one("SELECT * FROM tasks WHERE id=?", (task_id,)))
+        return self.one("SELECT * FROM task_index WHERE id=?", (task_id,))
 
     def set_task(self, task_id: str, **fields) -> None:
-        if "data" in fields:
-            fields["data"] = json.dumps(fields["data"], ensure_ascii=False)
+        fields = {k: v for k, v in fields.items() if k in TASK_FIELDS}
+        if not fields:
+            return
         cols = ", ".join(f"{k}=?" for k in fields)
-        self.x(f"UPDATE tasks SET {cols}, updated_at=? WHERE id=?", (*fields.values(), time.time(), task_id))
+        self.x(f"UPDATE task_index SET {cols}, updated_at=? WHERE id=?", (*fields.values(), time.time(), task_id))
 
-    def tasks(self, search: str | None = None, limit=20, before_id: str | None = None,
-              state: str | None = None, history=False) -> list[dict]:
-        sql, args = "SELECT * FROM tasks WHERE 1=1", []
+    def tasks(self, search: str | None = None, limit=50, state: str | None = None, galaxy_id: str | None = None,
+              open_only=False, before_id: str | None = None) -> list[dict]:
+        sql, args = "SELECT * FROM task_index WHERE 1=1", []
         if search:
-            sql += " AND (title LIKE ? OR id LIKE ? OR id IN (SELECT task_id FROM messages WHERE text LIKE ?))"
+            sql += " AND (description LIKE ? OR id LIKE ? OR summary LIKE ?)"
             args += [f"%{search}%"] * 3
         if state:
             sql += " AND state=?"
             args.append(state)
+        if galaxy_id:
+            sql += " AND galaxy_id=?"
+            args.append(galaxy_id)
+        if open_only:
+            sql += " AND state NOT IN ('closed','cancelled','assign_failed')"
         if before_id and (cursor := self.task(before_id)):
             sql += " AND (created_at, id) < (?, ?)"
             args += [cursor['created_at'], cursor['id']]
-        order = 'created_at DESC, id DESC' if history else 'updated_at DESC'
-        return [self._task(t) for t in self.q(sql + f" ORDER BY {order} LIMIT ?", (*args, limit))]
+        return self.q(sql + " ORDER BY created_at DESC, id DESC LIMIT ?", (*args, limit))
+
+    # v3 old_one roster (the hub owns old_ones)
+
+    def set_roster(self, galaxy_id: str, old_ones: list[dict]) -> None:
+        """A hub's full list of its old_ones replaces what the temple knew for that galaxy."""
+        now = time.time()
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                self.db.execute("DELETE FROM roster WHERE galaxy_id=?", (galaxy_id,))
+                for a in old_ones:
+                    self.db.execute("INSERT OR REPLACE INTO roster (id, name, galaxy_id, desired, state, task_id, data, updated_at)"
+                                    " VALUES (?,?,?,?,?,?,?,?)",
+                                    (a["id"], a["name"], galaxy_id, a.get("desired", "running"), a.get("state", "offline"),
+                                     a.get("task_id"), json.dumps(a.get("data") or {}, ensure_ascii=False), now))
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+
+    def roster_status(self, agent_id: str, status: dict) -> None:
+        """A live status report from the old_one's hub: keep the directory row current between roster pushes."""
+        r = self.old_one(agent_id)
+        if not r:
+            return
+        data = r["data"] | {k: status.get(k) for k in ("current", "context_fill", "runtime")}
+        self.x("UPDATE roster SET state=?, data=?, updated_at=? WHERE id=?",
+               (status.get("state", r["state"]), json.dumps(data, ensure_ascii=False), time.time(), agent_id))
+
+    def old_one(self, agent_id: str) -> dict | None:
+        r = self.one("SELECT * FROM roster WHERE id=?", (agent_id,))
+        if r:
+            r["data"] = json.loads(r["data"])
+        return r
+
+    def roster(self, galaxy_id: str | None = None) -> list[dict]:
+        sql, args = "SELECT * FROM roster WHERE desired!='deleted'", []
+        if galaxy_id:
+            sql += " AND galaxy_id=?"
+            args.append(galaxy_id)
+        rows = self.q(sql + " ORDER BY name", args)
+        for r in rows:
+            r["data"] = json.loads(r["data"])
+        return rows
+
+    # v3 digest of checkpoint results for azathoth
+
+    def add_digest(self, task_id: str | None, text: str, attention: bool) -> None:
+        self.x("INSERT INTO digest (task_id, attention, text, created_at) VALUES (?,?,?,?)",
+               (task_id, int(attention), text, time.time()))
+
+    def unsent_digest(self) -> list[dict]:
+        return self.q("SELECT * FROM digest WHERE sent_in IS NULL ORDER BY attention DESC, id")
+
+    def mark_digest(self, ids: list[int], message_id: str) -> None:
+        with self.lock:
+            self.db.executemany("UPDATE digest SET sent_in=? WHERE id=?", [(message_id, i) for i in ids])
+
+    # v3 sudo approvals
+
+    def add_approval(self, command: str, reason: str, cwd: str | None, timeout: float) -> dict:
+        aid = new_id("sudo")
+        self.x("INSERT INTO approvals (id, command, reason, cwd, timeout, created_at) VALUES (?,?,?,?,?,?)",
+               (aid, command, reason, cwd, timeout, time.time()))
+        return self.approval(aid)
+
+    def approval(self, approval_id: str) -> dict | None:
+        return self.one("SELECT * FROM approvals WHERE id=?", (approval_id,))
+
+    def set_approval(self, approval_id: str, **fields) -> None:
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.x(f"UPDATE approvals SET {cols} WHERE id=?", (*fields.values(), approval_id))
+
+    def approvals(self, state: str | None = None, limit=50) -> list[dict]:
+        if state:
+            return self.q("SELECT * FROM approvals WHERE state=? ORDER BY created_at DESC LIMIT ?", (state, limit))
+        return self.q("SELECT * FROM approvals ORDER BY created_at DESC LIMIT ?", (limit,))
 
     # permanent memory
 
@@ -335,8 +457,8 @@ class Store:
                (turn_id, agent_id, user_text, now, now))
         return self.turn(turn_id)
 
-    TURN_SQL = ("SELECT c.*, t.title AS task_title, t.state AS task_state, e.receipt AS channel_receipt FROM chat_turns c"
-                " LEFT JOIN tasks t ON t.id = c.task_id LEFT JOIN channel_events e ON e.message_id=c.id")
+    TURN_SQL = ("SELECT c.*, substr(t.description, 1, 60) AS task_title, t.state AS task_state, e.receipt AS channel_receipt"
+                " FROM chat_turns c LEFT JOIN task_index t ON t.id = c.task_id LEFT JOIN channel_events e ON e.message_id=c.id")
 
     def turn(self, turn_id: str) -> dict | None:
         t = self.one(self.TURN_SQL + " WHERE c.id=?", (turn_id,))
