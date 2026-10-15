@@ -52,10 +52,23 @@ PLAYWRIGHT_BROWSERS_PATH=/tmp/task-report-browsers venv/bin/python tests/ui_task
 
 ## 当前核验结果
 
-- owner digest 专项：25 项通过；checkpoint 恢复证据专项：4 项通过，含 RPC 期间快照更新的确定性时钟边界。
+- owner digest 专项：26 项通过；checkpoint 恢复证据专项：4 项通过，含 RPC 期间快照更新的确定性时钟边界。
 - 短名迁移 CLI：只读预检 13/13、首次应用 13 项、重复应用 0 项；全程使用临时 fixture 数据库。
 - 前端构建成功，Vite 2m39s；已核验产物包含重连历史 ID 刷新与“依据与操作”抽屉。只有既有的大 chunk 提示。
 - 真实 HTTP/WebSocket 浏览器断言通过：任务隔离、连续期次、迟到更正、操作追溯、重复事件、重连、刷新、侧栏短名；截图 `chat.png`、`sidebar.png`。
-- 全量命令已执行：194 项 / 824.466s，3 项失败、2 项跳过。两项 `test_priority.Preemption` 分别在等待 urgent done 10s、原 job handled 40s 超时；同样两项在 `fb48835` 基线独立重跑 50.557s 全通过，候选独立重跑 49.347s 全通过，没有改超时或抢占实现，初次失败的时序原因未证实。第三项 v3 生命周期旧断言依赖 digest 中的 `⚠` 字符；改为核对任务 ID、稳定 turn ID 与事实归属并保留完整生命周期覆盖，专项结果见后续追加。
+- 全量命令已执行：194 项 / 824.466s，3 项失败、2 项跳过。两项 `test_priority.Preemption` 分别在等待 urgent done 10s、原 job handled 40s 超时；同样两项在 `fb48835` 基线独立重跑 50.557s 全通过，候选独立重跑 49.347s 全通过，没有改超时或抢占实现，初次失败的时序原因未证实。第三项 v3 生命周期旧断言依赖 digest 中的 `⚠` 字符；改为核对任务 ID、稳定 turn ID 与事实归属并保留完整生命周期覆盖，最终冻结代码专项 22.398s 通过。
 
 探针语义严格由 `probe_meaning` 决定：字节/行数增长不等于训练 step 大于零或实现完成，必须有独立证据。摘要不会把旧失败回合正文冒充当前状态，也不会把实时工具命令冒充完成证明。
+
+
+## 最终冻结版本与证据
+
+产品代码与 static 冻结在 `0e641e2f5de94bfde10185b3f57a66713dbfc136`；后续提交只补本说明、核验清单、截图及浏览器截图禁用过渡动画选项，不更改产品逻辑。
+
+- 最终 owner+checkpoint 联合专项：`Ran 30 tests in 3.627s / OK`，含直接 report 和 task_finished 重投去重、13 项命名、错误纠正、实时恢复证据、RPC 时间边界。
+- 最终真实任务生命周期：`Ran 1 test in 22.398s / OK`，不放宽任何 timeout，保留探针/停滞/增长/审核/驳回/关闭/复用路径。
+- 最终浏览器：`PASS: task isolation, two periods, late update, action trace, duplicate websocket, reconnect, reload and stable sidebar labels`。额外断言主行没有“仍403/训练0步”，展开证据仍保留旧快照。
+- 截图均是隔离 fixture 数据：`chat.png` 展示两任务各一个连续三期过程容器；`sidebar.png` 展示统一短名与完整描述入口；`correction.png` 展示“已核验训练完成30步，连接恢复”的主行与已标注为历史的错误快照。
+- 命令原始输出保留于本机 `/tmp/task-report-final-focused.log`、`/tmp/task-report-v3-lifecycle.log`、`/tmp/task-report-browser.log`、`/tmp/task-report-build.log`；首轮完整结果 `/tmp/task-report-tests.log`，对照结果 `/tmp/task-report-baseline-preemption.log` 与 `/tmp/task-report-candidate-preemption.log`。
+
+只读集成时应合并完整任务分支的全部提交，不能只取首版 `f1baa00`；与部署/模型设置改动合并源码后由统一负责人重新构建 static。本任务没有自行推送 main、部署、重启或应用生产名称映射。

@@ -1,0 +1,34 @@
+{
+  "product_commit": "0e641e2f5de94bfde10185b3f57a66713dbfc136",
+  "baseline": "fb48835320ef4e6095b41bf9e8446534e5bd792c",
+  "focused": {
+    "passed": 30,
+    "seconds": 3.627
+  },
+  "v3_lifecycle": {
+    "passed": 1,
+    "seconds": 22.398
+  },
+  "preemption_baseline": {
+    "passed": 2,
+    "seconds": 50.557
+  },
+  "preemption_candidate": {
+    "passed": 2,
+    "seconds": 49.347
+  },
+  "initial_full_suite": {
+    "run": 194,
+    "failures": 3,
+    "skipped": 2,
+    "seconds": 824.466
+  },
+  "browser": "passed",
+  "deployed": false,
+  "artifacts": {
+    "chat.png": "f23ed3a06f170dcdc2f1581ae1ff0a611f4820be99bdfff74dda3c201c0c50ec",
+    "sidebar.png": "c5f7a23ec14b3c36000c56d56c84f173ef9c29121eb835a0e682ef3eb57f163b",
+    "correction.png": "2350044b37c51096a2d31c4fcd848a841cc4f0c34232eeb5f2ad55253cbec145",
+    "task-names-20261015.json": "53d60adafb3091fbc42bbd14bd5bcbad0945c2bc83ff04096e1784ba8dfd3f1c"
+  }
+}
