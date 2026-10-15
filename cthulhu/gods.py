@@ -265,7 +265,8 @@ class Azathoth(OwnerChat, MemoryAgent):
                  {"galaxies": {"type": "array", "items": STR, "description": "星系 ID 列表；不填或 [\"all\"] 表示全部"},
                   "reason": STR, "recover_job_id": STR, "status_only": {"type": "boolean"}}),
             tool("tell_owner", "只在处理宇宙内部消息（汇总、汇报、审核请求）时使用：在主人的聊天窗口里告诉主人当前情况。"
-                 "进展只写一两句；交付主人要的东西时写完整并设 deliverable=true。",
+                 "每十分钟汇总必须按任务分别写进展、判断、已执行操作及结果、下一步；正常进展也要汇报。"
+                 "交付主人要的东西时写完整并设 deliverable=true。",
                  {"text": STR, "deliverable": {"type": "boolean"}}, ["text"]),
         ]
 
@@ -295,9 +296,9 @@ class Azathoth(OwnerChat, MemoryAgent):
 
     async def tell_owner(self, text: str, deliverable: bool = False) -> None:
         r = self.reporting or {}
-        r["told"] = True
         await self.link.call("notify_owner", text=text, origin=r.get("origin"), task_id=r.get("task_id"),
                              kind="summary" if deliverable else r.get("kind", "progress"), model=self.latest.get("model"))
+        r["told"] = True
 
     async def receive(self, batch: list[dict]) -> None:
         owner = [m for m in batch if m["sender"] == OWNER]
@@ -308,9 +309,9 @@ class Azathoth(OwnerChat, MemoryAgent):
             await self.internal(rest)
 
     async def internal(self, batch: list[dict]) -> None:
-        """Digests, reports, finish requests and notices. Tell the owner only what matters; the program
-        does not force it (the owner can read every digest on the task page)."""
+        """Every digest needs owner-facing judgement/actions, including healthy or stalled tasks."""
         kinds = {m.get("kind") for m in batch}
+        digest = "digest" in kinds
         review = "task_finished" in kinds
         task_ids = {m.get("task_id") for m in batch if m.get("task_id")}
         self.reporting = {"task_id": next(iter(task_ids)) if len(task_ids) == 1 else None,
@@ -318,10 +319,17 @@ class Azathoth(OwnerChat, MemoryAgent):
                           "origin": "、".join(sorted({m.get("sender_name") or m["sender"] for m in batch}))}
         try:
             text = ("【以下是宇宙内部的消息，不是主人说的。按需行动：审核请求用 close_task / continue_task 处理；"
-                    "阻塞和告警给出决定（send 指令、continue_task、cancel_task 或重新 new_task）；正常进展不必回应。"
-                    "主人需要知道的（任务完成的结论、需要主人决定的问题、重要异常）用 tell_owner 告诉主人，例行进展不用。】\n\n"
+                    "阻塞和告警给出决定（send 指令、continue_task、cancel_task 或重新 new_task）。"
+                    "每十分钟进度汇总必须用 tell_owner 向主人汇报，正常进展也不能省略。"
+                    "按任务分别写清进展、你的判断、已执行操作及结果、下一步；没有新证据、尚未操作或调用失败要如实写明。"
+                    "任务完成、重要异常和需要主人决定的问题及时汇报，不等下一轮。】\n\n"
                     + self.render(batch))
             result = await self.run_main(text)
+            if digest and not self.reporting["told"]:
+                reply = result.text.strip() if result.status == "completed" else ""
+                await self.tell_owner(reply or "本轮进度汇总的判断与操作尚未回传"
+                                      f"（分析回合状态：{result.status}）。请以上一条按任务汇总的事实为准；"
+                                      "不能据此认定已采取操作或任务正在正常推进。")
             self.complete(batch, result)
             if result.status == "completed" and self.last_turn:
                 asyncio.create_task(self.distill(*self.last_turn, correct_only=True))

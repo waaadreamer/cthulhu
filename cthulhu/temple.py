@@ -427,21 +427,47 @@ class Temple:
 
     async def send_digest(self) -> None:
         rows = self.store.unsent_digest()
-        if not rows:
+        tasks = self.store.tasks(open_only=True, limit=500)
+        if not rows and not tasks:
             return
         az = self.azathoth_id()
-        open_n = len(self.store.tasks(open_only=True, limit=500))
-        start = min(r["created_at"] for r in rows)
+        start = min((r["created_at"] for r in rows),
+                    default=time.time() - float(self.config.get("digest_every", DIGEST_EVERY)))
         lines = [f"[进度汇总 {time.strftime('%H:%M', time.localtime(start))}–{time.strftime('%H:%M')}] "
-                 f"在途 {open_n} · 需关注 {sum(r['attention'] for r in rows)}"]
-        lines += [("⚠ " if r["attention"] else "✓ ") + r["text"] for r in rows]
+                 f"在途 {len(tasks)} · 需关注 {sum(r['attention'] for r in rows)}"]
+        groups = {t["id"]: [] for t in tasks}
+        for row in rows:
+            groups.setdefault(row["task_id"], []).append(row)
+        for task_id, events in groups.items():
+            task = self.store.task(task_id) if task_id else None
+            if task:
+                title = " ".join(task["description"].split())[:100]
+                lines += ["", f"### {task_id} · {title}",
+                          f"当前状态：{task['state']} · 星系：{task['galaxy_id']} · "
+                          f"执行者：{task.get('executor_name') or task.get('executor') or '未绑定'}"]
+                if task["state"] in ("closed", "cancelled", "assign_failed"):
+                    lines.append("以下为本期历史事件，以当前状态为准。")
+            else:
+                lines += ["", f"### {task_id or '全局事件'}"]
+            if events:
+                lines += [("⚠ " if r["attention"] else "✓ ") + r["text"] for r in events]
+            else:
+                lines.append("进展：本轮未收到新的检查点或汇报，不能据此认定任务正常推进。")
+                if task.get("summary"):
+                    lines.append("上次记录（非本轮新增）：" + task["summary"][:500])
+            lines.append("判断与操作：待阿撒托斯核实后补充。")
         text = "\n".join(lines)
+        # Facts reach the owner on the clock even if azathoth is busy, offline or fails.
+        # Its judgement/actions follow through the existing tell_owner channel.
+        await self.note_owner(text, origin="中心神殿定时汇总", kind="progress")
         # A digest azathoth has not picked up yet is folded into the new one, so digests never pile up.
         stale = self.store.one("SELECT * FROM messages WHERE receiver=? AND kind='digest' AND state='queued'"
                                " ORDER BY created_at DESC LIMIT 1", (az,))
         if stale:
             text += "\n（上一条未处理的汇总并入）\n" + stale["text"].split("\n", 1)[-1]
             self.store.mark(stale["id"], "cancelled")
+        text += ("\n\n本轮事实汇总已自动送达主人。请逐任务核实并用 tell_owner 补充：进展、判断、"
+                 "已执行操作及结果、下一步。正常进展也必须汇报；计划和已执行操作分开。")
         msg = await self.route(SYSTEM, az, text, kind="digest", priority=roles.DIGEST_PRIORITY)
         self.store.mark_digest([r["id"] for r in rows], msg["id"])
 
