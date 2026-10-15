@@ -43,6 +43,27 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
     async def open(self, **kw):
         return await self.broker.open(self.caller, {"provider": "ali", "body": self.body | kw})
 
+    async def test_labels_allowlist_and_protocol_use_public_id(self):
+        native, alias = "claude-opus-5-5", "claude-opus-5-5-official"
+        self.provider.capabilities.append("galaxy_api_claude_v1")
+        self.temple.config["api_providers"]["ali"]["models"] = [alias]
+        registered = {"version": 1, "protocol": "responses", "models": [native, alias],
+                      "model_backends": {native: "claude"},
+                      "model_labels": {native: "Claude Opus 5.5（中转站）", alias: "LLM Official"}}
+        self.broker.register(self.provider, registered)
+        catalog = self.broker.catalog("central")[0]
+        self.assertEqual(catalog["models"], [alias])
+        self.assertEqual(catalog["model_labels"], {alias: "LLM Official"})
+        opened = await self.open(model=alias, stream=False)
+        self.assertEqual(opened["requested_model"], alias)
+        self.assertEqual(self.provider.send.call_args.args[0]["body"]["model"], alias)
+        self.assertTrue(self.provider.send.call_args.args[0]["body"]["stream"])
+        with self.assertRaises(Denied):
+            await self.open(model=native)
+        for labels in ({alias: 3}, {"not-offered": "label"}, {alias: "bad\nlabel"}):
+            with self.assertRaises(ValueError):
+                self.broker.register(self.provider, registered | {"model_labels": labels})
+
     async def test_scoped_discovery_stale_and_unknown_registration(self):
         self.assertEqual(self.broker.catalog("elsewhere"), [])
         self.assertEqual(self.broker.catalog("central")[0]["models"], ["gpt-6-astra", "gpt-6.1-sol"])
@@ -180,6 +201,15 @@ class DrainTests(unittest.TestCase):
 
 
 class ProviderConfigTests(unittest.TestCase):
+    def test_mapping_validates_local_targets_and_does_not_infer_protocol(self):
+        worker = ProviderWorker(None, {"models": ["public"], "model_mapping": {"public": "claude-opus-5-5"}})
+        self.assertEqual(worker.model_mapping(), {"public": "claude-opus-5-5"})
+        for mapping in ({"unlisted": "model"}, {"public": None}, {"public": "bad model"}, []):
+            worker.config["model_mapping"] = mapping
+            with self.assertRaises(ValueError):
+                worker.model_mapping()
+
+
     def test_private_claude_settings_are_consumed_only_on_provider(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "settings.json"
