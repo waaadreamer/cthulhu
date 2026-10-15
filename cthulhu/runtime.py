@@ -83,6 +83,9 @@ class CodexRuntime:
                 "model_providers.galaxy_api.request_max_retries": 0,
                 "model_providers.galaxy_api.stream_max_retries": 0,
             }
+            # Advertised model capabilities shape native tools before a request is made.
+            if cfg.get("capabilities", {}).get("web_search") is False:
+                values["web_search"] = "disabled"
             for name, value in values.items():
                 overrides.extend(["-c", f"{name}={json.dumps(value)}"])
         return overrides, env

@@ -115,16 +115,28 @@ class ProviderBroker:
         if not isinstance(backends, dict) or any(k not in offered or v not in ("codex", "claude")
                                                 for k, v in backends.items()):
             raise ValueError("invalid model backend catalog")
+        labels = p.get("model_labels") or {}
+        if not isinstance(labels, dict) or any(k not in offered or not isinstance(v, str) or
+                not v.strip() or len(v) > 128 or any(ord(c) < 32 for c in v) for k, v in labels.items()):
+            raise ValueError("invalid model labels")
+        capabilities = p.get("model_capabilities") or {}
+        if not isinstance(capabilities, dict) or any(k not in offered or not isinstance(v, dict) or
+                set(v) - {"web_search"} or any(type(value) is not bool for value in v.values())
+                for k, v in capabilities.items()):
+            raise ValueError("invalid model capabilities")
         if "claude" in backends.values() and "galaxy_api_claude_v1" not in conn.capabilities:
             raise Denied("provider lacks native Claude capability")
         self.providers[conn.id] = {"conn": conn, "models": models, "version": API_VERSION,
                                    "model_backends": {m: backends.get(m, "codex") for m in models},
+                                   "model_labels": {m: labels[m] for m in models if m in labels},
+                                   "model_capabilities": {m: dict(capabilities[m]) for m in models if m in capabilities},
                                    "revision": str(p.get("revision", ""))[:64]}
         return {"version": API_VERSION, "models": models}
 
     def catalog(self, consumer: str | None = None) -> list[dict]:
         return [{"id": gid, "models": item["models"], "protocol": "responses", "version": API_VERSION,
-                 "model_backends": item["model_backends"],
+                 "model_backends": item["model_backends"], "model_labels": item["model_labels"],
+                 "model_capabilities": item["model_capabilities"],
                  "revision": item["revision"], "requested_tiers": ["default", "priority", "fast"],
                  "fast_verified": False}
                 for gid, item in sorted(self.providers.items())
@@ -245,7 +257,7 @@ class ProviderBroker:
             await self.finish(s, "too_large")
             raise ValueError("API stream too large")
         meta = p.get("meta") or {}
-        meta = {k: str(meta[k])[:128] for k in ("returned_model", "returned_tier") if k in meta}
+        meta = {k: str(meta[k])[:128] for k in ("upstream_model", "returned_model", "returned_tier") if k in meta}
         s.pushing = True
         try:
             await asyncio.wait_for(s.queue.put({"data": data, "done": bool(p.get("done")), "meta": meta}), IDLE_TIMEOUT)
@@ -321,7 +333,15 @@ class ProviderWorker:
         self.tasks: dict[str, asyncio.Task] = {}
         self.generation = 0
 
+    def model_mapping(self):
+        mapping = self.config.get("model_mapping", {})
+        if not isinstance(mapping, dict) or any(k not in self.config.get("models", []) or
+                not isinstance(v, str) or not NAME.fullmatch(v) for k, v in mapping.items()):
+            raise ValueError("invalid upstream model mapping")
+        return mapping
+
     async def register(self, revision: str):
+        self.model_mapping()
         backends = {self.config.get("model_backends", {}).get(m, "codex") for m in self.config.get("models", [])}
         if "codex" in backends:
             self.local_transport()
@@ -331,6 +351,8 @@ class ProviderWorker:
         models = self.config.get("models", [])
         await self.link.call("api_register", version=API_VERSION, protocol="responses",
                              models=models, model_backends=self.config.get("model_backends", {}),
+                             model_labels=self.config.get("model_labels", {}),
+                             model_capabilities=self.config.get("model_capabilities", {}),
                              revision=revision, timeout=15)
 
     async def disconnect(self):
@@ -427,6 +449,8 @@ class ProviderWorker:
             backend = self.config.get("model_backends", {}).get(body["model"], "codex")
             if protocol != ("messages" if backend == "claude" else "responses"):
                 raise ValueError("model requires its native backend protocol")
+            # Authorize the public ID and protocol before applying provider-local routing.
+            body["model"] = self.model_mapping().get(body["model"], body["model"])
             url, key = self.local_transport("messages") if protocol == "messages" else self.local_transport()
             headers = {"Authorization": f"Bearer {key}", "Accept": "text/event-stream"}
             if protocol == "messages":
@@ -486,6 +510,8 @@ class ProviderWorker:
                                         "returned_tier": "unknown"}
                             elif protocol == "messages" and kind == "message_delta":
                                 message_stopped = bool(event.get("delta", {}).get("stop_reason"))
+                            if meta:
+                                meta["upstream_model"] = body["model"]
                             for offset in range(0, len(wire), MAX_CHUNK):
                                 await push(data=base64.b64encode(wire[offset:offset + MAX_CHUNK]).decode(), meta=meta)
                             if kind == "response.completed":

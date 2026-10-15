@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from cthulhu.api_provider import ProviderBroker, ProviderWorker, MAX_REQUEST, MAX_CHUNK, QUEUE_SIZE
 from cthulhu.roles import Denied
-from cthulhu.galaxy_api_runtime import GalaxyAPIRuntime
+from cthulhu.galaxy_api_runtime import GalaxyAPIRuntime, GalaxyAPITransport
 from cthulhu import backends
 from cthulhu.agent import Agent
 from cthulhu.runtime import TurnResult
@@ -42,6 +42,38 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
 
     async def open(self, **kw):
         return await self.broker.open(self.caller, {"provider": "ali", "body": self.body | kw})
+
+    async def test_labels_allowlist_and_protocol_use_public_id(self):
+        native, alias = "claude-opus-5-5", "claude-opus-5-5-official"
+        self.provider.capabilities.append("galaxy_api_claude_v1")
+        self.temple.config["api_providers"]["ali"]["models"] = [alias]
+        registered = {"version": 1, "protocol": "responses", "models": [native, alias],
+                      "model_backends": {native: "claude"},
+                      "model_labels": {native: "Claude Opus 5.5（中转站）", alias: "LLM Official"}}
+        self.broker.register(self.provider, registered)
+        catalog = self.broker.catalog("central")[0]
+        self.assertEqual(catalog["models"], [alias])
+        self.assertEqual(catalog["model_labels"], {alias: "LLM Official"})
+        opened = await self.open(model=alias, stream=False)
+        self.assertEqual(opened["requested_model"], alias)
+        self.assertEqual(self.provider.send.call_args.args[0]["body"]["model"], alias)
+        self.assertTrue(self.provider.send.call_args.args[0]["body"]["stream"])
+        with self.assertRaises(Denied):
+            await self.open(model=native)
+        for labels in ({alias: 3}, {"not-offered": "label"}, {alias: "bad\nlabel"}):
+            with self.assertRaises(ValueError):
+                self.broker.register(self.provider, registered | {"model_labels": labels})
+
+    async def test_capabilities_are_allowlisted_and_optional(self):
+        registered = {"version": 1, "protocol": "responses", "models": ["gpt-6-astra", "not-permitted"],
+                      "model_capabilities": {"gpt-6-astra": {"web_search": False}, "not-permitted": {"web_search": False}}}
+        self.broker.register(self.provider, registered)
+        self.assertEqual(self.broker.catalog("central")[0]["model_capabilities"], {"gpt-6-astra": {"web_search": False}})
+        for value in ({"web_search": "false"}, {"url": False}, []):
+            with self.assertRaises(ValueError):
+                self.broker.register(self.provider, registered | {"model_capabilities": {"gpt-6-astra": value}})
+        self.broker.register(self.provider, registered | {"model_capabilities": {}})
+        self.assertEqual(self.broker.catalog("central")[0]["model_capabilities"], {})
 
     async def test_scoped_discovery_stale_and_unknown_registration(self):
         self.assertEqual(self.broker.catalog("elsewhere"), [])
@@ -144,6 +176,30 @@ class RuntimeSafetyTests(unittest.IsolatedAsyncioTestCase):
         return GalaxyAPIRuntime("unused", root, link=SimpleNamespace(connected=asyncio.Event()),
                                 provider="ali", state_dir=Path(root), model="gpt-6-astra")
 
+    async def test_model_capabilities_do_not_leak_on_model_switch_or_restart(self):
+        from cthulhu.runtime import CodexRuntime
+        alias = "claude-opus-5-5-official"
+        catalog = [{"id": "ali", "models": [alias, "gpt-6-astra"], "model_backends": {},
+                    "model_capabilities": {alias: {"web_search": False}}}]
+        link = SimpleNamespace(call=AsyncMock(return_value=catalog), connected=asyncio.Event())
+        with tempfile.TemporaryDirectory() as root:
+            for model in (alias, "gpt-6-astra"):
+                catalog[0]["model_capabilities"] = {alias: {"web_search": False}}
+                transport = GalaxyAPITransport(link=link, provider="ali", state_dir=root, model=model)
+                try:
+                    await transport.start()
+                    runtime = CodexRuntime("unused", root, model=model, api_transport=transport.api_transport)
+                    config, _ = runtime.launch_config()
+                    self.assertEqual('web_search="disabled"' in config, model == alias)
+                    self.assertNotIn("web_search", runtime._thread_params("prompt"))
+                    await transport.close()
+                    catalog[0]["model_capabilities"] = {}
+                    await transport.start()
+                    runtime.api_transport = transport.api_transport
+                    self.assertNotIn('web_search="disabled"', runtime.launch_config()[0])
+                finally:
+                    await transport.close()
+
     async def test_startup_fallback_and_failed_switch_keep_old(self):
         with tempfile.TemporaryDirectory() as root:
             kw = dict(codex="unused", cwd=root, log_dir=Path(root), sub_agents=False)
@@ -180,6 +236,15 @@ class DrainTests(unittest.TestCase):
 
 
 class ProviderConfigTests(unittest.TestCase):
+    def test_mapping_validates_local_targets_and_does_not_infer_protocol(self):
+        worker = ProviderWorker(None, {"models": ["public"], "model_mapping": {"public": "claude-opus-5-5"}})
+        self.assertEqual(worker.model_mapping(), {"public": "claude-opus-5-5"})
+        for mapping in ({"unlisted": "model"}, {"public": None}, {"public": "bad model"}, []):
+            worker.config["model_mapping"] = mapping
+            with self.assertRaises(ValueError):
+                worker.model_mapping()
+
+
     def test_private_claude_settings_are_consumed_only_on_provider(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "settings.json"

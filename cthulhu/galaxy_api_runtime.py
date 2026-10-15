@@ -49,8 +49,9 @@ class GalaxyAPITransport:
             raise RuntimeError_("galaxy_api requires an authenticated link and provider")
         catalog = await self.link.call("api_catalog", timeout=15)
         backend = "claude" if self.protocol == "messages" else "codex"
-        if not any(p["id"] == self.provider and self.model in p["models"] and
-                   p.get("model_backends", {}).get(self.model, "codex") == backend for p in catalog):
+        offered = next((p for p in catalog if p["id"] == self.provider and self.model in p["models"] and
+                        p.get("model_backends", {}).get(self.model, "codex") == backend), None)
+        if offered is None:
             raise RuntimeError_("eligible Galaxy API provider is offline or does not offer this model")
         self.api_home.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.server_task is None:
@@ -63,7 +64,8 @@ class GalaxyAPITransport:
             self.server.capture_signals = _no_signals
             self.server_task = asyncio.create_task(self.server.serve(sockets=[sock]))
             self.api_transport = {"home": str(self.api_home), "token": self.local_token,
-                                  "base_url": f"http://127.0.0.1:{sock.getsockname()[1]}/v1"}
+                                  "base_url": f"http://127.0.0.1:{sock.getsockname()[1]}/v1",
+                                  "capabilities": offered.get("model_capabilities", {}).get(self.model, {})}
             for _ in range(100):
                 if self.server.started:
                     break
@@ -98,7 +100,8 @@ class GalaxyAPITransport:
                                 status_code=status)
         sid = opened["id"]
         self.stream_ids.add(sid)
-        self.api_result = {k: v for k, v in opened.items() if k != "id"} | {"request_id": sid, "request_dispatched": True}
+        self.api_result = {k: v for k, v in opened.items() if k != "id"} | {"request_id": sid, "request_dispatched": True,
+            "model_capabilities": dict(self.api_transport.get("capabilities", {}))}
 
         async def events():
             try:

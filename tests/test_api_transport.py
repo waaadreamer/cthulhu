@@ -141,7 +141,8 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         nonce = re.search(r"echo_[0-9a-f]{8}", json.dumps(history))
         value = nonce.group(0) if nonce else "echoed"
         answer = f"Completed {value} result."
-        tool_name = body.get("tools", [{}])[0].get("name", "echo")
+        tool_name = next((t["name"] for t in body.get("tools", []) if t.get("name") == "echo"),
+                         body.get("tools", [{}])[0].get("name", "echo"))
         item = ({"id": f"fc_{number}", "type": "function_call", "call_id": f"call_{number}",
                  "name": tool_name, "arguments": json.dumps({"value": value}), "status": "completed"} if wants_tool else
                 {"id": f"msg_{number}", "type": "message", "role": "assistant", "status": "completed",
@@ -301,6 +302,50 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         later = json.dumps(self.requests[1:])
         self.assertIn("STEERED_NOTE from a new message", later)
         self.assertNotIn("ignored", later)
+
+    @unittest.skipUnless(CODEX.exists(), "bundled Codex is unavailable")
+    async def test_official_alias_real_codex_tool_history_and_native_coexistence(self):
+        native = await self.enable_claude()
+        alias = "claude-opus-5-5-official"
+        self.temple.config["api_providers"]["ali"]["models"].append(alias)
+        self.worker.config["models"].append(alias)
+        self.worker.config["model_mapping"] = {alias: native}
+        self.worker.config["model_capabilities"] = {alias: {"web_search": False}}
+        self.worker.config["model_labels"] = {alias: "LLM Official", native: "Claude Opus 5.5（中转站）"}
+        await self.worker.register("official-test")
+        catalog = (await self.caller.call("api_catalog"))[0]
+        self.assertEqual(catalog["model_backends"][alias], "codex")
+        self.assertEqual(catalog["model_backends"][native], "claude")
+        self.assertEqual(catalog["model_labels"][alias], "LLM Official")
+        self.assertEqual(catalog["model_capabilities"][alias], {"web_search": False})
+        self.codex_mode = True
+        self.rt = GalaxyAPIRuntime(str(CODEX), self.tmp.name, link=self.caller, provider="ali",
+                                   state_dir=Path(self.tmp.name), model=alias)
+        calls = []
+        async def handler(name, args):
+            calls.append((name, args))
+            return "echoed"
+        await self.rt.start()
+        thread = await self.rt.start_thread("Use echo when asked.", [tool("echo", "Echo a value",
+                                            {"value": {"type": "string"}}, ["value"])], handler)
+        for prompt in ("Call echo once, then answer.", "Summarize the previous result."):
+            result = await self.rt.run_turn(thread, prompt, timeout=30)
+            self.assertEqual(result.status, "completed", str(result.error))
+        self.assertEqual(calls, [("echo", {"value": "echoed"})])
+        self.assertTrue(all(t.get("type") != "web_search" for b in self.requests for t in b.get("tools", [])))
+        self.assertTrue(all(b["model"] == native and b["tool_choice"] == "auto" and b["stream"]
+                            and not b["store"] and "previous_response_id" not in b for b in self.requests))
+        self.assertTrue(any(i.get("type") == "function_call_output" for i in self.requests[-1]["input"]))
+        self.assertEqual(self.rt.api_result["requested_model"], alias)
+        self.assertEqual(self.rt.api_result["upstream_model"], native)
+        self.assertEqual(self.rt.api_result["returned_model"], "openai/" + native)
+        # The original public ID still uses Messages, never the Responses mapping.
+        opened = await self.caller.call("api_open", provider="ali", protocol="messages", body={
+            "model": native, "messages": [{"role": "user", "content": "hello"}], "max_tokens": 64})
+        while not (await self.caller.call("api_next", id=opened["id"])).get("done"):
+            pass
+        self.assertIn("messages", self.requests[-1])
+        self.assertEqual(self.requests[-1]["model"], native)
 
     async def test_upstream_error_is_sanitized(self):
         self.upstream_status = 401
