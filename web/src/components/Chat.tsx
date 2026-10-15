@@ -241,9 +241,11 @@ function group(turns: Turn[]): Group[] {
 function TaskView({ turns, agent, streams }: { turns: Turn[]; agent: Agent; streams: Record<string, Stream> }) {
   const latest = turns[turns.length - 1]
   const summary = [...turns].reverse().find((t) => t.kind === 'summary')
-  // Done when the task is closed; a deliverable summary on a still-open task is shown open but not as "done".
-  const done = !!summary && (latest.task_state ?? 'accepted') === 'accepted'
-  const blocked = !done && latest.kind === 'blocked'
+  // Done when the task has ended (closed / cancelled, or a note with no task at all); a deliverable summary on a
+  // still-open task is shown open but not as "done".
+  const ended = !latest.task_state || ['closed', 'cancelled', 'assign_failed'].includes(latest.task_state)
+  const done = !!summary && ended
+  const blocked = !done && (latest.kind === 'blocked' || latest.task_state === 'suspended')
   const final = summary ?? (blocked ? latest : undefined)
   const finalIndex = final ? turns.indexOf(final) : turns.length
   const steps = turns.slice(0, finalIndex)
