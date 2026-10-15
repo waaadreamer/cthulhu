@@ -55,8 +55,18 @@ def main() -> None:
     elif args.cmd == "galaxy":
         from .deploy import guard_startup
         guard_startup(args.config)
+        import fcntl
         from .galaxy import Galaxy
-        asyncio.run(Galaxy(load(args.config)).main())
+        cfg = load(args.config)
+        # One process per galaxy identity: a second one would keep replacing the first at the temple
+        # (both reconnect every few seconds) and run every old_one twice.
+        Path(cfg["state"]).mkdir(parents=True, exist_ok=True)
+        lock = open(Path(cfg["state"]) / "galaxy.lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(f"galaxy {cfg['id']} is already running from {cfg['state']}; not starting a second copy")
+        asyncio.run(Galaxy(cfg).main())
     elif args.cmd == "agent":
         from .gods import CLASSES
         from .roles import Role

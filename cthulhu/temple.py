@@ -445,6 +445,17 @@ class Temple:
         msg = await self.route(SYSTEM, az, text, kind="digest", priority=roles.DIGEST_PRIORITY)
         self.store.mark_digest([r["id"] for r in rows], msg["id"])
 
+    def galaxy_replaced(self, gid: str) -> None:
+        """A galaxy connection replaced by another with the same token: normal once after a restart, but
+        repeated replacement means two processes share one identity and keep kicking each other off."""
+        now = time.time()
+        recent = [t for t in self.offline_since.get(f"replaced:{gid}", []) if now - t < 60] + [now]
+        self.offline_since[f"replaced:{gid}"] = recent
+        if len(recent) == 5:
+            log.warning("galaxy %s replaced %d times in 60s: two processes are running with its token", gid, len(recent))
+            self.store.add_digest(None, f"星系 {gid} 一分钟内被同一身份的新连接顶掉 {len(recent)} 次：那台机器上很可能同时跑着两个"
+                                        "星系进程（同一个配置）。请在那台机器上只保留一个。", True)
+
     def watch_disk(self) -> None:
         """The temple's own disk: a full disk makes every write (settings, messages, tasks) fail with a 500."""
         import shutil
@@ -950,6 +961,7 @@ class Temple:
             self.galaxies[cid] = conn
             if old:
                 await old.ws.close(4002, "replaced")
+                self.galaxy_replaced(cid)
             await conn.send({"type": "welcome", "id": cid, "name": g["name"], "api_version": API_VERSION, "version": BUILD,
                              "galaxy_ai": self.galaxy_ai_for(cid)[0]})
             await self.sync_galaxy(cid)

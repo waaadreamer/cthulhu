@@ -112,7 +112,10 @@ EOF
   loginctl enable-linger "$USER" 2>/dev/null || true
   say "running as systemd --user service $SERVICE"
 else
+  # Stop the old loop and its galaxy child; killing only run.sh would leave the galaxy running (two copies).
   pkill -f "$HOME_DIR/run.sh" 2>/dev/null || true
+  pkill -f "cthulhu galaxy --config $HOME_DIR/galaxy.json" 2>/dev/null || true
+  sleep 2
   nohup setsid "$HOME_DIR/run.sh" >/dev/null 2>&1 < /dev/null &
   say "running in background (no systemd --user); log: $HOME_DIR/galaxy.log"
 fi
