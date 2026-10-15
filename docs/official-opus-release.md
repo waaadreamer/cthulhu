@@ -15,7 +15,7 @@
 
 现有 Galaxy API 是 SSE 传输：输入 stream=false 仍规范为 stream=true，不新增 nonstream 响应接口。续接发送完整 input（含 function_call/function_call_output），store=false；previous_response_id 保持拒绝，避免把状态交给上游。新入口工具只用 auto；不能用 required/forced canary。
 
-阿里首次真实完整 old_one 请求返回 HTTP400：`tool type 'web_search_20250305' is not supported for this model`。该模型必须声明 `model_capabilities: {"claude-opus-5-5-official": {"web_search": false}}`。catalog 将此能力传到现有 Codex 启动配置，设置 `web_search="disabled"`，使 CLI 在生成工具列表时关闭内置网页搜索。provider 不删除已经生成的工具或改写历史；Astra 和未声明此能力的模型保持原行为。运行记录 `runtime.api_result.model_capabilities.web_search=false`（`/api/directory` 对应 agent）明确呈现这一能力差异；模型 catalog 同时可查，缺省字段保持兼容。核心命令/文件/任务工具仍需真实验证，namespace 支持不能由首个 web_search 错误推断。scripts/verify_official_old_one.py 用真实 Codex 和完整 old_one 技能/工具集验证，未经验证不移除 web_search 等字段来掩盖兼容性错误。
+阿里首次真实完整 old_one 请求返回 HTTP400：`tool type 'web_search_20250305' is not supported for this model`。该模型必须声明 `model_capabilities: {"claude-opus-5-5-official": {"web_search": false}}`。catalog 将此能力传到现有 Codex 启动配置，设置 `web_search="disabled"`，使 CLI 在生成工具列表时关闭内置网页搜索。provider 不删除已经生成的工具或改写历史；Astra 和未声明此能力的模型保持原行为。运行记录 `runtime.api_result.model_capabilities.web_search=false`（`/api/directory` 对应 agent）明确呈现这一能力差异；模型 catalog 同时可查，缺省字段保持兼容。第二轮真实验证保留 namespace=multi_agent_v1（内含5个function），上游接受其工具schema；命令/文件回读/任务提交均已通过。没有实际调用子agent工具，不能把schema接受误称为子agent功能完整测试。scripts/verify_official_old_one.py 用真实 Codex 和完整 old_one 技能/工具集验证，未经验证不移除 web_search 等字段来掩盖兼容性错误。
 
 ## 验证与发布顺序
 
@@ -118,3 +118,13 @@ curl --fail-with-body --silent --show-error --cookie /path/to/private-owner-cook
 - 阶段 A 失败：保持旧默认；停止新请求、等待 active_streams=0，恢复阿里代码和 galaxy.json 成对备份，再用原 run.sh 管理进程；中心恢复 allowlist/代码。不要单独回滚代码却遗留新配置。
 - 阶段 B 失败：先保留新路由，按迁移前 overrides 快照通过 /api/runtimes 逐项恢复被改的 old_one/global/galaxy 键；删除迁移新增的临时覆盖，恢复 old_one_runtime 原值。等回合安全边界、pending 清空且旧实际 runtime 已确认，再考虑删除新路由。不得恢复整库来覆盖并行任务消息。
 - UI 回滚与并行任务一起评估；从最终合并源码重建 static，不能拿本任务旧 bundle 覆盖同事新 UI。
+
+
+## 最终验证证据（2026-10-15）
+
+- 阿里实际隔离验证：运行基线63b9c26应用425c7ac与69c4f81补丁，任务t_90b2a3d7f77d0355、old_one old_5f1d4da43907b548；4次HTTP200，后3次请求携带function_call_output，全部auto，无Web Search，完整历史无previous_response_id。
+- requested_model=claude-opus-5-5-official；upstream_model=returned_model=claude-opus-5-5；provider=ali；fallback_active=false；随机文件写入/回读匹配，finish_task→review、agent idle、turn completed。管理者已验收。
+- 阿里证据根目录 `/mnt/vepfs/base2/wangzeyuan/.cthulhu-v3/work/t_117b5a75b38dab56-isolated/`；official-second.json SHA256 `5f8dcaecbb88128dcebdc7a5c6d549e14328576a78037340b632eaf1d1a22558`；proof SHA256 `15d2bfafd0048616fcbd18b1f7102adc20815497bff850a84132ade05d771ddf`。
+- 8591e4c只增加能力可见记录和诊断元数据，阿里已应用并离线专项通过，没有追加网络请求；最终fixture退出补丁只等待ASGI断开回调完成后再关数据库。首次成功后的清理警告原样保留，并以本地延迟断开回调测试复验修复。
+- 本地全量190项首次188通过/2失败，失败为Preemption两项时限；冻结业务候选8591e4c串行复验原两项46.356秒全部通过，未改断言/时限。共同fb48835基线两项50.557秒通过；记录不证明并发负载是唯一原因。新能力/别名/重连隔离专项通过，退出fixture专项通过；未重复重型全套。
+- 前端build成功（static随95088ad），jsdom两项通过；部署负责人集成并行UI后需统一重建static。本任务未修改生产配置、未重启、未推送main、未切换实际默认。

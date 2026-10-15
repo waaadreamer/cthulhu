@@ -138,10 +138,13 @@ async def verify(config_path, output):
             for aid in list(galaxy.procs):
                 await galaxy.stop(aid)
             await galaxy.provider.disconnect()
-            server.should_exit = True
-            for task in tasks:
+            # Let ASGI finish WebSocket disconnect callbacks before closing SQLite.
+            # Cancelling Server.serve() skips that graceful shutdown and races directory().
+            for task in tasks[1:]:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*tasks[1:], return_exceptions=True)
+            server.should_exit = True
+            await serving
             temple.store.db.close()
             galaxy.hub.store.db.close()
     return evidence
