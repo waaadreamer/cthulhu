@@ -58,6 +58,7 @@ export interface DeployStatus { temple: { revision: string; host: string }; jobs
 export interface Directory { agents: Agent[]; galaxies: Galaxy[]; gods?: Record<string, string | null> }
 
 export interface Turn {
+  report?: { period?: number; event_ids: number[]; actions: { at: number; method: string; params: unknown; result: unknown; error?: string; summary: string }[] } | null
   channel_receipt?: { state?: 'sending' | 'sent' | 'ambiguous' | 'failed'; message_id?: string } | null
   id: string
   agent_id: string
@@ -81,7 +82,7 @@ export interface TaskEvent { at: number; kind: string; text: string }
 export interface Probe { stage: number; command: string; rationale: string; verdict: string; reason: string; registered_at: number; baseline: number; stage_note?: string }
 /** Index row from the temple (task list). */
 export interface Task {
-  id: string; galaxy_id: string; description: string; acceptance: string; state: TaskState
+  id: string; short_name: string; galaxy_id: string; description: string; acceptance: string; state: TaskState
   executor?: string | null; executor_name?: string | null; line?: string; summary?: string
   created_at: number; updated_at: number; closed_at?: number | null
 }
@@ -116,6 +117,7 @@ export interface Approval {
 }
 
 export interface Message {
+  task_title?: string | null
   id: string
   task_id?: string | null
   status?: string | null

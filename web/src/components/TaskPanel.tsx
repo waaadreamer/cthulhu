@@ -37,6 +37,7 @@ export function TaskPanel({ taskId, dir, tick }: { taskId: string; dir: Director
       </div>
       {task.details && <p className="text-xs text-amber-300">{task.details}</p>}
       <dl className="grid grid-cols-[5rem_1fr] gap-x-3 gap-y-1.5 text-slate-300">
+        <dt className="text-slate-500">任务描述</dt><dd><details><summary className="cursor-pointer">{task.short_name}</summary><p className="mt-2 whitespace-pre-wrap">{task.description}</p></details></dd>
         <dt className="text-slate-500">星系</dt><dd>{galaxy?.name ?? task.galaxy_id}</dd>
         <dt className="text-slate-500">执行者</dt>
         <dd>{task.executor_name ?? name(task.executor)}{d.reason && <span className="text-slate-500">（{d.reused ? '复用' : '新建'}：{d.reason}）</span>}</dd>

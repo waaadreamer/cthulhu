@@ -36,6 +36,7 @@ from . import BUILD
 from . import roles
 from .protocol import agent_token, dumps, sha256, maintenance_token
 from .roles import OWNER, SYSTEM, Denied, Role
+from .task_display import concise, progress_line
 from .store import Store, new_id
 
 
@@ -168,6 +169,7 @@ class Temple:
         self.api_broker = ProviderBroker(self)
         self.maintenance = set(self.store.setting("maintenance") or [])
         self.sudo_waiters: dict[str, asyncio.Future] = {}
+        self.digest_lock = asyncio.Lock()
         self.offline_since: dict[str, float] = {}
         self._seed()
         from .deploy import Deployer
@@ -210,7 +212,9 @@ class Temple:
 
     def public_old_one(self, r: dict) -> dict:
         d = r["data"]
-        return {"id": r["id"], "name": r["name"], "role": Role.OLD_ONE.value, "galaxy_id": r["galaxy_id"], "parent_id": None,
+        task = self.store.task(r["task_id"]) if r.get("task_id") else None
+        name = task["short_name"] if task else r["name"]
+        return {"id": r["id"], "name": name, "role": Role.OLD_ONE.value, "galaxy_id": r["galaxy_id"], "parent_id": None,
                 "desired": r["desired"], "task": "", "task_id": r["task_id"],
                 "online": r["state"] != "offline" and r["galaxy_id"] in self.galaxies, "state": r["state"],
                 "current": d.get("current"), "context_fill": d.get("context_fill"), "runtime": d.get("runtime"),
@@ -256,7 +260,7 @@ class Temple:
             raise Denied(f"{target['name']} is stopped; messages are rejected until it is resumed")
         msg = self.store.add_message(sender, receiver, text, kind, int(priority), reply_to, message_id, task_id, status)
         await self.deliver(msg)
-        await self.broadcast({"type": "message", "message": msg})
+        await self.broadcast({"type": "message", "message": msg | {"task_title": (self.store.task(msg.get("task_id")) or {}).get("short_name")}})
         return msg
 
     async def to_old_one(self, sender: str, receiver: str, text: str, *, kind="message", priority=0,
@@ -271,7 +275,7 @@ class Temple:
         msg = self.store.add_message(sender, receiver, text, kind, priority, reply_to, message_id, task_id)
         await hub.rpc("hub_deliver", timeout=30, envelope=msg | self.sender_meta(sender))
         self.store.mark(msg["id"], "delivered")
-        await self.broadcast({"type": "message", "message": msg})
+        await self.broadcast({"type": "message", "message": msg | {"task_title": (self.store.task(msg.get("task_id")) or {}).get("short_name")}})
         return msg
 
     async def deliver(self, msg: dict) -> None:
@@ -288,7 +292,7 @@ class Temple:
         envelope = msg | self.sender_meta(msg["sender"])
         if msg.get("task_id"):
             task = self.store.task(msg["task_id"])
-            envelope["task_title"] = task and clip(task["description"], 40)
+            envelope["task_title"] = task and task["short_name"]
         if await conn.send({"type": "message", "message": envelope}):
             # Cancellation may retire this input while the socket send is in flight.
             if self.store.message(msg['id'])['state'] == 'queued':
@@ -313,7 +317,7 @@ class Temple:
             raise Denied(f"galaxy {galaxy_id} has no hub; upgrade it")
         return conn
 
-    async def new_task(self, galaxy: str, description: str, acceptance: str = "", cwd: str | None = None) -> dict:
+    async def new_task(self, galaxy: str, description: str, acceptance: str = "", cwd: str | None = None, short_name: str = "") -> dict:
         g = self.galaxy_by(galaxy)
         if g["id"] in self.closed_galaxies:
             raise Denied(f"galaxy {g['name']} does not take tasks")
@@ -321,7 +325,7 @@ class Temple:
             raise ValueError("description is required")
         conn = self.hub(g["id"])
         task_id = new_id("t")
-        self.store.index_task(task_id, g["id"], description.strip(), acceptance.strip())
+        self.store.index_task(task_id, g["id"], description.strip(), acceptance.strip(), short_name)
         await self.task_changed(task_id)
         try:
             r = await conn.rpc("hub_assign", timeout=180, task_id=task_id, description=description.strip(),
@@ -343,13 +347,14 @@ class Temple:
         if not t:
             raise ValueError(f"unknown task {task_id}")
         try:
-            return await self.hub(t["galaxy_id"]).rpc("hub_task", timeout=30, task_id=task_id) | {"galaxy_id": t["galaxy_id"]}
+            return await self.hub(t["galaxy_id"]).rpc("hub_task", timeout=30, task_id=task_id) | {"galaxy_id": t["galaxy_id"], "short_name": t["short_name"]}
         except Exception as e:
             return t | {"details": f"明细不可用：{e}"}
 
     async def task_changed(self, task_id: str | None = None) -> None:
         if task_id:
             await self.broadcast({"type": "task", "task_id": task_id})
+            await self.broadcast({"type": "directory", **self.directory()})
         frame = {"type": "bindings", "rows": self.bindings()}
         for conn in list(self.galaxies.values()):
             if "hub_v1" in conn.capabilities:
@@ -357,7 +362,7 @@ class Temple:
 
     def bindings(self) -> list[dict]:
         return [{"task_id": t["id"], "galaxy_id": t["galaxy_id"], "executor": t["executor"], "executor_name": t["executor_name"],
-                 "state": t["state"], "description": clip(t["description"], 80)}
+                 "state": t["state"], "short_name": t["short_name"], "description": t["short_name"]}
                 for t in self.store.tasks(open_only=True, limit=200)]
 
     def bindings_text(self) -> str:
@@ -371,7 +376,7 @@ class Temple:
         for t in rows:
             off = " · 星系离线" if t["galaxy_id"] not in self.galaxies and t["state"] not in TERMINAL else ""
             out.append(f"{t['id']} | {names.get(t['galaxy_id'], t['galaxy_id'])} | {t['executor_name'] or '—'}"
-                       f"({t['executor'] or '—'}) | {t['state']}{off} | {t['line'] or '—'} | {clip(t['description'], 60)}")
+                       f"({t['executor'] or '—'}) | {t['state']}{off} | {t['line'] or '—'} | {t['short_name']}")
         return "\n".join(out)
 
     def galaxies_text(self) -> str:
@@ -411,7 +416,8 @@ class Temple:
             pr = roles.BLOCKER_PRIORITY if p.get("kind") == "blocker" else roles.REPORT_PRIORITY
             await self.route(SYSTEM, self.azathoth_id(), p["text"], kind="report", priority=pr, task_id=p.get("task_id"))
         else:
-            self.store.add_digest(p.get("task_id"), p["text"], bool(p.get("attention")))
+            self.store.add_digest(p.get("task_id"), p["text"], bool(p.get("attention")), p.get("event_id"),
+                                  {"kind": p.get("kind"), "progress": p.get("progress")})
         return True
 
     async def digest_clock(self) -> None:
@@ -426,50 +432,61 @@ class Temple:
                 log.exception("digest failed")
 
     async def send_digest(self) -> None:
-        rows = self.store.unsent_digest()
-        tasks = self.store.tasks(open_only=True, limit=500)
-        if not rows and not tasks:
-            return
-        az = self.azathoth_id()
-        start = min((r["created_at"] for r in rows),
-                    default=time.time() - float(self.config.get("digest_every", DIGEST_EVERY)))
-        lines = [f"[进度汇总 {time.strftime('%H:%M', time.localtime(start))}–{time.strftime('%H:%M')}] "
-                 f"在途 {len(tasks)} · 需关注 {sum(r['attention'] for r in rows)}"]
-        groups = {t["id"]: [] for t in tasks}
-        for row in rows:
-            groups.setdefault(row["task_id"], []).append(row)
-        for task_id, events in groups.items():
-            task = self.store.task(task_id) if task_id else None
-            if task:
-                title = " ".join(task["description"].split())[:100]
-                lines += ["", f"### {task_id} · {title}",
-                          f"当前状态：{task['state']} · 星系：{task['galaxy_id']} · "
-                          f"执行者：{task.get('executor_name') or task.get('executor') or '未绑定'}"]
-                if task["state"] in ("closed", "cancelled", "assign_failed"):
-                    lines.append("以下为本期历史事件，以当前状态为准。")
-            else:
-                lines += ["", f"### {task_id or '全局事件'}"]
-            if events:
-                lines += [("⚠ " if r["attention"] else "✓ ") + r["text"] for r in events]
-            else:
-                lines.append("进展：本轮未收到新的检查点或汇报，不能据此认定任务正常推进。")
-                if task.get("summary"):
-                    lines.append("上次记录（非本轮新增）：" + task["summary"][:500])
-            lines.append("判断与操作：待阿撒托斯核实后补充。")
-        text = "\n".join(lines)
-        # Facts reach the owner on the clock even if azathoth is busy, offline or fails.
-        # Its judgement/actions follow through the existing tell_owner channel.
-        await self.note_owner(text, origin="中心神殿定时汇总", kind="progress")
-        # A digest azathoth has not picked up yet is folded into the new one, so digests never pile up.
-        stale = self.store.one("SELECT * FROM messages WHERE receiver=? AND kind='digest' AND state='queued'"
-                               " ORDER BY created_at DESC LIMIT 1", (az,))
-        if stale:
-            text += "\n（上一条未处理的汇总并入）\n" + stale["text"].split("\n", 1)[-1]
-            self.store.mark(stale["id"], "cancelled")
-        text += ("\n\n本轮事实汇总已自动送达主人。请逐任务核实并用 tell_owner 补充：进展、判断、"
-                 "已执行操作及结果、下一步。正常进展也必须汇报；计划和已执行操作分开。")
-        msg = await self.route(SYSTEM, az, text, kind="digest", priority=roles.DIGEST_PRIORITY)
-        self.store.mark_digest([r["id"] for r in rows], msg["id"])
+        """One durable message/turn per task and period; no mixed digest or second owner note."""
+        async with self.digest_lock:
+            now = time.time()
+            period = int(now // float(self.config.get("digest_every", DIGEST_EVERY)))
+            rows = self.store.unsent_digest()
+            groups = {t["id"]: [] for t in self.store.tasks(open_only=True, limit=10000)}
+            for row in rows:
+                groups.setdefault(row["task_id"], []).append(row)
+            for task_id, events in groups.items():
+                mid = f"digest_{period}_{task_id or 'global'}"
+                # Events arriving after this period's snapshot remain unsent for the next tick.
+                if self.store.message(mid):
+                    continue
+                task = self.store.task(task_id) if task_id else None
+                title = task["short_name"] if task else "全局事件"
+                state = task["state"] if task else "global"
+                progress = [json.loads(e.get("details") or "{}").get("progress") for e in events]
+                progress = [p for p in progress if p]
+                latest = max(progress, key=lambda p: p["at"]) if progress else None
+                facts = "本期未收到新的检查点证据，进度待核实"
+                if latest:
+                    facts = concise(latest["summary"])
+                    if latest.get("pace") == "none":
+                        facts = "探针无增长；" + facts
+                    if latest.get("notes"):
+                        facts += "；" + concise("、".join(latest["notes"]), 60)
+                elif events:
+                    facts = f"收到 {len(events)} 条事件，尚无可用的本期检查点总结"
+                if state in ("closed", "cancelled", "assign_failed"):
+                    facts = "任务已结束；迟到历史记录待核实"  # Never revive a stale failure as current state.
+                facts = f"{title} · {state}：{facts}"
+                report = {"facts": facts, "decision": "", "actions": [], "period": period,
+                          "event_ids": [e["id"] for e in events]}
+                text = (f"[任务进度 {title} · {task_id or '全局'} · 期次 {period}]\n"
+                        f"当前有效状态：{state}\n本期公开事实：{facts}\n"
+                        + "\n".join(e["text"] for e in events)
+                        + "\n请核实本期证据后行动，并用 tell_owner 用一行补充判断和下一步。"
+                        "操作结果由程序记录；历史错误不能重新当作当前状态。全局事件不能归到任何任务。")
+                # Commit the existing durable queue, owner row and consumed evidence together.
+                with self.store.lock:
+                    self.store.db.execute("BEGIN IMMEDIATE")
+                    try:
+                        msg = self.store.add_message(SYSTEM, self.azathoth_id(), text, kind="digest",
+                                                     priority=roles.DIGEST_PRIORITY, message_id=mid, task_id=task_id)
+                        self.store.add_turn(mid, self.azathoth_id(), "")
+                        self.store.update_turn(mid, reply=progress_line(report), report=report,
+                                               task_id=task_id, kind="progress", status="done", origin="十分钟汇报")
+                        self.store.mark_digest([e["id"] for e in events], mid)
+                        self.store.db.execute("COMMIT")
+                    except BaseException:
+                        self.store.db.execute("ROLLBACK")
+                        raise
+                await self.broadcast({"type": "chat", "turn": self.store.turn(mid)})
+                await self.broadcast({"type": "message", "message": msg | {"task_title": title}})
+                await self.deliver(msg)
 
     def galaxy_replaced(self, gid: str) -> None:
         """A galaxy connection replaced by another with the same token: normal once after a restart, but
@@ -562,6 +579,50 @@ class Temple:
     # agent calls: (conn, params) -> result
 
     async def handle_agent_call(self, conn: Conn, method: str, p: dict) -> Any:
+        source = p.get("report_source")
+        actions = {"send": "发送指令", "new_task": "派发任务", "close_task": "验收任务",
+                   "continue_task": "继续任务", "cancel_task": "取消任务", "manage_old_one": "管理执行者"}
+        if not source or method not in actions:
+            return await self._handle_agent_call(conn, method, p)
+        msg = self.store.message(source)
+        if not msg or msg["receiver"] != conn.id or self.role_of(conn.id) != Role.AZATHOTH:
+            raise Denied("invalid management report source")
+        params = {k: v for k, v in p.items() if k != "report_source"}
+        task_id = params.get("task_id")
+        if method == "manage_old_one":
+            old = self.store.old_one(params["agent_id"])
+            task_id = old and old.get("task_id")
+        result, error = None, None
+        try:
+            result = await self._handle_agent_call(conn, method, params)
+            if method == "new_task":
+                task_id = result["task_id"]
+            return result
+        except Exception as exc:
+            error = str(exc)
+            raise
+        finally:
+            # Unknown/global actions are never attached to an arbitrary task.
+            tid = source if task_id == msg.get("task_id") and msg["kind"] == "digest" else f"action_{source}_{task_id or 'global'}"
+            turn = self.store.turn(tid)
+            report = (turn or {}).get("report") or {
+                "facts": "管理操作记录", "decision": "", "actions": [], "event_ids": []}
+            failed = error is not None or result is False or (isinstance(result, dict) and result.get("ok") is False)
+            outcome = "失败" if failed else "已返回"
+            if method == "send" and not failed:
+                outcome = "已投递，待执行者回报"
+            elif isinstance(result, dict) and result.get("state"):
+                outcome = "状态 " + str(result["state"])
+            report["actions"].append({"at": time.time(), "method": method, "params": params,
+                                      "result": result, "error": error,
+                                      "summary": actions[method] + "：" + outcome})
+            if not turn:
+                self.store.add_turn(tid, conn.id, "")
+            self.store.update_turn(tid, task_id=task_id, kind="progress", status="done",
+                                   reply=progress_line(report), report=report, origin="管理操作")
+            await self.broadcast({"type": "chat", "turn": self.store.turn(tid)})
+
+    async def _handle_agent_call(self, conn: Conn, method: str, p: dict) -> Any:
         if self.store.agent(conn.id)["desired"] != "running":
             raise Denied("this agent has been stopped")
         if method.startswith('channel_'):
@@ -621,14 +682,14 @@ class Temple:
         # azathoth only below
         if method == "notify_owner":
             await self.note_owner(p["text"], model=p.get("model"), origin=p.get("origin"), task_id=p.get("task_id"),
-                                  kind=p.get("kind"), **({"activity": p["activity"]} if p.get("activity") else {}))
+                                  kind=p.get("kind"), source_message_id=p.get("source_message_id"))
             return True
         if method in ("deploy", "deploy_status"):
             return await self.deploy_call(role, conn.id, method, p)
         if method == "azathoth_header":
             return await self.azathoth_header()
         if method == "new_task":
-            return await self.new_task(p["galaxy"], p["description"], p.get("acceptance", ""), p.get("cwd"))
+            return await self.new_task(p["galaxy"], p["description"], p.get("acceptance", ""), p.get("cwd"), p.get("short_name", ""))
         if method == "close_task":
             return await self.task_command("hub_close", p["task_id"], note=p.get("note", ""))
         if method == "continue_task":
@@ -711,8 +772,23 @@ class Temple:
     async def note_owner(self, text: str, **meta) -> None:
         """A proactive turn in azathoth's chat: no owner text, just the words (and what prompted them)."""
         az = self.god(Role.AZATHOTH)
-        tid = new_id("note")
-        self.store.add_turn(tid, az["id"], "")
+        source = meta.pop("source_message_id", None)
+        if source:
+            message = self.store.message(source)
+            if not message or message["receiver"] != az["id"] or message.get("task_id") != meta.get("task_id"):
+                raise Denied("report source does not belong to this task")
+            tid = source if message["kind"] == "digest" else "note_" + source
+        else:
+            tid = new_id("note")
+        existing = self.store.turn(tid)
+        if existing and existing.get("report"):
+            report = existing["report"]
+            report["decision"] = concise(text, 240)
+            self.store.update_turn(tid, reply=progress_line(report), report=report, model=meta.get("model"))
+            await self.broadcast({"type": "chat", "turn": self.store.turn(tid)})
+            return
+        if not existing:
+            self.store.add_turn(tid, az["id"], "")
         self.store.update_turn(tid, reply=text, status="done", **{k: v for k, v in meta.items() if v is not None})
         await self.broadcast({"type": "chat", "turn": self.store.turn(tid)})
 

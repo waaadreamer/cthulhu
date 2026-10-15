@@ -122,6 +122,7 @@ class Hub:
 
     async def to_temple(self, method: str, **params) -> None:
         """Deliver an event to the temple now, or queue it for the next connection."""
+        params.setdefault("event_id", new_id("event"))
         if self.link.connected.is_set():
             try:
                 await self.link.call(method, timeout=30, **params)
@@ -944,7 +945,7 @@ class Hub:
         except Exception as e:
             j = {"pace": "ok" if grew else "none", "note_to_azathoth": "",
                  "summary": f"（AI 总结不可用）probe {('→'.join(f'{v:g}' for v in payload['samples'][-3:])) or '—'}；"
-                            f"最近：{clip(self.status.get(t['executor'], {}).get('current') or '', 120)}",
+                            "无可用的本期文字总结",
                  "probe_stale": False}
             notes.append(f"AI 不可用：{clip(str(e), 60)}")
         if not grew:
@@ -993,7 +994,9 @@ class Hub:
         line = (f"{t['id']} {self.store.old_one(t['executor'])['name']} · S{probe['stage']} · "
                 f"probe {'→'.join(f'{v:g}' for v in vals) or '—'} · {'、'.join(tags + notes) or 'ok'} · {j['summary']}"
                 + (f" ｜ 提醒：{j['note_to_azathoth']}" if j.get("note_to_azathoth") else ""))
-        await self.report(t, "checkpoint", line, attention=attention)
+        await self.to_temple("report", task_id=t["id"], kind="checkpoint", text=line, attention=attention,
+                             progress={"summary": j["summary"], "pace": j["pace"], "at": d["samples"][-1]["ts"],
+                                       "stage": probe["stage"], "value": sample["value"], "notes": tags})
 
     # owner / azathoth controls of old_ones, forwarded by the temple
 

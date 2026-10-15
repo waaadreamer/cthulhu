@@ -245,7 +245,8 @@ class Azathoth(OwnerChat, MemoryAgent):
             tool("new_task", "把一个任务派到某个星系。星系枢纽会决定复用空闲的旧日支配者还是新建一个，绑定结果会作为消息通知你。"
                  "描述要完整：目标、边界、交付物；验收标准写可核验的完成条件。",
                  {"galaxy": {"type": "string", "description": "星系 ID 或名称"}, "description": STR,
-                  "acceptance": STR, "cwd": {"type": "string", "description": "工作目录，可选"}}, ["galaxy", "description"]),
+                  "short_name": {"type": "string", "description": "2–32字稳定任务短名，例如部署界面修复；不使用整段提示词"},
+                  "acceptance": STR, "cwd": {"type": "string", "description": "工作目录，可选"}}, ["galaxy", "description", "short_name"]),
             tool("close_task", "验收通过：结束任务，执行者被释放、可被复用。", {"task_id": STR, "note": STR}, ["task_id"]),
             tool("continue_task", "验收不通过或需要继续：恢复检查点，并把指令加急发给执行者。", {"task_id": STR, "instruction": STR},
                  ["task_id", "instruction"]),
@@ -265,12 +266,15 @@ class Azathoth(OwnerChat, MemoryAgent):
                  {"galaxies": {"type": "array", "items": STR, "description": "星系 ID 列表；不填或 [\"all\"] 表示全部"},
                   "reason": STR, "recover_job_id": STR, "status_only": {"type": "boolean"}}),
             tool("tell_owner", "只在处理宇宙内部消息（汇总、汇报、审核请求）时使用：在主人的聊天窗口里告诉主人当前情况。"
-                 "每十分钟汇总必须按任务分别写进展、判断、已执行操作及结果、下一步；正常进展也要汇报。"
+                 "每十分钟在当前任务的本期过程行补充一句判断和下一步；正常/停滞都要汇报。程序记录已执行操作结果。"
                  "交付主人要的东西时写完整并设 deliverable=true。",
                  {"text": STR, "deliverable": {"type": "boolean"}}, ["text"]),
         ]
 
     async def call_tool(self, name: str, args: dict):
+        if self.reporting and name in ("send", "new_task", "close_task", "continue_task", "cancel_task", "manage_old_one"):
+            params = args | {"report_source": self.reporting["source_message_id"]}
+            return await self.link.call(name, timeout=180, **params)
         found = await history_call(self.link, name, args)
         if found is not None:
             return found
@@ -297,7 +301,8 @@ class Azathoth(OwnerChat, MemoryAgent):
     async def tell_owner(self, text: str, deliverable: bool = False) -> None:
         r = self.reporting or {}
         await self.link.call("notify_owner", text=text, origin=r.get("origin"), task_id=r.get("task_id"),
-                             kind="summary" if deliverable else r.get("kind", "progress"), model=self.latest.get("model"))
+                             kind="summary" if deliverable else r.get("kind", "progress"), model=self.latest.get("model"),
+                             source_message_id=r.get("source_message_id"))
         r["told"] = True
 
     async def receive(self, batch: list[dict]) -> None:
@@ -309,32 +314,34 @@ class Azathoth(OwnerChat, MemoryAgent):
             await self.internal(rest)
 
     async def internal(self, batch: list[dict]) -> None:
-        """Every digest needs owner-facing judgement/actions, including healthy or stalled tasks."""
-        kinds = {m.get("kind") for m in batch}
-        digest = "digest" in kinds
-        review = "task_finished" in kinds
-        task_ids = {m.get("task_id") for m in batch if m.get("task_id")}
-        self.reporting = {"task_id": next(iter(task_ids)) if len(task_ids) == 1 else None,
-                          "kind": "summary" if review else "progress", "told": False,
-                          "origin": "、".join(sorted({m.get("sender_name") or m["sender"] for m in batch}))}
-        try:
-            text = ("【以下是宇宙内部的消息，不是主人说的。按需行动：审核请求用 close_task / continue_task 处理；"
-                    "阻塞和告警给出决定（send 指令、continue_task、cancel_task 或重新 new_task）。"
-                    "每十分钟进度汇总必须用 tell_owner 向主人汇报，正常进展也不能省略。"
-                    "按任务分别写清进展、你的判断、已执行操作及结果、下一步；没有新证据、尚未操作或调用失败要如实写明。"
-                    "任务完成、重要异常和需要主人决定的问题及时汇报，不等下一轮。】\n\n"
-                    + self.render(batch))
-            result = await self.run_main(text)
-            if digest and not self.reporting["told"]:
-                reply = result.text.strip() if result.status == "completed" else ""
-                await self.tell_owner(reply or "本轮进度汇总的判断与操作尚未回传"
-                                      f"（分析回合状态：{result.status}）。请以上一条按任务汇总的事实为准；"
-                                      "不能据此认定已采取操作或任务正在正常推进。")
-            self.complete(batch, result)
-            if result.status == "completed" and self.last_turn:
-                asyncio.create_task(self.distill(*self.last_turn, correct_only=True))
-        finally:
-            self.reporting = None
+        """A source message owns its response. Never infer a task from a mixed batch."""
+        # One digest per task/period; handling separately also keeps late periods independent.
+        for message in batch:
+            digest = message.get("kind") == "digest"
+            self.reporting = {"task_id": message.get("task_id"), "source_message_id": message["id"],
+                              "kind": "summary" if message.get("kind") == "task_finished" else "progress",
+                              "told": False, "origin": message.get("sender_name") or message["sender"]}
+            try:
+                text = ("【宇宙内部消息，不是主人发言。只处理下面消息明确所属的任务；无 task_id 是全局事件。"
+                        "核实当前有效状态和本期证据，必要时采取管理操作；不复述旧错误或原始提示词。"
+                        "十分钟汇总必须 tell_owner，用一句话写本期进展、判断和下一步；程序会把判断和真实操作结果"
+                        "补全该任务本期的同一过程行。没有证据/没有操作/操作失败要如实说，不能编造已执行安排。】\n"
+                        + self.render([message]))
+                result = await self.run_main(text)
+                if digest and not self.reporting["told"]:
+                    reply = result.text.strip() if result.status == "completed" else ""
+                    await self.tell_owner(reply or "总结不可用；管理判断与下一步尚未回传")
+                self.complete([message], result)
+                if getattr(self, "preempted", False):
+                    break
+                if self.last_turn:
+                    asyncio.create_task(self.distill(*self.last_turn, correct_only=True))
+            except Exception:
+                # Preserve unhandled source messages in the existing queue on delivery/runtime failure.
+                self.preempted = True
+                raise
+            finally:
+                self.reporting = None
 
 
 OLD_ONE_TOOLS = [
