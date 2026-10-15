@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+from .task_display import short_name
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS galaxies (
     id TEXT PRIMARY KEY,
@@ -186,6 +188,11 @@ class Store:
                     "ALTER TABLE memory ADD COLUMN updated_at REAL", "ALTER TABLE messages ADD COLUMN task_id TEXT",
                     "ALTER TABLE messages ADD COLUMN status TEXT", "ALTER TABLE chat_turns ADD COLUMN task_id TEXT",
                     "ALTER TABLE chat_turns ADD COLUMN kind TEXT",
+                    "ALTER TABLE chat_turns ADD COLUMN report TEXT",
+                    "ALTER TABLE task_index ADD COLUMN short_name TEXT",
+                    "ALTER TABLE task_index ADD COLUMN short_name_pending INTEGER NOT NULL DEFAULT 1",
+                    "ALTER TABLE digest ADD COLUMN event_id TEXT",
+                    "ALTER TABLE digest ADD COLUMN details TEXT",
                     "ALTER TABLE turn_log ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
                     "ALTER TABLE tasks ADD COLUMN creator TEXT", "ALTER TABLE tasks ADD COLUMN manager TEXT",
                     "ALTER TABLE tasks ADD COLUMN executor TEXT", "ALTER TABLE tasks ADD COLUMN deadline REAL",
@@ -196,7 +203,10 @@ class Store:
             except sqlite3.OperationalError:
                 pass  # column already exists
         self.db.execute("UPDATE memory SET updated_at=created_at WHERE updated_at IS NULL")
-        self.lock = threading.Lock()
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS digest_event ON digest(event_id) WHERE event_id IS NOT NULL")
+        for row in self.db.execute("SELECT id, description FROM task_index WHERE short_name IS NULL").fetchall():
+            self.db.execute("UPDATE task_index SET short_name=? WHERE id=?", (self.task_label(row["id"], row["description"]), row["id"]))
+        self.lock = threading.RLock()
         path.chmod(0o600)
 
     def q(self, sql: str, args=()) -> list[dict]:
@@ -300,6 +310,9 @@ class Store:
             sql += " AND created_at<?"
             args.append(before)
         rows = self.q(sql + " ORDER BY created_at DESC, id DESC LIMIT ?", (*args, limit))
+        for row in rows:
+            task = self.task(row["task_id"]) if row.get("task_id") else None
+            row["task_title"] = task and task["short_name"]
         return rows[::-1]
 
     def pending_counts(self) -> dict[str, int]:
@@ -308,11 +321,44 @@ class Store:
 
     # v3 task index (the hub owns task details)
 
-    def index_task(self, task_id: str, galaxy_id: str, description: str, acceptance: str = "") -> dict:
+    @staticmethod
+    def task_label(task_id: str, description: str, name: str = "") -> str:
+        label = short_name(description, name)
+        return label + " " + task_id[-8:] if not name else label
+
+    def index_task(self, task_id: str, galaxy_id: str, description: str, acceptance: str = "", name: str = "") -> dict:
         now = time.time()
-        self.x("INSERT INTO task_index (id, galaxy_id, description, acceptance, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-               (task_id, galaxy_id, description, acceptance, now, now))
+        self.x("INSERT INTO task_index (id, galaxy_id, description, acceptance, short_name, short_name_pending, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+               (task_id, galaxy_id, description, acceptance, self.task_label(task_id, description, name), int(not bool(name)), now, now))
         return self.task(task_id)
+
+    def name_tasks(self, mapping: dict[str, str], *, dry_run: bool = False) -> list[str]:
+        """One-time manager-authored migration; validate everything before any mutation."""
+        if not isinstance(mapping, dict):
+            raise ValueError("task-name mapping must be an object")
+        changes = []
+        with self.lock:
+            for task_id, name in mapping.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError(f"invalid name for {task_id}")
+                task = self.task(task_id)
+                if not task:
+                    raise ValueError(f"unknown task {task_id}")
+                label = short_name("", name)
+                if not task["short_name_pending"]:
+                    if label != task["short_name"]:
+                        raise ValueError(f"task {task_id} already has a stable name")
+                    continue
+                changes.append((label, task_id))
+            if not dry_run:
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    self.db.executemany("UPDATE task_index SET short_name=?, short_name_pending=0 WHERE id=?", changes)
+                    self.db.execute("COMMIT")
+                except BaseException:
+                    self.db.execute("ROLLBACK")
+                    raise
+        return [task_id for _, task_id in changes]
 
     def task(self, task_id: str) -> dict | None:
         return self.one("SELECT * FROM task_index WHERE id=?", (task_id,))
@@ -389,9 +435,9 @@ class Store:
 
     # v3 digest of checkpoint results for azathoth
 
-    def add_digest(self, task_id: str | None, text: str, attention: bool) -> None:
-        self.x("INSERT INTO digest (task_id, attention, text, created_at) VALUES (?,?,?,?)",
-               (task_id, int(attention), text, time.time()))
+    def add_digest(self, task_id: str | None, text: str, attention: bool, event_id: str | None = None, details: dict | None = None) -> None:
+        self.x("INSERT OR IGNORE INTO digest (task_id, attention, text, created_at, event_id, details) VALUES (?,?,?,?,?,?)",
+               (task_id, int(attention), text, time.time(), event_id, json.dumps(details or {}, ensure_ascii=False)))
 
     def unsent_digest(self) -> list[dict]:
         return self.q("SELECT * FROM digest WHERE sent_in IS NULL ORDER BY attention DESC, id")
@@ -457,24 +503,34 @@ class Store:
                (turn_id, agent_id, user_text, now, now))
         return self.turn(turn_id)
 
-    TURN_SQL = ("SELECT c.*, substr(t.description, 1, 60) AS task_title, t.state AS task_state, e.receipt AS channel_receipt"
+    TURN_SQL = ("SELECT c.*, t.short_name AS task_title, t.state AS task_state, e.receipt AS channel_receipt"
                 " FROM chat_turns c LEFT JOIN task_index t ON t.id = c.task_id LEFT JOIN channel_events e ON e.message_id=c.id")
 
     def turn(self, turn_id: str) -> dict | None:
         t = self.one(self.TURN_SQL + " WHERE c.id=?", (turn_id,))
         if t:
             t["activity"] = json.loads(t["activity"])
+            t["report"] = json.loads(t["report"]) if t.get("report") else None
             t['channel_receipt'] = json.loads(t['channel_receipt']) if t['channel_receipt'] is not None else None
         return t
 
     def update_turn(self, turn_id: str, **fields) -> None:
+        if "report" in fields:
+            fields["report"] = json.dumps(fields["report"], ensure_ascii=False)
         if "activity" in fields:
             fields["activity"] = json.dumps(fields["activity"], ensure_ascii=False)
         cols = ", ".join(f"{k}=?" for k in fields)
         self.x(f"UPDATE chat_turns SET {cols}, updated_at=? WHERE id=?", (*fields.values(), time.time(), turn_id))
 
-    def turns(self, agent_id: str, limit=50, before: float | None = None, search: str | None = None) -> list[dict]:
+    def turns(self, agent_id: str, limit=50, before: float | None = None, search: str | None = None, ids: list[str] | None = None) -> list[dict]:
         sql, args = self.TURN_SQL + " WHERE c.agent_id=?", [agent_id]
+        if ids is not None:
+            ids = ids[:200]
+            if not ids:
+                return []
+            sql += " AND c.id IN (" + ",".join("?" for _ in ids) + ")"
+            args += ids
+            limit = len(ids)
         if before:
             sql += " AND c.created_at<?"
             args.append(before)
@@ -484,6 +540,7 @@ class Store:
         rows = self.q(sql + " ORDER BY c.created_at DESC LIMIT ?", (*args, limit))
         for t in rows:
             t["activity"] = json.loads(t["activity"])
+            t["report"] = json.loads(t["report"]) if t.get("report") else None
             t['channel_receipt'] = json.loads(t['channel_receipt']) if t['channel_receipt'] is not None else None
         return rows[::-1]
 

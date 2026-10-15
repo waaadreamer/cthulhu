@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { LogOut, Menu, MessagesSquare, Orbit, SlidersHorizontal, Waypoints, X } from 'lucide-react'
 import { Agent, api, Message, Turn, Unauthorized } from './api'
 import { useTemple } from './useTemple'
+import { mergeTurns } from './turns'
 import { Backdrop } from './components/Backdrop'
 import { Login } from './components/Login'
 import { Chat } from './components/Chat'
@@ -45,8 +46,7 @@ function Temple({ onLogout }: { onLogout: () => void }) {
     setChats((c) => {
       const list = c[t.agent_id]
       if (!list) return c
-      const i = list.findIndex((x) => x.id === t.id)
-      const next = i >= 0 ? list.map((x) => (x.id === t.id ? t : x)) : [...list, t]
+      const next = mergeTurns(list, [t])
       return { ...c, [t.agent_id]: next }
     })
   }, [])
@@ -66,17 +66,27 @@ function Temple({ onLogout }: { onLogout: () => void }) {
 
   const activeId = view.kind === 'chat' ? view.agent : ''
   useEffect(() => {
-    if (!activeId || chats[activeId]) return
+    if (!activeId || !connected) return
+    let cancelled = false
+    // Reconnect must refresh older loaded rows too: a late judgement may update
+    // a period outside the newest page. ID lookup cannot mix agents or tasks.
+    const loaded = (chats[activeId] ?? []).map((t) => t.id)
+    for (let i = 0; i < loaded.length; i += 100) {
+      api<Turn[]>(`chat?agent_id=${activeId}&ids=${encodeURIComponent(loaded.slice(i, i + 100).join(','))}`)
+        .then((rows) => { if (!cancelled) setChats((c) => ({ ...c, [activeId]: mergeTurns(c[activeId] ?? [], rows) })) })
+        .catch(() => {})
+    }
     api<Turn[]>(`chat?agent_id=${activeId}&limit=${PAGE}`)
-      .then((t) => { setChats((c) => ({ ...c, [activeId]: t })); setMore((m) => ({ ...m, [activeId]: t.length === PAGE })) })
+      .then((t) => { if (!cancelled) { setChats((c) => ({ ...c, [activeId]: mergeTurns(c[activeId] ?? [], t) })); setMore((m) => ({ ...m, [activeId]: t.length === PAGE })) } })
       .catch((e) => e instanceof Unauthorized && onLogout())
-  }, [activeId, chats, onLogout])
+    return () => { cancelled = true }
+  }, [activeId, connected])
 
   const loadMore = async () => {
     const list = chats[activeId]
     if (!list?.length) return
     const older = await api<Turn[]>(`chat?agent_id=${activeId}&limit=${PAGE}&before=${list[0].created_at}`)
-    setChats((c) => ({ ...c, [activeId]: [...older, ...c[activeId]] }))
+    setChats((c) => ({ ...c, [activeId]: mergeTurns(c[activeId], older) }))
     setMore((m) => ({ ...m, [activeId]: older.length === PAGE }))
   }
 

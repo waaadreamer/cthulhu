@@ -12,7 +12,7 @@ export function Messages({ dir, live, taskTick }: { dir: Directory; live: Messag
       <TaskList selected={task?.id} onSelect={setTask} taskTick={taskTick} />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-4xl px-4 py-6 sm:px-8">
-          <h2 className="mb-2 break-words font-semibold text-white">{task ? task.description.slice(0, 120) : '全部消息'}</h2>
+          <h2 className="mb-2 break-words font-semibold text-white">{task ? task.short_name : '全部消息'}</h2>
           {task && <p className="mb-3 break-all text-xs text-slate-500">{task.id}</p>}
           {task && <TaskPanel key={task.id} taskId={task.id} dir={dir} tick={taskTick} />}
           <div className="mb-5 flex flex-wrap gap-2">
@@ -75,8 +75,8 @@ function TaskList({ selected, onSelect, taskTick }: { selected?: string; onSelec
       const st = TASK_STATE[t.state] ?? TASK_STATE.running
       return <button key={t.id} onClick={() => onSelect(t)} data-history-task={t.id}
         className={`mb-1 w-full rounded-lg p-2 text-left ${selected === t.id ? 'bg-white/10 text-white' : 'text-slate-400 hover:bg-white/5'}`}>
-        <span className="block break-words text-sm line-clamp-2">{t.description}</span>
-        <span className="text-xs text-slate-500"><span className={`chip ${st.chip}`}>{st.label}</span> · {t.executor_name ?? '—'} · {timeLabel(t.created_at)}</span>
+        <span className="block break-words text-sm line-clamp-2">{t.short_name}</span>
+        <span className="text-xs text-slate-500"><span className={`chip ${st.chip}`}>{st.label}</span> · {t.executor ?? '—'} · {timeLabel(t.created_at)}</span>
         {t.line && <span className="block truncate text-[11px] text-slate-600">{t.line}</span>}
       </button>
     })}
@@ -138,9 +138,9 @@ export function MessageRow({ m, dir, compact }: { m: Message; dir: Directory; co
     <div className="rounded-2xl border border-white/[0.05] bg-white/[0.025] p-3.5 transition hover:border-white/10">
       <div className="mb-2 flex items-center gap-2 text-xs">
         {s ? <Avatar role={s.role} size="sm" /> : <div className="grid h-7 w-7 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-sm text-white">✦</div>}
-        <span className={s ? ROLE_META[s.role].text : 'text-indigo-300'}>{s?.name ?? '主人'}</span>
+        <span className={s ? ROLE_META[s.role].text : 'text-indigo-300'}>{s?.role === 'old_one' ? m.task_title || m.sender : s?.name ?? (m.sender === 'system' ? '系统' : '主人')}</span>
         <ArrowRight className="h-3 w-3 text-slate-600" />
-        <span className={r ? ROLE_META[r.role].text : 'text-slate-400'}>{r?.name ?? m.receiver}</span>
+        <span className={r ? ROLE_META[r.role].text : 'text-slate-400'}>{r?.role === 'old_one' ? m.task_title || m.receiver : r?.name ?? m.receiver}</span>
         {m.priority > 0 && <span className="chip bg-rose-500/15 text-rose-300">优先 {m.priority}</span>}
         <span className="ml-auto shrink-0 text-slate-600">{timeLabel(m.created_at)}</span>
         {!compact && m.state !== 'handled' && m.state !== 'cancelled' && <span className="chip bg-sky-400/15 text-sky-300">{m.state === 'queued' ? '待投递' : '处理中'}</span>}

@@ -122,6 +122,7 @@ class Hub:
 
     async def to_temple(self, method: str, **params) -> None:
         """Deliver an event to the temple now, or queue it for the next connection."""
+        params.setdefault("event_id", new_id("event"))
         if self.link.connected.is_set():
             try:
                 await self.link.call(method, timeout=30, **params)
@@ -436,11 +437,12 @@ class Hub:
         else:
             self.store.set_setting("report_at", (self.store.setting("report_at") or {}) | {agent_id: time.time()})
         name = self.store.old_one(agent_id)["name"]
-        if t and blocker:
+        if t:
             async with self.lock(t["id"]):
                 t = self.task(t["id"])
-                t["data"]["blocker"] = {"text": text, "at": time.time()}
-                self.event(t, "blocker", "报告阻塞：" + clip(text, 500))
+                if blocker:
+                    t["data"]["blocker"] = {"text": text, "at": time.time()}
+                self.event(t, "blocker" if blocker else "report", text, agent_id=agent_id)
                 await self.save(t)
         label = "阻塞" if blocker else "回复" if exempt else "汇报"
         await self.to_temple("report", task_id=t and t["id"], kind="blocker" if blocker else "report",
@@ -669,7 +671,7 @@ class Hub:
             self.store.set_old_one(aid, thread_id=p["thread_id"])
             return True
         if method == "log_turn":
-            return self.store.log_turn(aid, p["backend"], p.get("model"), p["thread"], p["input"], p["reply"], p["status"])
+            return self.store.log_turn(aid, p["backend"], p.get("model"), p["thread"], p["input"], p["reply"], p["status"], p.get("task_id"))
         if method == "turn_log":
             return self.store.turn_log(aid, limit=min(int(p.get("limit", 20)), 100))
         if method == "memory":
@@ -791,15 +793,25 @@ class Hub:
         stage = (t["data"].get("probe") or {}).get("stage")
         return [s["value"] for s in t["data"]["samples"] if s.get("stage") == stage and s.get("value") is not None]
 
-    def turn_digest(self, agent_id: str, t: dict) -> str:
-        after = t["data"].get("turn_mark", 0)
-        rows = self.store.turn_log(agent_id, after=after, limit=8)
-        text = "\n\n".join(f"[{stamp(r['created_at'])} {r['status']}] 收到：{clip(r['input'], 400)}\n答：{clip(r['reply'], 800)}"
-                           for r in rows)
-        live = self.status.get(agent_id, {}).get("current")
-        if live:
-            text += f"\n\n[正在进行] {clip(live, 200)}"
-        return text[-16000:] or "（这一期没有完成的回合）"
+    def turn_digest(self, agent_id: str, t: dict, live: dict | None = None, until: float | None = None) -> str:
+        """Current-task evidence only, including reports and work in an unfinished/recovered turn."""
+        since = max(t["created_at"], t["data"].get("bound_at", 0), t["data"].get("evidence_at", 0))
+        until = time.time() if until is None else until
+        rows = self.store.q("SELECT * FROM turn_log WHERE agent_id=? AND task_id=? AND created_at>=? AND created_at<=?"
+                            " ORDER BY id DESC LIMIT 8", (agent_id, t["id"], since, until))[::-1]
+        reports = [e for e in t["data"].get("events", []) if since <= e["at"] <= until
+                   and e["kind"] in ("report", "blocker", "submission")]
+        parts = [f"[本期任务汇报 {stamp(e['at'])}] {clip(e['text'], 2500)}" for e in reports[-8:]]
+        active = live or {}
+        if (active.get("activity_task") == t["id"] and active.get("current_task") == t["id"]
+                and since <= (active.get("last_activity_at") or 0) <= until):
+            parts.append("[本期正在进行的活动，非完成结论] " + "\n".join(active.get("live") or active.get("activity") or [])[-5000:])
+        parts.extend(f"[本期完成回合 {stamp(r['created_at'])}] {clip(r['reply'], 1200)}"
+                     for r in rows if r["status"] == "completed")
+        failed = sum(r["status"] != "completed" for r in rows)
+        if failed:
+            parts.append(f"本期曾有 {failed} 个失败/中断回合；不能据此说没有工作，优先核对新探针、任务汇报和实时活动。")
+        return "\n\n".join(parts) or "本期没有可归属本任务的文字证据；以本次探针为准，不沿用旧回合结论。"
 
     # checkpoints (design §2.5)
 
@@ -915,6 +927,13 @@ class Hub:
 
     async def checkpoint_running(self, t: dict) -> None:
         d, cp = t["data"], t["data"]["checkpoint"]
+        live = {}
+        if t["executor"] in self.conns:
+            try:
+                live = await self.agent_rpc(t["executor"], "latest_result", timeout=5)
+            except Exception:
+                pass  # Probe and persisted task reports still provide evidence.
+        evidence_at = time.time()  # Cut off at the retrieved snapshot, not before the RPC.
         probe = d["probe"]
         values = self.stage_values(t)
         sample = await self.run_probe(t["executor"], probe["command"])
@@ -937,21 +956,20 @@ class Hub:
                 pass
         payload = {"task": t["description"], "acceptance": t["acceptance"], "probe": probe["command"],
                    "probe_meaning": probe["rationale"], "samples": (values + ([sample["value"]] if sample["value"] is not None else []))[-10:],
-                   "grew_since_last": grew, "previous_summary": d.get("last_summary", ""),
-                   "recent_work": self.turn_digest(t["executor"], t)}
+                   "grew_since_last": grew, "previous_summary_unverified": d.get("last_summary", ""),
+                   "recent_work": self.turn_digest(t["executor"], t, live, evidence_at)}
         try:
             j = await self.ai.judge_progress(payload)
         except Exception as e:
             j = {"pace": "ok" if grew else "none", "note_to_azathoth": "",
                  "summary": f"（AI 总结不可用）probe {('→'.join(f'{v:g}' for v in payload['samples'][-3:])) or '—'}；"
-                            f"最近：{clip(self.status.get(t['executor'], {}).get('current') or '', 120)}",
+                            "无可用的本期文字总结",
                  "probe_stale": False}
             notes.append(f"AI 不可用：{clip(str(e), 60)}")
         if not grew:
             j["pace"] = "none"
         d["last_pace"], d["last_summary"] = j["pace"], j["summary"]
-        rows = self.store.turn_log(t["executor"], limit=1)
-        d["turn_mark"] = rows[-1]["id"] if rows else d.get("turn_mark", 0)
+        d["evidence_at"] = evidence_at
         nudged = False
         if probe.get("verdict") == "rejected":
             self.event(t, "probe_rejected", "复审驳回探针：" + probe["reason"])
@@ -993,7 +1011,9 @@ class Hub:
         line = (f"{t['id']} {self.store.old_one(t['executor'])['name']} · S{probe['stage']} · "
                 f"probe {'→'.join(f'{v:g}' for v in vals) or '—'} · {'、'.join(tags + notes) or 'ok'} · {j['summary']}"
                 + (f" ｜ 提醒：{j['note_to_azathoth']}" if j.get("note_to_azathoth") else ""))
-        await self.report(t, "checkpoint", line, attention=attention)
+        await self.to_temple("report", task_id=t["id"], kind="checkpoint", text=line, attention=attention,
+                             progress={"summary": j["summary"], "pace": j["pace"], "at": d["samples"][-1]["ts"],
+                                       "stage": probe["stage"], "value": sample["value"], "notes": tags})
 
     # owner / azathoth controls of old_ones, forwarded by the temple
 

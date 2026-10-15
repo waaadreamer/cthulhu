@@ -103,7 +103,7 @@ class V3(unittest.TestCase):
         return self.wait(lambda: next(t for t in self.api("chat?agent_id=az") if t["id"] == msg["id"] and t["status"] == "done"), 60)
 
     def new_task(self, description, acceptance="ok"):
-        turn = self.chat("CALL new_task " + json.dumps({"galaxy": "g1", "description": description, "acceptance": acceptance},
+        turn = self.chat("CALL new_task " + json.dumps({"galaxy": "g1", "description": description, "short_name": description[:24], "acceptance": acceptance},
                                                        ensure_ascii=False))
         self.assertIn("task_id", turn["reply"], turn["reply"])
         return json.loads(turn["reply"].removeprefix("tool: "))
@@ -142,9 +142,17 @@ class V3(unittest.TestCase):
                                        if m["kind"] == "checkpoint" and "催办" in m["text"]), 30)
         self.assertEqual(nudge["priority"], 9)
         self.assertIn("[probe] 当前 stage 1", nudge["text"])
-        digest = self.wait(lambda: next(m for m in self.az_messages("digest") if "⚠" in m["text"] and tid in m["text"]), 30)
-        self.assertIn("无增长", digest["text"])
+        digest = self.wait(lambda: next(m for m in self.az_messages("digest")
+                                        if m.get("task_id") == tid and "无增长" in m["text"]), 30)
         self.assertEqual(digest["priority"], 6)
+        self.assertIn(tid, digest["id"])
+        # The durable digest is also exactly one task-owned process row; no raw
+        # mixed-task owner note plus a second judgement message.
+        rows = [row for row in self.api("chat?agent_id=az&limit=200") if row["id"] == digest["id"]]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["task_id"], tid)
+        self.assertTrue(rows[0]["report"]["event_ids"])
+        self.assertNotIn("###", rows[0]["reply"])
         # Growth -> ok in the digest.
         work.write_text("hello world")
         self.wait(lambda: any(e["kind"] == "checkpoint" and " ok " in e["text"] for e in self.task(tid)["data"]["events"]), 30)

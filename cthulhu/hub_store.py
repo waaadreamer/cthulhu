@@ -91,6 +91,10 @@ class HubStore:
         self.db.row_factory = _row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        try:
+            self.db.execute("ALTER TABLE turn_log ADD COLUMN task_id TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.lock = threading.Lock()
         path.chmod(0o600)
 
@@ -216,10 +220,10 @@ class HubStore:
 
     # turn log
 
-    def log_turn(self, agent_id, backend, model, thread, input, reply, status) -> int:
-        return self.x("INSERT INTO turn_log (agent_id, backend, model, thread, input, reply, status, created_at)"
-                      " VALUES (?,?,?,?,?,?,?,?)",
-                      (agent_id, backend, model, thread, input, reply, status, time.time())).lastrowid
+    def log_turn(self, agent_id, backend, model, thread, input, reply, status, task_id=None) -> int:
+        return self.x("INSERT INTO turn_log (agent_id, backend, model, thread, input, reply, status, created_at, task_id)"
+                      " VALUES (?,?,?,?,?,?,?,?,?)",
+                      (agent_id, backend, model, thread, input, reply, status, time.time(), task_id)).lastrowid
 
     def turn_log(self, agent_id: str, after: int = 0, limit: int = 20) -> list[dict]:
         return self.q("SELECT * FROM turn_log WHERE agent_id=? AND id>? ORDER BY id DESC LIMIT ?",

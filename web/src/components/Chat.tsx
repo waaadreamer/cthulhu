@@ -247,9 +247,7 @@ function TaskView({ turns, agent, streams }: { turns: Turn[]; agent: Agent; stre
   const done = !!summary && ended
   const blocked = !done && (latest.kind === 'blocked' || latest.task_state === 'suspended')
   const final = summary ?? (blocked ? latest : undefined)
-  const finalIndex = final ? turns.indexOf(final) : turns.length
-  const steps = turns.slice(0, finalIndex)
-  const after = final ? turns.slice(finalIndex + 1) : []
+  const steps = turns.filter((t) => t !== final)
   const [open, setOpen] = useState(!final)
   const title = turns[0].task_title || turns[0].origin || '任务'
   const last = steps[steps.length - 1]
@@ -274,12 +272,20 @@ function TaskView({ turns, agent, streams }: { turns: Turn[]; agent: Agent; stre
             {open && (
               <ol className="space-y-2.5 border-t border-white/[0.06] px-3 py-3">
                 {steps.map((t) => (
-                  <li key={t.id} className="relative border-l border-white/10 pl-4 text-sm text-slate-300">
+                  <li key={t.id} data-progress-id={t.id} className="relative border-l border-white/10 pl-4 text-sm text-slate-300">
                     <span className={`absolute -left-[4.5px] top-1.5 h-2 w-2 rounded-full ${t.kind === 'blocked' ? 'bg-amber-300' : 'bg-violet-400/70'}`} />
                     <div className="mb-0.5 text-[11px] text-slate-500">{timeLabel(t.created_at)}</div>
                     {t.user_text && <p className="mb-2 whitespace-pre-wrap text-indigo-300">{t.user_text}</p>}
                     {(streams[t.id]?.activity ?? t.activity).length > 0 && <Activity items={streams[t.id]?.activity ?? t.activity} live={t.status === 'running'} />}
                     <Markdown text={streams[t.id]?.reply ?? t.reply} streaming={t.status === 'running'} />
+                    {t.report && <details className="mt-1 text-xs text-slate-500">
+                      <summary className="cursor-pointer">依据与操作（{t.report.actions.length}）</summary>
+                      <p className="mt-2">核验前快照（不代表当前结论）：{t.report.facts}</p>
+                      {t.report.actions.map((a, i) => <div key={i} className="mt-2">
+                        <p>{timeLabel(a.at)} · {a.summary}</p>
+                        <pre className="whitespace-pre-wrap break-all">{JSON.stringify({ operation: a.method, arguments: a.params, result: a.result, error: a.error }, null, 2)}</pre>
+                      </div>)}
+                    </details>}
                   </li>
                 ))}
               </ol>
@@ -292,7 +298,7 @@ function TaskView({ turns, agent, streams }: { turns: Turn[]; agent: Agent; stre
             <Footer turn={final} />
           </div>
         )}
-        {after.map((t) => <TurnView key={t.id} turn={t} agent={agent} stream={streams[t.id]} />)}
+
       </div>
     </div>
   )
