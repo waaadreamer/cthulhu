@@ -109,9 +109,8 @@ MODEL_CHOICES["galaxy_api"] = []
 # Effort used when a runtime names one of these models without an explicit effort.
 DEFAULT_EFFORT = {"gpt-6-astra": "medium"}
 EFFORTS = {None, "low", "medium", "high", "xhigh", "max"}
-# Runtime recorded as the per-agent override of every newly spawned old_one (existing ones keep theirs).
-OLD_ONE_RUNTIME = {"backend": "claude", "provider": "ali", "model": "claude-opus-5-5", "effort": "xhigh",
-                   "fallback": {"backend": "codex", "model": "gpt-6.1-sol", "effort": "xhigh"}}
+# Default for new and existing old_ones without an explicit runtime override.
+OLD_ONE_RUNTIME = {"backend": "galaxy_api", "provider": "ali", "model": "claude-opus-5-5-official"}
 
 
 def validate_runtime(cfg: dict, nested: bool = False) -> dict:

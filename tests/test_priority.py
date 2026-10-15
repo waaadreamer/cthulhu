@@ -122,6 +122,18 @@ if __name__ == "__main__":
 class OldOneRuntimeDefaults(unittest.TestCase):
     """An old_one runs its own setting, else its galaxy's default, else the all-old_ones default, else temple config."""
 
+    def test_official_default_is_only_for_old_ones_without_overrides(self):
+        with tempfile.TemporaryDirectory() as root:
+            t = Temple({"secret": "s", "db": str(Path(root) / "db")})
+            try:
+                expected = {"backend": "galaxy_api", "provider": "ali", "model": "claude-opus-5-5-official"}
+                for aid in ("new", "existing"):
+                    self.assertEqual(t.runtime_for({"id": aid, "role": Role.OLD_ONE, "galaxy_id": "g"}), expected)
+                self.assertIsNone(t.runtime_for({"id": "azathoth", "role": Role.AZATHOTH}))
+                self.assertIsNone(t.runtime_for({"id": "nyarlathotep", "role": Role.NYARLATHOTEP}))
+            finally:
+                t.store.db.close()
+
     def test_precedence(self):
         tmp = tempfile.TemporaryDirectory()
         cfg = {"backend": "codex", "model": "cfg-model"}

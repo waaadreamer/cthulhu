@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Check, Loader2, RotateCcw } from 'lucide-react'
-import { Agent, api, Directory, Role, ROLE_META, RuntimeCfg } from '../api'
+import { Agent, api, modelLabel, Directory, Role, ROLE_META, RuntimeCfg } from '../api'
 import { Avatar } from './Avatar'
 import { RuntimeBadge } from './RuntimeBadge'
 
 type Models = Record<RuntimeCfg['backend'], string[]>
-type Provider = { id: string; models: string[]; model_backends: Record<string, 'claude' | 'codex'> }
+type Provider = { id: string; models: string[]; model_backends: Record<string, 'claude' | 'codex'>; model_labels?: Record<string, string> }
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max']
 
 export function Settings({ dir }: { dir: Directory }) {
@@ -212,8 +212,8 @@ function BackendFields({ cfg, models, providers, onChange }: { cfg: RuntimeCfg; 
       )}
       <Field label="模型">
         {source === 'galaxy_api'
-          ? <Select value={cfg.model} options={withValue(provider?.models ?? [], cfg.model)} onChange={(v) => selectAPIModel(provider, v)} />
-          : <Select value={cfg.model} options={withValue(models[cfg.backend] ?? [], cfg.model)} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />}
+          ? <Select value={cfg.model} label={(m) => provider?.model_labels?.[m] ?? modelLabel(m)} options={withValue(provider?.models ?? [], cfg.model)} onChange={(v) => selectAPIModel(provider, v)} />
+          : <Select value={cfg.model} label={modelLabel} options={withValue(models[cfg.backend] ?? [], cfg.model)} onChange={(v) => onChange({ ...cfg, model: v, ...(v === 'gpt-6-astra' && !cfg.effort ? { effort: 'medium' } : {}) })} />}
       </Field>
       <Field label="effort">
         <Select value={cfg.effort ?? ''} options={EFFORTS} onChange={(v) => onChange({ ...cfg, effort: v || undefined })} />
@@ -246,10 +246,10 @@ const INPUT = 'w-full rounded-lg border border-white/10 bg-black/30 px-3 py-1.5 
 // Full option list plus the saved value, so an existing (possibly unlisted) choice is never silently changed.
 const withValue = (options: string[], value?: string) => Array.from(new Set([...options, ...(value ? [value] : [])]))
 
-function Select({ value, options, onChange }: { value: string; options: string[]; onChange: (v: string) => void }) {
+function Select({ value, options, onChange, label }: { value: string; options: string[]; label?: (value: string) => string; onChange: (v: string) => void }) {
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)} className={INPUT}>
-      {options.map((o) => <option key={o} value={o} className="bg-abyss-900">{o || '默认'}</option>)}
+      {options.map((o) => <option key={o} value={o} className="bg-abyss-900">{o ? label?.(o) ?? o : '默认'}</option>)}
     </select>
   )
 }

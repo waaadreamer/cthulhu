@@ -36,7 +36,7 @@ export interface RuntimeCfg {
 export interface RuntimeStatus {
   recovery_policy?: { retries: number; fallback_hold_seconds: number }
   recovery?: { phase: string; attempt: number; retry: number; retries: number; source: string; fallback: boolean; error?: string }
-  api_result?: { provider?: string; requested_model?: string; requested_tier?: string; returned_model?: string; returned_tier?: string }
+  api_result?: { provider?: string; requested_model?: string; requested_tier?: string; upstream_model?: string; returned_model?: string; returned_tier?: string }
   backend: string
   model: string | null
   fallback_active: boolean
@@ -174,6 +174,8 @@ export function tokens(n: number) {
 
 export function modelLabel(model?: string | null) {
   if (!model) return '默认模型'
+  if (model === 'claude-opus-5-5-official') return 'LLM Official'
+  if (model === 'claude-opus-5-5') return 'Claude Opus 5.5（中转站）'
   const m = model.replace(/^claude-/, '').replace(/-(\d)-(\d)$/, ' $1.$2').replace(/^gpt-/, 'GPT-')
   return m.charAt(0).toUpperCase() + m.slice(1)
 }
