@@ -266,7 +266,8 @@ class Azathoth(OwnerChat, MemoryAgent):
                  {"galaxies": {"type": "array", "items": STR, "description": "星系 ID 列表；不填或 [\"all\"] 表示全部"},
                   "reason": STR, "recover_job_id": STR, "status_only": {"type": "boolean"}}),
             tool("tell_owner", "只在处理宇宙内部消息（汇总、汇报、审核请求）时使用：在主人的聊天窗口里告诉主人当前情况。"
-                 "每十分钟在当前任务的本期过程行补充一句判断和下一步；正常/停滞都要汇报。程序记录已执行操作结果。"
+                 "每十分钟在当前任务本期过程行写一句核验后的综合摘要：进展、判断、已执行操作结果、下一步。"
+                 "它会替换待核实快照的正文；纠正旧结论，不重复旧错误。先操作、后汇报，正常/停滞都要写。"
                  "交付主人要的东西时写完整并设 deliverable=true。",
                  {"text": STR, "deliverable": {"type": "boolean"}}, ["text"]),
         ]
@@ -324,10 +325,14 @@ class Azathoth(OwnerChat, MemoryAgent):
             try:
                 text = ("【宇宙内部消息，不是主人发言。只处理下面消息明确所属的任务；无 task_id 是全局事件。"
                         "核实当前有效状态和本期证据，必要时采取管理操作；不复述旧错误或原始提示词。"
-                        "十分钟汇总必须 tell_owner，用一句话写本期进展、判断和下一步；程序会把判断和真实操作结果"
+                        "先完成必要操作，再 tell_owner 用一句话综合本期进展、判断、实际操作结果和下一步；核验后的摘要替换主行，程序会把真实操作结果"
                         "补全该任务本期的同一过程行。没有证据/没有操作/操作失败要如实说，不能编造已执行安排。】\n"
                         + self.render([message]))
-                result = await self.run_main(text)
+                try:
+                    result = await self.run_main(text)
+                except Exception:
+                    log.exception("task summary failed")
+                    result = TurnResult("failed", "")
                 if digest and not self.reporting["told"]:
                     reply = result.text.strip() if result.status == "completed" else ""
                     await self.tell_owner(reply or "总结不可用；管理判断与下一步尚未回传")

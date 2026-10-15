@@ -76,7 +76,7 @@ function TaskList({ selected, onSelect, taskTick }: { selected?: string; onSelec
       return <button key={t.id} onClick={() => onSelect(t)} data-history-task={t.id}
         className={`mb-1 w-full rounded-lg p-2 text-left ${selected === t.id ? 'bg-white/10 text-white' : 'text-slate-400 hover:bg-white/5'}`}>
         <span className="block break-words text-sm line-clamp-2">{t.short_name}</span>
-        <span className="text-xs text-slate-500"><span className={`chip ${st.chip}`}>{st.label}</span> · {t.executor_name ?? '—'} · {timeLabel(t.created_at)}</span>
+        <span className="text-xs text-slate-500"><span className={`chip ${st.chip}`}>{st.label}</span> · {t.executor ?? '—'} · {timeLabel(t.created_at)}</span>
         {t.line && <span className="block truncate text-[11px] text-slate-600">{t.line}</span>}
       </button>
     })}

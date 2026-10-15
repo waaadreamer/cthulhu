@@ -150,8 +150,8 @@ class OwnerDigestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.turns()), 1)
         row = self.turns()[0]
         self.assertEqual(len(row["report"]["actions"]), 2)
-        self.assertIn("状态 running", row["reply"])
-        self.assertIn("取消任务：失败", row["reply"])
+        self.assertIn("状态 running", row["report"]["actions"][0]["summary"])
+        self.assertIn("取消任务：失败", row["report"]["actions"][1]["summary"])
         self.assertEqual(row["report"]["actions"][0]["params"]["instruction"], "推进验证")
 
     async def test_cross_task_action_result_is_not_attached_to_source_task(self):
@@ -168,11 +168,54 @@ class OwnerDigestTests(unittest.IsolatedAsyncioTestCase):
         self.task("t", "部署界面修复")
         self.temple.store.set_task("t", short_name="错名")
         self.assertEqual(self.temple.store.task("t")["short_name"], "部署界面修复")
-        self.temple.store.x("UPDATE task_index SET short_name=NULL,description='请修复部署界面按钮' WHERE id='t'")
+        self.temple.store.x("UPDATE task_index SET short_name=NULL,short_name_pending=1,description='请修复部署界面按钮' WHERE id='t'")
         self.temple.store.db.close()
         self.temple = Temple(self.config)
-        self.assertIn("部署界面", self.temple.store.task("t")["short_name"])
+        self.assertEqual(self.temple.store.task("t")["short_name"], "任务 t")
         self.assertEqual(short_name("完整任务" * 100, "28节点训练性能"), "28节点训练性能")
+
+    async def test_manager_correction_replaces_wrong_checkpoint_in_visible_line(self):
+        self.task("t")
+        self.checkpoint("t", "仍然403且0步", "none")
+        await self.temple.send_digest()
+        source = self.turns()[0]["id"]
+        await self.temple.note_owner("核验已有30步，连接恢复；继续收集吞吐数据", task_id="t", source_message_id=source)
+        row = self.turns()[0]
+        self.assertNotIn("403", row["reply"])
+        self.assertNotIn("0步", row["reply"].replace("30步", ""))
+        self.assertIn("30步", row["reply"])
+        self.assertIn("403", row["report"]["facts"])
+
+    async def test_duplicate_management_retry_executes_once(self):
+        self.task("t")
+        await self.temple.send_digest()
+        source = self.turns()[0]["id"]
+        self.temple.task_command = AsyncMock(return_value={"task_id": "t", "state": "running"})
+        params = {"task_id": "t", "instruction": "继续", "report_source": source}
+        results = await asyncio.gather(*(self.temple.handle_agent_call(SimpleNamespace(id="az"), "continue_task", params) for _ in range(3)))
+        self.temple.task_command.assert_awaited_once()
+        self.assertEqual(len(self.turns()[0]["report"]["actions"]), 1)
+        self.assertEqual(results[0], results[2])
+
+    def test_manager_mapping_is_validated_atomic_immutable_and_idempotent(self):
+        self.temple.store.index_task("pending", "test", "不要把任意prompt片段当名称")
+        self.assertEqual(self.temple.store.task("pending")["short_name"], "任务 pending")
+        with self.assertRaises(ValueError):
+            self.temple.store.name_tasks({"pending": "正确标题", "unknown": "未知任务"})
+        self.assertTrue(self.temple.store.task("pending")["short_name_pending"])
+        self.assertEqual(self.temple.store.name_tasks({"pending": "正确标题"}), ["pending"])
+        self.assertEqual(self.temple.store.name_tasks({"pending": "正确标题"}), [])
+        with self.assertRaises(ValueError):
+            self.temple.store.name_tasks({"pending": "修改历史名称"})
+
+    def test_approved_mapping_covers_all_thirteen_fixture_tasks(self):
+        import json
+        mapping = json.loads((Path(__file__).resolve().parents[1] / "docs/task-progress/task-names-20261015.json").read_text())
+        for tid in mapping:
+            self.temple.store.index_task(tid, "test", "描述不会被用作短名")
+        self.assertEqual(len(self.temple.store.name_tasks(mapping)), 13)
+        self.assertEqual(self.temple.store.name_tasks(mapping), [])
+        self.assertTrue(all(self.temple.store.task(tid)["short_name"] == name for tid, name in mapping.items()))
 
 
 class DigestResponseTests(unittest.IsolatedAsyncioTestCase):
@@ -223,6 +266,27 @@ class DigestResponseTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_digest_internal_message_does_not_force_duplicate_report(self):
         await self.agent.internal([{"id": "r1", "kind": "report", "sender": "system", "text": "状态"}])
         self.agent.link.call.assert_not_awaited()
+
+    async def test_mixed_task_and_global_batch_never_inherits_single_nonempty_id(self):
+        batch = [{"id": mid, "kind": kind, "sender": "system", "task_id": task, "text": mid}
+                 for mid, kind, task in (("report-a", "report", "a"), ("legacy-digest", "digest", None),
+                                         ("report-b", "report", "b"), ("global", "report", None))]
+        async def run(_):
+            await self.agent.tell_owner("本条消息的独立结论")
+            return TurnResult("completed", "")
+        self.agent.run_main.side_effect = run
+        await self.agent.internal(batch)
+        calls = self.agent.link.call.call_args_list
+        self.assertEqual([(c.kwargs["source_message_id"], c.kwargs["task_id"]) for c in calls],
+                         [(m["id"], m["task_id"]) for m in batch])
+        self.assertEqual([call.args[0] for call in self.agent.render.call_args_list], [[m] for m in batch])
+
+    async def test_exception_summary_is_visible_and_other_tasks_still_run(self):
+        self.agent.run_main.side_effect = [RuntimeError("upstream broken"), TurnResult("completed", "第二任务正常")]
+        await self.agent.internal([self.batch[0], self.batch[0] | {"id": "d2", "task_id": "b"}])
+        self.assertEqual(self.agent.link.call.await_count, 2)
+        self.assertIn("总结不可用", self.agent.link.call.call_args_list[0].kwargs["text"])
+        self.assertEqual(self.agent.link.call.call_args_list[1].kwargs["task_id"], "b")
 
 
 if __name__ == "__main__":

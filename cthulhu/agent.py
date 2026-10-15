@@ -388,7 +388,8 @@ class Agent:
             try:
                 await self.link.call("log_turn", backend=self.backends.active_cfg.get("backend", "codex"),
                                      model=self.backends.active_cfg.get("model"), thread=thread,
-                                     input=full_input(), reply=result.text or result.error or "", status=result.status)
+                                     input=full_input(), reply=result.text or result.error or "", status=result.status,
+                                     task_id=self.current_task)
             except Exception:
                 log.exception("could not log turn")
             return result

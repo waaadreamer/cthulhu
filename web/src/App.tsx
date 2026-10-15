@@ -68,6 +68,14 @@ function Temple({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     if (!activeId || !connected) return
     let cancelled = false
+    // Reconnect must refresh older loaded rows too: a late judgement may update
+    // a period outside the newest page. ID lookup cannot mix agents or tasks.
+    const loaded = (chats[activeId] ?? []).map((t) => t.id)
+    for (let i = 0; i < loaded.length; i += 100) {
+      api<Turn[]>(`chat?agent_id=${activeId}&ids=${encodeURIComponent(loaded.slice(i, i + 100).join(','))}`)
+        .then((rows) => { if (!cancelled) setChats((c) => ({ ...c, [activeId]: mergeTurns(c[activeId] ?? [], rows) })) })
+        .catch(() => {})
+    }
     api<Turn[]>(`chat?agent_id=${activeId}&limit=${PAGE}`)
       .then((t) => { if (!cancelled) { setChats((c) => ({ ...c, [activeId]: mergeTurns(c[activeId] ?? [], t) })); setMore((m) => ({ ...m, [activeId]: t.length === PAGE })) } })
       .catch((e) => e instanceof Unauthorized && onLogout())

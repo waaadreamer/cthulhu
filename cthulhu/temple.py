@@ -170,6 +170,7 @@ class Temple:
         self.maintenance = set(self.store.setting("maintenance") or [])
         self.sudo_waiters: dict[str, asyncio.Future] = {}
         self.digest_lock = asyncio.Lock()
+        self.management_lock = asyncio.Lock()
         self.offline_since: dict[str, float] = {}
         self._seed()
         from .deploy import Deployer
@@ -460,6 +461,8 @@ class Temple:
                         facts += "；" + concise("、".join(latest["notes"]), 60)
                 elif events:
                     facts = f"收到 {len(events)} 条事件，尚无可用的本期检查点总结"
+                if latest and latest["at"] < period * float(self.config.get("digest_every", DIGEST_EVERY)):
+                    facts = "迟到的历史检查点（非本期进展）；当前进度待核实"
                 if state in ("closed", "cancelled", "assign_failed"):
                     facts = "任务已结束；迟到历史记录待核实"  # Never revive a stale failure as current state.
                 facts = f"{title} · {state}：{facts}"
@@ -468,7 +471,7 @@ class Temple:
                 text = (f"[任务进度 {title} · {task_id or '全局'} · 期次 {period}]\n"
                         f"当前有效状态：{state}\n本期公开事实：{facts}\n"
                         + "\n".join(e["text"] for e in events)
-                        + "\n请核实本期证据后行动，并用 tell_owner 用一行补充判断和下一步。"
+                        + "\n请核实本期证据后行动，再 tell_owner 用一行综合进展、判断、真实操作结果和下一步，纠正过时结论。"
                         "操作结果由程序记录；历史错误不能重新当作当前状态。全局事件不能归到任何任务。")
                 # Commit the existing durable queue, owner row and consumed evidence together.
                 with self.store.lock:
@@ -579,6 +582,12 @@ class Temple:
     # agent calls: (conn, params) -> result
 
     async def handle_agent_call(self, conn: Conn, method: str, p: dict) -> Any:
+        if p.get("report_source"):
+            async with self.management_lock:
+                return await self._management_call(conn, method, p)
+        return await self._handle_agent_call(conn, method, p)
+
+    async def _management_call(self, conn: Conn, method: str, p: dict) -> Any:
         source = p.get("report_source")
         actions = {"send": "发送指令", "new_task": "派发任务", "close_task": "验收任务",
                    "continue_task": "继续任务", "cancel_task": "取消任务", "manage_old_one": "管理执行者"}
@@ -588,6 +597,12 @@ class Temple:
         if not msg or msg["receiver"] != conn.id or self.role_of(conn.id) != Role.AZATHOTH:
             raise Denied("invalid management report source")
         params = {k: v for k, v in p.items() if k != "report_source"}
+        prefix = "action_" + source + "_"
+        for row in self.store.q("SELECT report FROM chat_turns WHERE id=? OR substr(id,1,?)=?", (source, len(prefix), prefix)):
+            for action in json.loads(row["report"] or "{}").get("actions", []):
+                if action["method"] == method and action["params"] == params:
+                    if not action.get("error"):
+                        return action["result"]
         task_id = params.get("task_id")
         if method == "manage_old_one":
             old = self.store.old_one(params["agent_id"])
@@ -1358,7 +1373,7 @@ class Temple:
                 agent = q.get("agent_id") or self.god(Role.AZATHOTH)["id"]
                 before = float(q["before"]) if q.get("before") else None
                 return JSONResponse(self.store.turns(agent, limit=int(q.get("limit", 40)), before=before,
-                                                     search=q.get("search") or None))
+                                                     search=q.get("search") or None, ids=q["ids"].split(",") if q.get("ids") else None))
             if path == "send":
                 if self.role_of(body["to"]) not in roles.SEND[OWNER]:
                     raise Denied("this role does not accept owner messages")

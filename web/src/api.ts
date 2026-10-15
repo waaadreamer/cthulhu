@@ -58,7 +58,7 @@ export interface DeployStatus { temple: { revision: string; host: string }; jobs
 export interface Directory { agents: Agent[]; galaxies: Galaxy[]; gods?: Record<string, string | null> }
 
 export interface Turn {
-  report?: { period?: number; event_ids: number[]; actions: { at: number; method: string; params: unknown; result: unknown; error?: string; summary: string }[] } | null
+  report?: { facts: string; decision?: string; period?: number; event_ids: number[]; actions: { at: number; method: string; params: unknown; result: unknown; error?: string; summary: string }[] } | null
   channel_receipt?: { state?: 'sending' | 'sent' | 'ambiguous' | 'failed'; message_id?: string } | null
   id: string
   agent_id: string

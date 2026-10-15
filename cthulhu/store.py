@@ -190,6 +190,7 @@ class Store:
                     "ALTER TABLE chat_turns ADD COLUMN kind TEXT",
                     "ALTER TABLE chat_turns ADD COLUMN report TEXT",
                     "ALTER TABLE task_index ADD COLUMN short_name TEXT",
+                    "ALTER TABLE task_index ADD COLUMN short_name_pending INTEGER NOT NULL DEFAULT 1",
                     "ALTER TABLE digest ADD COLUMN event_id TEXT",
                     "ALTER TABLE digest ADD COLUMN details TEXT",
                     "ALTER TABLE turn_log ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
@@ -204,7 +205,7 @@ class Store:
         self.db.execute("UPDATE memory SET updated_at=created_at WHERE updated_at IS NULL")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS digest_event ON digest(event_id) WHERE event_id IS NOT NULL")
         for row in self.db.execute("SELECT id, description FROM task_index WHERE short_name IS NULL").fetchall():
-            self.db.execute("UPDATE task_index SET short_name=? WHERE id=?", (short_name(row["description"]), row["id"]))
+            self.db.execute("UPDATE task_index SET short_name=? WHERE id=?", (self.task_label(row["id"], row["description"]), row["id"]))
         self.lock = threading.RLock()
         path.chmod(0o600)
 
@@ -320,11 +321,44 @@ class Store:
 
     # v3 task index (the hub owns task details)
 
+    @staticmethod
+    def task_label(task_id: str, description: str, name: str = "") -> str:
+        label = short_name(description, name)
+        return label + " " + task_id[-8:] if not name else label
+
     def index_task(self, task_id: str, galaxy_id: str, description: str, acceptance: str = "", name: str = "") -> dict:
         now = time.time()
-        self.x("INSERT INTO task_index (id, galaxy_id, description, acceptance, short_name, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-               (task_id, galaxy_id, description, acceptance, short_name(description, name), now, now))
+        self.x("INSERT INTO task_index (id, galaxy_id, description, acceptance, short_name, short_name_pending, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+               (task_id, galaxy_id, description, acceptance, self.task_label(task_id, description, name), int(not bool(name)), now, now))
         return self.task(task_id)
+
+    def name_tasks(self, mapping: dict[str, str], *, dry_run: bool = False) -> list[str]:
+        """One-time manager-authored migration; validate everything before any mutation."""
+        if not isinstance(mapping, dict):
+            raise ValueError("task-name mapping must be an object")
+        changes = []
+        with self.lock:
+            for task_id, name in mapping.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError(f"invalid name for {task_id}")
+                task = self.task(task_id)
+                if not task:
+                    raise ValueError(f"unknown task {task_id}")
+                label = short_name("", name)
+                if not task["short_name_pending"]:
+                    if label != task["short_name"]:
+                        raise ValueError(f"task {task_id} already has a stable name")
+                    continue
+                changes.append((label, task_id))
+            if not dry_run:
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    self.db.executemany("UPDATE task_index SET short_name=?, short_name_pending=0 WHERE id=?", changes)
+                    self.db.execute("COMMIT")
+                except BaseException:
+                    self.db.execute("ROLLBACK")
+                    raise
+        return [task_id for _, task_id in changes]
 
     def task(self, task_id: str) -> dict | None:
         return self.one("SELECT * FROM task_index WHERE id=?", (task_id,))
@@ -488,8 +522,15 @@ class Store:
         cols = ", ".join(f"{k}=?" for k in fields)
         self.x(f"UPDATE chat_turns SET {cols}, updated_at=? WHERE id=?", (*fields.values(), time.time(), turn_id))
 
-    def turns(self, agent_id: str, limit=50, before: float | None = None, search: str | None = None) -> list[dict]:
+    def turns(self, agent_id: str, limit=50, before: float | None = None, search: str | None = None, ids: list[str] | None = None) -> list[dict]:
         sql, args = self.TURN_SQL + " WHERE c.agent_id=?", [agent_id]
+        if ids is not None:
+            ids = ids[:200]
+            if not ids:
+                return []
+            sql += " AND c.id IN (" + ",".join("?" for _ in ids) + ")"
+            args += ids
+            limit = len(ids)
         if before:
             sql += " AND c.created_at<?"
             args.append(before)

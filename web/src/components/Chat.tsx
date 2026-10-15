@@ -278,8 +278,9 @@ function TaskView({ turns, agent, streams }: { turns: Turn[]; agent: Agent; stre
                     {t.user_text && <p className="mb-2 whitespace-pre-wrap text-indigo-300">{t.user_text}</p>}
                     {(streams[t.id]?.activity ?? t.activity).length > 0 && <Activity items={streams[t.id]?.activity ?? t.activity} live={t.status === 'running'} />}
                     <Markdown text={streams[t.id]?.reply ?? t.reply} streaming={t.status === 'running'} />
-                    {!!t.report?.actions.length && <details className="mt-1 text-xs text-slate-500">
-                      <summary className="cursor-pointer">操作记录（{t.report.actions.length}）</summary>
+                    {t.report && <details className="mt-1 text-xs text-slate-500">
+                      <summary className="cursor-pointer">依据与操作（{t.report.actions.length}）</summary>
+                      <p className="mt-2">核验前快照（不代表当前结论）：{t.report.facts}</p>
                       {t.report.actions.map((a, i) => <div key={i} className="mt-2">
                         <p>{timeLabel(a.at)} · {a.summary}</p>
                         <pre className="whitespace-pre-wrap break-all">{JSON.stringify({ operation: a.method, arguments: a.params, result: a.result, error: a.error }, null, 2)}</pre>
