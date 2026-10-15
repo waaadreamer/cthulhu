@@ -79,6 +79,13 @@ async def verify(config_path, output):
             # Record only route and schema metadata, never prompts, headers or tokens.
             evidence["requests"].append({"model": body.get("model"), "protocol": protocol,
                 "tool_choice": body.get("tool_choice"), "stream": body.get("stream"),
+                "body_keys": sorted(body), "reasoning": body.get("reasoning"), "text": body.get("text"),
+                "instructions_present": bool(body.get("instructions")),
+                "instructions_length": len(body.get("instructions") or ""),
+                "request_options": {k: body[k] for k in ("store", "max_output_tokens", "parallel_tool_calls") if k in body},
+                "namespace_tools": [{"count": len(t.get("tools", [])),
+                    "types": sorted({n.get("type", "") for n in t.get("tools", [])})}
+                    for t in body.get("tools", []) if t.get("type") == "namespace"],
                 "tool_types": sorted({t.get("type", "") for t in body.get("tools", [])}),
                 "has_tool_output": any(i.get("type") == "function_call_output" for i in body.get("input", [])
                                        if isinstance(i, dict)), "has_previous_response_id": "previous_response_id" in body})

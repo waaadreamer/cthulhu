@@ -15,7 +15,7 @@
 
 现有 Galaxy API 是 SSE 传输：输入 stream=false 仍规范为 stream=true，不新增 nonstream 响应接口。续接发送完整 input（含 function_call/function_call_output），store=false；previous_response_id 保持拒绝，避免把状态交给上游。新入口工具只用 auto；不能用 required/forced canary。
 
-阿里首次真实完整 old_one 请求返回 HTTP400：`tool type 'web_search_20250305' is not supported for this model`。该模型必须声明 `model_capabilities: {"claude-opus-5-5-official": {"web_search": false}}`。catalog 将此能力传到现有 Codex 启动配置，设置 `web_search="disabled"`，使 CLI 在生成工具列表时关闭内置网页搜索。provider 不删除已经生成的工具或改写历史；Astra 和未声明此能力的模型保持原行为。核心命令/文件/任务工具仍需真实验证，namespace 支持不能由首个 web_search 错误推断。scripts/verify_official_old_one.py 用真实 Codex 和完整 old_one 技能/工具集验证，未经验证不移除 web_search 等字段来掩盖兼容性错误。
+阿里首次真实完整 old_one 请求返回 HTTP400：`tool type 'web_search_20250305' is not supported for this model`。该模型必须声明 `model_capabilities: {"claude-opus-5-5-official": {"web_search": false}}`。catalog 将此能力传到现有 Codex 启动配置，设置 `web_search="disabled"`，使 CLI 在生成工具列表时关闭内置网页搜索。provider 不删除已经生成的工具或改写历史；Astra 和未声明此能力的模型保持原行为。运行记录 `runtime.api_result.model_capabilities.web_search=false`（`/api/directory` 对应 agent）明确呈现这一能力差异；模型 catalog 同时可查，缺省字段保持兼容。核心命令/文件/任务工具仍需真实验证，namespace 支持不能由首个 web_search 错误推断。scripts/verify_official_old_one.py 用真实 Codex 和完整 old_one 技能/工具集验证，未经验证不移除 web_search 等字段来掩盖兼容性错误。
 
 ## 验证与发布顺序
 

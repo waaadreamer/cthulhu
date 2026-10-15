@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from cthulhu.api_provider import ProviderBroker, ProviderWorker, MAX_REQUEST, MAX_CHUNK, QUEUE_SIZE
 from cthulhu.roles import Denied
-from cthulhu.galaxy_api_runtime import GalaxyAPIRuntime
+from cthulhu.galaxy_api_runtime import GalaxyAPIRuntime, GalaxyAPITransport
 from cthulhu import backends
 from cthulhu.agent import Agent
 from cthulhu.runtime import TurnResult
@@ -175,6 +175,30 @@ class RuntimeSafetyTests(unittest.IsolatedAsyncioTestCase):
     def runtime(self, root):
         return GalaxyAPIRuntime("unused", root, link=SimpleNamespace(connected=asyncio.Event()),
                                 provider="ali", state_dir=Path(root), model="gpt-6-astra")
+
+    async def test_model_capabilities_do_not_leak_on_model_switch_or_restart(self):
+        from cthulhu.runtime import CodexRuntime
+        alias = "claude-opus-5-5-official"
+        catalog = [{"id": "ali", "models": [alias, "gpt-6-astra"], "model_backends": {},
+                    "model_capabilities": {alias: {"web_search": False}}}]
+        link = SimpleNamespace(call=AsyncMock(return_value=catalog), connected=asyncio.Event())
+        with tempfile.TemporaryDirectory() as root:
+            for model in (alias, "gpt-6-astra"):
+                catalog[0]["model_capabilities"] = {alias: {"web_search": False}}
+                transport = GalaxyAPITransport(link=link, provider="ali", state_dir=root, model=model)
+                try:
+                    await transport.start()
+                    runtime = CodexRuntime("unused", root, model=model, api_transport=transport.api_transport)
+                    config, _ = runtime.launch_config()
+                    self.assertEqual('web_search="disabled"' in config, model == alias)
+                    self.assertNotIn("web_search", runtime._thread_params("prompt"))
+                    await transport.close()
+                    catalog[0]["model_capabilities"] = {}
+                    await transport.start()
+                    runtime.api_transport = transport.api_transport
+                    self.assertNotIn('web_search="disabled"', runtime.launch_config()[0])
+                finally:
+                    await transport.close()
 
     async def test_startup_fallback_and_failed_switch_keep_old(self):
         with tempfile.TemporaryDirectory() as root:

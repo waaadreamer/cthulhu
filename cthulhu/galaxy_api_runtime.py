@@ -100,7 +100,8 @@ class GalaxyAPITransport:
                                 status_code=status)
         sid = opened["id"]
         self.stream_ids.add(sid)
-        self.api_result = {k: v for k, v in opened.items() if k != "id"} | {"request_id": sid, "request_dispatched": True}
+        self.api_result = {k: v for k, v in opened.items() if k != "id"} | {"request_id": sid, "request_dispatched": True,
+            "model_capabilities": dict(self.api_transport.get("capabilities", {}))}
 
         async def events():
             try:
