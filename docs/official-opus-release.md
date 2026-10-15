@@ -13,7 +13,9 @@
 
 新连接沿用阿里现有 codex_config_file、codex_provider=ss-gateway，原生读取 experimental_bearer_token；HTTPS /responses、固定 CA、trust_env=False、follow_redirects=False 保持现状。旧入口仍独立读取 claude_config_file，走 Messages，不共用 token。显示尾缀只是主人指定标签。
 
-现有 Galaxy API 是 SSE 传输：输入 stream=false 仍规范为 stream=true，不新增 nonstream 响应接口。续接发送完整 input（含 function_call/function_call_output），store=false；previous_response_id 保持拒绝，避免把状态交给上游。新入口工具只用 auto；不能用 required/forced canary。scripts/verify_official_old_one.py 用真实 Codex 和完整 old_one 技能/工具集验证，未经验证不移除 web_search 等字段来掩盖兼容性错误。
+现有 Galaxy API 是 SSE 传输：输入 stream=false 仍规范为 stream=true，不新增 nonstream 响应接口。续接发送完整 input（含 function_call/function_call_output），store=false；previous_response_id 保持拒绝，避免把状态交给上游。新入口工具只用 auto；不能用 required/forced canary。
+
+阿里首次真实完整 old_one 请求返回 HTTP400：`tool type 'web_search_20250305' is not supported for this model`。该模型必须声明 `model_capabilities: {"claude-opus-5-5-official": {"web_search": false}}`。catalog 将此能力传到现有 Codex 启动配置，设置 `web_search="disabled"`，使 CLI 在生成工具列表时关闭内置网页搜索。provider 不删除已经生成的工具或改写历史；Astra 和未声明此能力的模型保持原行为。核心命令/文件/任务工具仍需真实验证，namespace 支持不能由首个 web_search 错误推断。scripts/verify_official_old_one.py 用真实 Codex 和完整 old_one 技能/工具集验证，未经验证不移除 web_search 等字段来掩盖兼容性错误。
 
 ## 验证与发布顺序
 
@@ -59,6 +61,7 @@
    p['models'] = list(dict.fromkeys([*p['models'], alias]))
    p['model_backends'] = p.get('model_backends', {}) | {alias: 'codex'}
    p['model_mapping'] = p.get('model_mapping', {}) | {alias: 'claude-opus-5-5'}
+   p['model_capabilities'] = p.get('model_capabilities', {}) | {alias: {'web_search': False}}
    p['model_labels'] = p.get('model_labels', {}) | {alias: 'LLM Official', 'claude-opus-5-5': 'Claude Opus 5.5（中转站）'}
    fd = os.open(root / 'work/galaxy.official-stage-a.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
    with os.fdopen(fd, 'w') as f: json.dump(c, f, ensure_ascii=False, indent=2)
@@ -90,7 +93,7 @@
 | old_9b12505e461badb5、old_7d4d048afd3f607c、old_b0d54a58cac1783e | stopped，继承星系 | 保持 stopped，恢复时继承新入口 |
 | azathoth | Astra / ali / medium | 保留原值；其他管理者/枢纽/总结 AI 均不改 |
 
-迁移不删除任何 agent、task、thread、turn log。代码使用原有 pending_runtime：运行中收到新配置仅保存 pending，在当前批次/回合完成后 apply_runtime；backend/provider/model 独立线程通过 handoff_context 的后端无关 turn log 接续。验证 pending 清空、actual runtime 和随后一次 api_result，而不是仅看 POST 成功。开发任务继续用 Astra，不能把这些临时钉住的条目漏成永久覆盖。
+迁移不删除任何 agent、task、thread、turn log。代码使用原有 pending_runtime：运行中收到新配置仅保存 pending，在当前批次/回合完成后 apply_runtime；backend/provider/model 独立线程通过 handoff_context 的后端无关 turn log 接续。验证 pending 清空、actual runtime 和随后一次 api_result，而不是仅看 POST 成功。现有 apply_runtime 在新实例启动失败时保留原实例并写错误日志，故 pending 清空本身也不能作为切换成功证据。开发任务继续用 Astra，不能把这些临时钉住的条目漏成永久覆盖。
 
 阶段 B 通过已有主人 HTTP /api/runtimes 接口操作，保留其能力/catalog校验与运行时通知，不直接 UPDATE settings。先保存 GET /api/runtimes 的完整 overrides 为回滚文件。以下文件是 POST body 示例，须使用管理者已登录会话；cookie 只放本地私有文件，不打印：
 

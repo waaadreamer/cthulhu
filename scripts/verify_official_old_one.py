@@ -8,7 +8,6 @@ import argparse
 import asyncio
 from contextlib import contextmanager
 import json
-import os
 from pathlib import Path
 import secrets
 import socket
@@ -44,6 +43,7 @@ async def verify(config_path, output):
     cfg = dict(local["api_provider"])
     cfg["models"] = list(dict.fromkeys([*cfg["models"], ALIAS]))
     cfg["model_backends"] = cfg.get("model_backends", {}) | {ALIAS: "codex"}
+    cfg["model_capabilities"] = cfg.get("model_capabilities", {}) | {ALIAS: {"web_search": False}}
     cfg["model_mapping"] = cfg.get("model_mapping", {}) | {ALIAS: UPSTREAM}
     cfg["model_labels"] = cfg.get("model_labels", {}) | {ALIAS: "LLM Official", UPSTREAM: "Claude Opus 5.5（中转站）"}
     output = Path(output).resolve()
@@ -91,7 +91,7 @@ async def verify(config_path, output):
             catalog = temple.api_broker.catalog("ali")[0]
             assert catalog["model_backends"][ALIAS] == "codex"
             assert catalog["model_backends"][UPSTREAM] == "claude"
-            evidence["catalog"] = {k: catalog[k] for k in ("id", "models", "model_backends", "model_labels")}
+            evidence["catalog"] = {k: catalog[k] for k in ("id", "models", "model_backends", "model_labels", "model_capabilities")}
             assigned = await temple.new_task("ali", (
                 f"隔离接入验证任务。工作目录 {work}。第一步登记探针：wc -c < {artifact}。"
                 f"然后只在本目录使用 exec_command 将文件 {artifact} 的内容替换为精确字符串 {nonce}，"
@@ -109,6 +109,7 @@ async def verify(config_path, output):
             assert live["api_result"]["returned_model"] in (UPSTREAM, "anthropic/" + UPSTREAM)
             assert artifact.read_text().strip() == nonce
             requests = evidence["requests"]
+            assert all("web_search" not in r["tool_types"] for r in requests)
             assert requests and all(r["model"] == ALIAS and r["protocol"] == "responses" and
                 r["tool_choice"] == "auto" and r["stream"] and not r["has_previous_response_id"] for r in requests)
             assert any(r["has_tool_output"] for r in requests)

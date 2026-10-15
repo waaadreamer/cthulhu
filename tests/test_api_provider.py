@@ -64,6 +64,17 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 self.broker.register(self.provider, registered | {"model_labels": labels})
 
+    async def test_capabilities_are_allowlisted_and_optional(self):
+        registered = {"version": 1, "protocol": "responses", "models": ["gpt-6-astra", "not-permitted"],
+                      "model_capabilities": {"gpt-6-astra": {"web_search": False}, "not-permitted": {"web_search": False}}}
+        self.broker.register(self.provider, registered)
+        self.assertEqual(self.broker.catalog("central")[0]["model_capabilities"], {"gpt-6-astra": {"web_search": False}})
+        for value in ({"web_search": "false"}, {"url": False}, []):
+            with self.assertRaises(ValueError):
+                self.broker.register(self.provider, registered | {"model_capabilities": {"gpt-6-astra": value}})
+        self.broker.register(self.provider, registered | {"model_capabilities": {}})
+        self.assertEqual(self.broker.catalog("central")[0]["model_capabilities"], {})
+
     async def test_scoped_discovery_stale_and_unknown_registration(self):
         self.assertEqual(self.broker.catalog("elsewhere"), [])
         self.assertEqual(self.broker.catalog("central")[0]["models"], ["gpt-6-astra", "gpt-6.1-sol"])

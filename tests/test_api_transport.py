@@ -310,12 +310,14 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.temple.config["api_providers"]["ali"]["models"].append(alias)
         self.worker.config["models"].append(alias)
         self.worker.config["model_mapping"] = {alias: native}
+        self.worker.config["model_capabilities"] = {alias: {"web_search": False}}
         self.worker.config["model_labels"] = {alias: "LLM Official", native: "Claude Opus 5.5（中转站）"}
         await self.worker.register("official-test")
         catalog = (await self.caller.call("api_catalog"))[0]
         self.assertEqual(catalog["model_backends"][alias], "codex")
         self.assertEqual(catalog["model_backends"][native], "claude")
         self.assertEqual(catalog["model_labels"][alias], "LLM Official")
+        self.assertEqual(catalog["model_capabilities"][alias], {"web_search": False})
         self.codex_mode = True
         self.rt = GalaxyAPIRuntime(str(CODEX), self.tmp.name, link=self.caller, provider="ali",
                                    state_dir=Path(self.tmp.name), model=alias)
@@ -330,6 +332,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             result = await self.rt.run_turn(thread, prompt, timeout=30)
             self.assertEqual(result.status, "completed", str(result.error))
         self.assertEqual(calls, [("echo", {"value": "echoed"})])
+        self.assertTrue(all(t.get("type") != "web_search" for b in self.requests for t in b.get("tools", [])))
         self.assertTrue(all(b["model"] == native and b["tool_choice"] == "auto" and b["stream"]
                             and not b["store"] and "previous_response_id" not in b for b in self.requests))
         self.assertTrue(any(i.get("type") == "function_call_output" for i in self.requests[-1]["input"]))
