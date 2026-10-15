@@ -419,6 +419,7 @@ class Temple:
             await asyncio.sleep(float(self.config.get("digest_every", DIGEST_EVERY)))
             try:
                 self.expire_sudo()
+                self.watch_disk()
                 await self.watch_galaxies()
                 await self.send_digest()
             except Exception:
@@ -443,6 +444,18 @@ class Temple:
             self.store.mark(stale["id"], "cancelled")
         msg = await self.route(SYSTEM, az, text, kind="digest", priority=roles.DIGEST_PRIORITY)
         self.store.mark_digest([r["id"] for r in rows], msg["id"])
+
+    def watch_disk(self) -> None:
+        """The temple's own disk: a full disk makes every write (settings, messages, tasks) fail with a 500."""
+        import shutil
+        free = shutil.disk_usage(Path(self.config["db"]).parent).free
+        low = free < float(self.config.get("disk_warn_mb", 1024)) * 1024 * 1024
+        if low and not self.offline_since.get("disk:told"):
+            self.offline_since["disk:told"] = time.time()
+            self.store.add_digest(None, f"中心神殿所在磁盘只剩 {free // (1024 * 1024)} MB。满了以后设置、消息、任务都无法写入；"
+                                        "请清理（日志、旧测试目录、缓存）或扩容，必要时用 sudo_request。", True)
+        elif not low:
+            self.offline_since.pop("disk:told", None)
 
     async def watch_galaxies(self) -> None:
         now = time.time()
@@ -1340,7 +1353,11 @@ class Temple:
                                                                   reason=body.get("reason", "")))
                 return JSONResponse(self.deployer.status())
             if path == "deploy_latest":
-                return JSONResponse({"revision": await self.deployer.latest()})
+                try:
+                    return JSONResponse({"revision": await self.deployer.latest()})
+                except RuntimeError as e:
+                    # No repository to compare against (e.g. code exported without .git): say so instead of a 500.
+                    return JSONResponse({"revision": None, "error": str(e)})
             if path == "latest":
                 return JSONResponse(await self.latest_result(q["agent_id"]))
             return JSONResponse({"error": "not found"}, status_code=404)
