@@ -415,7 +415,11 @@ class Temple:
         """A hub's report for azathoth: old_ones' reports go direct, checkpoint results into the digest."""
         if p.get("direct"):
             pr = roles.BLOCKER_PRIORITY if p.get("kind") == "blocker" else roles.REPORT_PRIORITY
-            await self.route(SYSTEM, self.azathoth_id(), p["text"], kind="report", priority=pr, task_id=p.get("task_id"))
+            mid = "hub_" + p["event_id"] if p.get("event_id") else None
+            if mid and self.store.message(mid):
+                return True  # Accepted before the hub lost the acknowledgement.
+            await self.route(SYSTEM, self.azathoth_id(), p["text"], kind="report", priority=pr,
+                             task_id=p.get("task_id"), message_id=mid)
         else:
             self.store.add_digest(p.get("task_id"), p["text"], bool(p.get("attention")), p.get("event_id"),
                                   {"kind": p.get("kind"), "progress": p.get("progress")})
@@ -470,7 +474,7 @@ class Temple:
                           "event_ids": [e["id"] for e in events]}
                 text = (f"[任务进度 {title} · {task_id or '全局'} · 期次 {period}]\n"
                         f"当前有效状态：{state}\n本期公开事实：{facts}\n"
-                        + "\n".join(e["text"] for e in events)
+                        + "\n".join(("⚠ " if e["attention"] else "") + e["text"] for e in events)
                         + "\n请核实本期证据后行动，再 tell_owner 用一行综合进展、判断、真实操作结果和下一步，纠正过时结论。"
                         "操作结果由程序记录；历史错误不能重新当作当前状态。全局事件不能归到任何任务。")
                 # Commit the existing durable queue, owner row and consumed evidence together.
@@ -1254,8 +1258,11 @@ class Temple:
         if method == "report":
             return await self.hub_report(gid, p)
         if method == "task_finished":
+            mid = "hub_" + p["event_id"] if p.get("event_id") else None
+            if mid and self.store.message(mid):
+                return True
             await self.route(SYSTEM, self.azathoth_id(), p["text"], kind="task_finished", priority=roles.FINISH_PRIORITY,
-                             task_id=p["task_id"])
+                             task_id=p["task_id"], message_id=mid)
             return True
         if method == "tell_owner":
             await self.note_owner(p["text"], origin="星系枢纽", task_id=p.get("task_id"), kind="blocked")

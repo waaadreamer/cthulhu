@@ -927,13 +927,13 @@ class Hub:
 
     async def checkpoint_running(self, t: dict) -> None:
         d, cp = t["data"], t["data"]["checkpoint"]
-        evidence_at = time.time()
         live = {}
         if t["executor"] in self.conns:
             try:
                 live = await self.agent_rpc(t["executor"], "latest_result", timeout=5)
             except Exception:
                 pass  # Probe and persisted task reports still provide evidence.
+        evidence_at = time.time()  # Cut off at the retrieved snapshot, not before the RPC.
         probe = d["probe"]
         values = self.stage_values(t)
         sample = await self.run_probe(t["executor"], probe["command"])

@@ -136,6 +136,23 @@ class OwnerDigestTests(unittest.IsolatedAsyncioTestCase):
         await self.temple.hub_report("test", payload)
         self.assertEqual(len(self.temple.store.unsent_digest()), 1)
 
+    async def test_direct_report_ack_loss_does_not_create_duplicate_source_messages(self):
+        self.task("t")
+        payload = {"task_id": "t", "text": "已有提交", "event_id": "direct-event", "direct": True}
+        await asyncio.gather(*(self.temple.hub_report("test", payload) for _ in range(3)))
+        rows = self.temple.store.messages(task_id="t")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "hub_direct-event")
+
+    async def test_finish_event_ack_loss_retains_one_review_message(self):
+        self.task("t")
+        payload = {"task_id": "t", "text": "请验收产物", "event_id": "finish-event"}
+        await self.temple.handle_hub_call(SimpleNamespace(id="test"), "task_finished", payload)
+        await self.temple.handle_hub_call(SimpleNamespace(id="test"), "task_finished", payload)
+        rows = self.temple.store.messages(task_id="t")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "task_finished")
+
     async def test_management_actual_success_and_failure_are_recorded_in_source_row(self):
         self.task("t")
         await self.temple.send_digest()
@@ -207,6 +224,19 @@ class OwnerDigestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.temple.store.name_tasks({"pending": "正确标题"}), [])
         with self.assertRaises(ValueError):
             self.temple.store.name_tasks({"pending": "修改历史名称"})
+
+    async def test_reconnect_id_refresh_returns_old_updated_period_without_other_agent(self):
+        self.task("t")
+        await self.temple.send_digest()
+        first = self.turns()[0]["id"]
+        for _ in range(42):
+            self.now.return_value += 600
+            await self.temple.send_digest()
+        await self.temple.note_owner("很早期次的迟到更正", task_id="t", source_message_id=first)
+        self.assertNotIn(first, [t["id"] for t in self.temple.store.turns("az", limit=40)])
+        rows = self.temple.store.turns("az", ids=[first])
+        self.assertEqual(rows[0]["reply"], "很早期次的迟到更正")
+        self.assertEqual(self.temple.store.turns("other-agent", ids=[first]), [])
 
     def test_approved_mapping_covers_all_thirteen_fixture_tasks(self):
         import json

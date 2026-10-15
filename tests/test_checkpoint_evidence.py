@@ -46,6 +46,24 @@ class CheckpointEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('失败/中断', payload['recent_work'])
         self.assertEqual(self.hub.task('t')['data']['evidence_at'], 1300)
 
+    async def test_rpc_snapshot_time_is_included_without_widening_the_next_period(self):
+        self.now.return_value = 1300
+        self.hub.conns[self.worker] = object()
+        async def latest(*args, **kwargs):
+            self.now.return_value = 1301
+            return {'current_task': 't', 'activity_task': 't', 'last_activity_at': 1301,
+                    'live': ['RPC期间新增活动']}
+        self.hub.agent_rpc = AsyncMock(side_effect=latest)
+        self.hub.run_probe = AsyncMock(return_value={'value': 2, 'error': None})
+        self.hub.ai.judge_progress = AsyncMock(return_value={'pace': 'ok', 'summary': '提交指标增长，继续核验', 'probe_stale': False, 'note_to_azathoth': ''})
+        await self.hub.checkpoint_running(self.hub.task('t'))
+        self.assertIn('RPC期间新增活动', self.hub.ai.judge_progress.call_args.args[0]['recent_work'])
+        task = self.hub.task('t')
+        self.assertEqual(task['data']['evidence_at'], 1301)
+        text = self.hub.turn_digest(self.worker, task, {'current_task': 't', 'activity_task': 't',
+            'last_activity_at': 1302, 'live': ['截止之后活动']}, until=1301)
+        self.assertNotIn('截止之后活动', text)
+
     def test_reused_executor_stale_live_and_unattributed_old_turn_are_excluded(self):
         self.now.return_value = 1260
         self.hub.store.log_turn(self.worker, 'codex', 'fake', 'thread', 'old', '旧任务未完成', 'completed')
