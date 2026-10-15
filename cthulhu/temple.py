@@ -1391,11 +1391,15 @@ class Temple:
                                                                   reason=body.get("reason", "")))
                 return JSONResponse(self.deployer.status())
             if path == "deploy_latest":
+                source = "deploy.repo" if self.deployer.repo else "origin"
                 try:
-                    return JSONResponse({"revision": await self.deployer.latest()})
+                    revision = await self.deployer.latest()
+                    return JSONResponse({"revision": revision, "source": source, "ref": "refs/heads/main",
+                                         "blocked": await self.deployer.target_blocks(revision)})
                 except RuntimeError as e:
                     # No repository to compare against (e.g. code exported without .git): say so instead of a 500.
-                    return JSONResponse({"revision": None, "error": str(e)})
+                    return JSONResponse({"revision": None, "error": str(e), "source": source,
+                                         "ref": "refs/heads/main"})
             if path == "latest":
                 return JSONResponse(await self.latest_result(q["agent_id"]))
             return JSONResponse({"error": "not found"}, status_code=404)

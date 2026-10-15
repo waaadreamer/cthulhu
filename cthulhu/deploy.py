@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import sys
@@ -66,13 +67,23 @@ async def git(root: Path, *args: str, check: bool = True, timeout: float = 300) 
 def local_info(root: Path = ROOT) -> dict:
     """What a process tells the temple about its checkout."""
     import subprocess
+    root = Path(root).resolve()
+    rev, writable, error = "", False, "运行目录不是有效的 Git 检出；版本未知，需现场部署"
     try:
-        rev = subprocess.run(["git", "-c", f"safe.directory={root}", "rev-parse", "HEAD"], cwd=root,
-                             capture_output=True, text=True, timeout=5).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        rev = ""
+        result = subprocess.run(
+            ["git", "-c", f"safe.directory={root}", "rev-parse", "--show-toplevel",
+             "--absolute-git-dir", "--git-common-dir", "HEAD"], cwd=root,
+            capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            top, git_dir, common_dir, head = result.stdout.strip().splitlines()
+            if Path(top).resolve() == root and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+                rev = head
+                writable = all(os.access(p, os.W_OK) for p in (root, Path(git_dir), root / common_dir))
+                error = "" if writable else "代码目录或 Git 元数据不可写；需现场检查权限"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        error = "无法读取 Git 版本；需现场检查 Git 和代码目录"
     return {"host": socket.gethostname(), "root": str(root), "revision": rev,
-            "writable": os.access(root / ".git", os.W_OK) if (root / ".git").exists() else False}
+            "writable": writable, "error": error or None}
 
 
 async def update_code(root: Path, revision: str, python: str = sys.executable) -> dict:
@@ -107,9 +118,16 @@ async def rollback(root: Path, prev: str) -> None:
 
 
 async def _is_ancestor(root: Path, a: str, b: str) -> bool:
+    return await _ancestry(root, a, b) == 0
+
+
+async def _ancestry(root: Path, a: str, b: str) -> int:
+    """0: ancestor, 1: incompatible, other: history unavailable in this checkout."""
     p = await asyncio.create_subprocess_exec("git", "-c", f"safe.directory={root}", "merge-base", "--is-ancestor",
-                                             a, b, cwd=root)
-    return await p.wait() == 0
+                                             a, b, cwd=root, stdout=asyncio.subprocess.DEVNULL,
+                                             stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+    await _communicate(p, 5, "git merge-base")
+    return p.returncode
 
 
 async def _run(*cmd: str, cwd: Path, env: dict | None = None, timeout: float = 300) -> None:
@@ -152,16 +170,65 @@ class Deployer:
         await self.save(job)
 
     def status(self) -> dict:
+        groups = self.groups([g["id"] for g in self.t.store.galaxies()] + ["__temple__"])
+        blocked = {gid: g["error"] for g in groups if g.get("error")
+                   for gid in g["galaxies"] + (["__temple__"] if g.get("temple") else [])}
         return {"temple": self.me, "galaxies": {gid: c.deploy for gid, c in self.t.galaxies.items()},
-                "jobs": self.jobs()[::-1], "requests": list(self.requests.values())}
+                "jobs": self.jobs()[::-1], "requests": list(self.requests.values()),
+                "blocked": blocked, "blocked_reason": self.blocked_reason()}
+
+    def blocked_reason(self) -> str | None:
+        if any(not t.done() for t in self.running.values()) or \
+                any(j["state"] in ("running", "restarting_temple") for j in self.jobs()):
+            return "已有部署在进行中"
+        if any(g.get("recovery_required") for j in self.jobs() for g in j["groups"]):
+            return "存在未确认的回滚，目标保持排空；需先恢复部署任务"
+        return None
 
     async def latest(self) -> str:
         """The head of main in the repository."""
-        repo = self.repo or await git(self.root, "remote", "get-url", "origin")
-        out = await git(self.root, "ls-remote", repo, "refs/heads/main")
-        if not out:
-            raise RuntimeError("无法读取仓库 main 分支")
-        return out.split()[0]
+        repo = self.repo
+        if not repo:
+            try:
+                repo = await git(self.root, "remote", "get-url", "origin", timeout=5)
+            except (RuntimeError, OSError):
+                raise RuntimeError("未配置 deploy.repo，且代码目录没有可用的 origin；无法查询仓库 main") from None
+        try:
+            out = await git(self.root, "ls-remote", repo, "refs/heads/main", timeout=30)
+        except (RuntimeError, OSError):
+            # Git errors can contain credentials from the repository URL. Never send them to the UI.
+            raise RuntimeError("仓库 main 查询失败或超时；请检查仓库配置、网络和读取权限后重试") from None
+        for line in out.splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[1] == "refs/heads/main" and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", fields[0]):
+                return fields[0]
+        raise RuntimeError("仓库未返回有效的 refs/heads/main；无法确定部署目标")
+
+    async def target_blocks(self, revision: str) -> dict[str, str]:
+        """Reject known incompatible history without fetching or changing the checkout.
+
+        New commits absent locally still pass to update_code's authoritative post-fetch checks.
+        In particular, a main that is still on v2 must not invite a rollback from v3.
+        """
+        infos = {"__temple__": self.me, **{gid: c.deploy for gid, c in self.t.galaxies.items()}}
+        if not self.me.get("revision"):
+            return {gid: "中心没有可用的 Git 历史，无法核验 main 兼容性；请先恢复中心 Git 目录"
+                    for gid, info in infos.items() if info.get("revision")}
+        blocked = {}
+        for current in {d.get("revision") for d in infos.values()} - {None, "", revision}:
+            try:
+                incompatible = await _ancestry(self.root, current, revision) == 1
+            except (OSError, RuntimeError):
+                incompatible = False  # This is not evidence of incompatible history.
+            if incompatible:
+                reason = (f"当前版本 {current[:7]} 无法快进到 main {revision[:7]}；禁止回退或覆盖，"
+                          "需先协调 main 发布历史")
+                blocked.update({gid: reason for gid, info in infos.items() if info.get("revision") == current})
+        for group in self.groups(list(infos)):
+            members = group["galaxies"] + (["__temple__"] if group.get("temple") else [])
+            if reason := next((blocked[gid] for gid in members if gid in blocked), None):
+                blocked.update({gid: reason for gid in members})
+        return blocked
 
     # groups
 
@@ -193,29 +260,45 @@ class Deployer:
             k = key(self.me)
             out.setdefault(k, {"key": k, "galaxies": [g for g, c in conns.items() if c.deploy and key(c.deploy) == k],
                                "temple": True})
+        for g in out.values():
+            if g.get("error"):
+                continue
+            infos = [self.me] if g.get("temple") else [conns[gid].deploy for gid in g["galaxies"]]
+            if not any(d.get("revision") and d.get("writable") for d in infos):
+                g["error"] = next((d["error"] for d in infos if d.get("error")), None) or (
+                    "无法确认 Git 版本；需现场部署" if not any(d.get("revision") for d in infos)
+                    else "这组星系都没有写代码目录的权限")
         return list(out.values())
 
     # jobs
 
     async def start(self, galaxies: list[str] | str, by: str, reason: str = "", task_id: str | None = None,
                     revision: str | None = None) -> dict:
-        if any(not t.done() for t in self.running.values()) or \
-                any(j["state"] in ("running", "restarting_temple") for j in self.jobs()):
-            raise ValueError("已有部署在进行中")
-        if any(g.get("recovery_required") for j in self.jobs() for g in j["groups"]):
-            raise ValueError("存在未确认的回滚，目标保持排空；需先恢复部署任务")
+        if reason_blocked := self.blocked_reason():
+            raise ValueError(reason_blocked)
         everything = galaxies in ("all", ["all"])
         if everything:
             ids = [g["id"] for g in self.t.store.galaxies()] + ["__temple__"]
         else:
             ids = [galaxies] if isinstance(galaxies, str) else list(galaxies)
+        groups = self.groups(ids)
+        for group in groups:
+            if group.get("error") and (not everything or group.get("temple")):
+                raise ValueError(group["error"])
         target = revision or await self.latest()
+        target_blocks = await self.target_blocks(target)
+        for group in groups:
+            members = group["galaxies"] + (["__temple__"] if group.get("temple") else [])
+            if error := next((target_blocks[gid] for gid in members if gid in target_blocks), None):
+                if not everything or group.get("temple"):
+                    raise ValueError(error)
+                group["error"] = error
         job = {"id": f"deploy_{int(time.time())}", "by": by, "reason": reason, "task_id": task_id,
                "revision": target, "state": "running", "created_at": time.time(), "finished_at": None,
                "groups": [{"galaxies": g["galaxies"], "temple": g.get("temple", False),
                            # "all" skips galaxies that cannot take part (offline / too old) instead of failing.
                            "state": "skipped" if everything and g.get("error") else "pending",
-                           "error": g.get("error")} for g in self.groups(ids)], "steps": []}
+                           "error": g.get("error")} for g in groups], "steps": []}
         # The temple's group goes first (new temple stays compatible with old galaxies); the job resumes
         # in the restarted temple process.
         job["groups"].sort(key=lambda g: not g["temple"])
@@ -263,7 +346,8 @@ class Deployer:
             await self.step(job, "排空中：等待正在进行的回合、记忆整理和巡检结束", label)
             await self.wait_drained(gids)
             updater = None if g["temple"] else next(
-                (gid for gid in gids if self.t.galaxies[gid].deploy.get("writable")), None)
+                (gid for gid in gids if self.t.galaxies[gid].deploy.get("writable")
+                 and self.t.galaxies[gid].deploy.get("revision")), None)
             if not g["temple"] and updater is None:
                 raise RuntimeError("这组星系都没有写代码目录的权限")
             # Journal before mutation: a lost update RPC response must not lose the rollback target.

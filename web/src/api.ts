@@ -53,7 +53,13 @@ export interface DeployJob {
   groups: { galaxies: string[]; temple: boolean; state: string; error?: string | null; recovery_required?: boolean }[]
   steps: { at: number; galaxy: string | null; text: string }[]
 }
-export interface DeployStatus { temple: { revision: string; host: string }; jobs: DeployJob[]; requests: { id: string; galaxies: unknown; reason: string; state: string }[] }
+export interface DeployInfo { revision: string; host: string; root: string; writable: boolean; error?: string | null }
+export interface DeployLatest { revision: string | null; source?: 'deploy.repo' | 'origin'; ref?: string; error?: string; blocked?: Record<string, string> }
+export interface DeployStatus {
+  temple: DeployInfo; galaxies: Record<string, DeployInfo>; jobs: DeployJob[]
+  blocked?: Record<string, string>; blocked_reason?: string | null
+  requests: { id: string; galaxies: unknown; reason: string; state: string }[]
+}
 
 export interface Directory { agents: Agent[]; galaxies: Galaxy[]; gods?: Record<string, string | null> }
 
