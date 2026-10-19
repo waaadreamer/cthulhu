@@ -167,6 +167,9 @@ function renderSide() {
     list.append(group);
   }
   const nodes = $('#nodes'); nodes.replaceChildren();
+  const online = snap.nodes.filter(n => n.online).length;
+  $('#node-count').textContent = `${online}/${snap.nodes.length}`;
+  $('#node-count').title = `${online} 个在线，共 ${snap.nodes.length} 个`;
   // 固定顺序：local 在前，其余按名字排序；心跳只更新圆点状态，不改变位置。
   const ordered = [...snap.nodes].sort((a, b) => (b.id === 'local') - (a.id === 'local') || a.id.localeCompare(b.id));
   for (const n of ordered) {
@@ -471,6 +474,17 @@ $('#invite-copy').onclick = async () => {
   catch { getSelection().selectAllChildren($('#invite-cmd')); }
   setTimeout(() => ($('#invite-copy').textContent = '复制'), 1500);
 };
+
+// 左栏分区可折叠，状态记在本浏览器。折叠后标题仍显示数量，有新提问时任务区的数量照常更新。
+for (const sec of document.querySelectorAll('#nav .sec')) {
+  const key = 'cthulhu-sec-' + sec.dataset.sec, btn = sec.querySelector('.sec-t');
+  const set = closed => {
+    sec.toggleAttribute('data-collapsed', closed); btn.setAttribute('aria-expanded', String(!closed));
+    localStorage.setItem(key, closed ? '1' : '0');
+  };
+  set(localStorage.getItem(key) === '1');
+  btn.onclick = () => set(!sec.hasAttribute('data-collapsed'));
+}
 
 $('#nav-toggle').onclick = () => document.body.classList.toggle('nav-open');
 addEventListener('keydown', e => { if (e.key === 'Escape' && drawer && !document.querySelector('dialog[open]')) closeDrawer(); });

@@ -97,6 +97,16 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.locator('#tasks .archive .task').click();
     await page.locator('#d-controls').getByText('取消归档').click();
     await page.locator('#tasks > .task').waitFor();
+    // 左栏：节点在任务上方，两个分区都能折叠，刷新后保持。
+    assert(await page.evaluate(() => document.querySelector('[data-sec=nodes]').compareDocumentPosition(document.querySelector('[data-sec=tasks]')) & Node.DOCUMENT_POSITION_FOLLOWING));
+    await page.locator('[data-sec=nodes] .sec-t').click();
+    assert(await page.locator('#nodes').isHidden());
+    await page.locator('[data-sec=tasks] .sec-t').click();
+    assert(await page.locator('#tasks').isHidden());
+    await page.reload(); await page.locator('#chat .reply').first().waitFor();
+    assert(await page.locator('#nodes').isHidden()); assert(await page.locator('#tasks').isHidden());
+    await page.locator('[data-sec=nodes] .sec-t').click(); await page.locator('[data-sec=tasks] .sec-t').click();
+    assert(await page.locator('#nodes').isVisible()); assert(await page.locator('#tasks').isVisible());
     // 添加节点命令
     await page.locator('#add-node').click(); await page.locator('#invite-form [name=name]').fill('gpu1');
     await page.locator('#invite-form .btn.primary').click(); await page.locator('#invite-cmd').getByText('curl -fsSL', { exact: false }).waitFor();

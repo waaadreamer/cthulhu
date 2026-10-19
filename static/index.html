@@ -12,10 +12,16 @@
 <div id="app">
   <aside id="nav" aria-label="任务与节点">
     <div class="brand"><span class="logo" aria-hidden="true">✳</span><span>cthulhu</span><span id="conn" class="conn" title="连接中"></span></div>
-    <div class="sec-h"><h2>任务 <span id="task-count" class="count"></span></h2><button id="new-task" class="icon" type="button" title="新建任务" aria-label="新建任务">＋</button></div>
-    <div id="tasks" class="tasks"></div>
-    <div class="sec-h"><h2>节点</h2><button id="add-node" class="icon" type="button" title="添加节点" aria-label="添加节点">＋</button></div>
-    <div id="nodes" class="nodes"></div>
+    <section class="sec" data-sec="nodes">
+      <div class="sec-h"><button class="sec-t" type="button" aria-expanded="true" aria-controls="nodes"><span class="caret" aria-hidden="true">›</span><h2>节点 <span id="node-count" class="count"></span></h2></button>
+        <button id="add-node" class="icon" type="button" title="添加节点" aria-label="添加节点">＋</button></div>
+      <div id="nodes" class="nodes"></div>
+    </section>
+    <section class="sec" data-sec="tasks">
+      <div class="sec-h"><button class="sec-t" type="button" aria-expanded="true" aria-controls="tasks"><span class="caret" aria-hidden="true">›</span><h2>任务 <span id="task-count" class="count"></span></h2></button>
+        <button id="new-task" class="icon" type="button" title="新建任务" aria-label="新建任务">＋</button></div>
+      <div id="tasks" class="tasks"></div>
+    </section>
   </aside>
 
   <main id="main">

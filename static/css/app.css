@@ -69,7 +69,12 @@ body.drawer-open #app { grid-template-columns: var(--nav) minmax(0, 1fr) var(--d
 .logo { color: var(--live); font-size: 19px; }
 .conn { margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
 .conn[data-ok=true] { background: var(--done); } .conn[data-ok=false] { background: var(--bad); }
-.sec-h { display: flex; align-items: center; justify-content: space-between; padding: 18px 10px 6px 16px; }
+.sec-h { display: flex; align-items: center; justify-content: space-between; padding: 14px 10px 6px 8px; }
+.sec-t { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; border: 0; background: none; padding: 3px 8px; border-radius: 7px; cursor: pointer; text-align: left; }
+.sec-t:hover { background: var(--s1); }
+.sec-t .caret { color: var(--ink-3); font-size: 14px; line-height: 1; transition: transform .15s; transform: rotate(90deg); }
+.sec[data-collapsed] .sec-t .caret { transform: none; }
+.sec[data-collapsed] > .tasks, .sec[data-collapsed] > .nodes { display: none; }
 .sec-h h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink-2); }
 .count { color: var(--ink-3); font-weight: 400; margin-left: 4px; }
 .tasks, .nodes { padding: 0 8px; display: flex; flex-direction: column; gap: 2px; }
