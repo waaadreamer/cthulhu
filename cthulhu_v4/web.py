@@ -109,6 +109,8 @@ class Web:
                 return c.delegate(body)
             if path == '/api/settings':
                 return c.set_master_decides(body.get('master_decides'))
+            if path == '/api/task/archive':
+                return c.archive_task(body)
             if path == '/api/control':
                 return c.control(body, actor='owner')
             if path == '/api/master':

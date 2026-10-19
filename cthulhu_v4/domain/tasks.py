@@ -97,6 +97,18 @@ class Tasks:
                task=task['id'], visible=True)
         return task
 
+    def archive_task(self, p):
+        """归档只是收起：任务、事件、原生会话都保留，随时可取消归档。只允许已结束的任务。"""
+        s = self.store
+        t = s.get('task', p['task_id'])
+        archived = bool(p.get('archived', True))
+        if archived and t['state'] not in TERMINAL:
+            raise ValueError('只能归档已完成或已取消的任务；进行中的任务请先取消')
+        t['archived'] = archived
+        s.put('task', t)
+        s.emit('archive', ('归档' if archived else '取消归档') + '：' + t['title'], actor='owner', task=t['id'])
+        return t
+
     def active_task(self, actor):
         t = self.task_for(actor)
         if not t or t['state'] in TERMINAL or t['state'] == 'paused':

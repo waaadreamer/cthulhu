@@ -53,8 +53,14 @@ class CoreTests(unittest.TestCase):
         # 全权模式：Master 不能再转问；开启时等待主人的问题自动交回。
         t2 = self.create(); q2 = self.question(t2)
         self.c.tool('master', 'ask_owner', dict(question_id=q2['id'], version=1, recommendation='B'))
+        before = len(self.c.store.all('message'))
         with self.c.store.atomic(): result = self.c.set_master_decides(True)
         self.assertEqual(result['delegated'], 1)
+        # 开关本身不额外唤醒 Master（只有交回的那个问题会通知）。
+        self.assertEqual(len(self.c.store.all('message')) - before, 1)
+        with self.c.store.atomic(): self.c.set_master_decides(False)
+        self.assertEqual(len(self.c.store.all('message')) - before, 1)
+        with self.c.store.atomic(): self.c.set_master_decides(True)
         self.assertEqual(self.c.store.get('question', q2['id'])['state'], 'master')
         with self.assertRaisesRegex(ValueError, '全权'):
             self.c.tool('master', 'ask_owner', dict(question_id=q['id'], version=3, recommendation='A'))
@@ -63,6 +69,34 @@ class CoreTests(unittest.TestCase):
         # 主人仍可事后修正。
         with self.c.store.atomic(): self.c.answer('owner', dict(question_id=q['id'], version=4, answer='B'))
         self.assertEqual([h.get('text') for h in self.c.store.get('question', q['id'])['history'] if h.get('text')][-2:], ['A', 'B'])
+
+    def test_archive_only_finished_and_hidden_from_master(self):
+        t = self.create()
+        with self.assertRaisesRegex(ValueError, '已完成或已取消'):
+            with self.c.store.atomic(): self.c.archive_task({'task_id': t['id']})
+        self.c.tool('master', 'control_task', dict(task_id=t['id'], action='cancel', reason='不需要了'))
+        with self.c.store.atomic(): self.c.archive_task({'task_id': t['id']})
+        listed = self.c.tool('master', 'list_tasks', {})
+        self.assertNotIn(t['id'], [x['id'] for x in listed['tasks']])
+        self.assertNotIn(t['agent'], [a['id'] for a in listed['agents']])
+        self.assertTrue(self.c.snapshot()['tasks'][0]['archived'])  # 界面仍能看到
+        with self.c.store.atomic(): self.c.archive_task({'task_id': t['id'], 'archived': False})
+        self.assertIn(t['id'], [x['id'] for x in self.c.tool('master', 'list_tasks', {})['tasks']])
+
+    def test_read_task_events_is_bounded(self):
+        t = self.create()
+        for i in range(200):
+            self.c.store.emit('native:item/agentMessage/delta', actor=t['agent'], data={'itemId': 'x', 'delta': 'y' * 50})
+            self.c.store.emit('native:thread/tokenUsage/updated', actor=t['agent'], data={'pad': 'z' * 5000})
+        self.c.store.emit('native:item/completed', actor=t['agent'],
+                          data={'item': {'id': 'c', 'type': 'commandExecution', 'aggregatedOutput': 'o' * 100000}})
+        r = self.c.tool('master', 'read_task_events', {'task_id': t['id']})
+        kinds = {e['kind'] for e in r['events']}
+        self.assertNotIn('native:thread/tokenUsage/updated', kinds)
+        self.assertNotIn('native:item/agentMessage/delta', kinds)
+        self.assertLess(len(json.dumps(r, ensure_ascii=False)), 30000)
+        out = next(e for e in r['events'] if e['kind'] == 'native:item/completed')['data']['item']['aggregatedOutput']
+        self.assertIn('截断，共 100000 字符', out)
 
     def test_owner_late_correction_is_preserved(self):
         t = self.create(); q = self.question(t)

@@ -93,8 +93,8 @@ class Questions:
                 if q['state'] == 'owner':
                     self.delegate({'question_id': q['id']}, reason='已开启 Master 全权回答，问题交回 Master'); moved += 1
         s.emit('settings', 'Master 全权回答：' + ('开启' if on else '关闭'), actor='owner', data=prefs, visible=True)
-        self.enqueue('owner', 'master', '主人已开启「Master 全权回答」：之后执行者的问题请自行判断并 answer_question，不要 ask_owner；回答与理由仍会公开，主人可能事后修正。'
-                     if on else '主人已关闭「Master 全权回答」：需要主人决定的问题可以再用 ask_owner 转交。', 8, copy=True)
+        # 不为开关本身唤醒 Master：设置随每回合的 current_state.master_decides 送达，
+        # 开启后 ask_owner 也会被拒绝并说明原因，没有必要额外花一个回合。
         return {'master_decides': bool(on), 'delegated': moved}
 
     def close_questions(self, task_id):

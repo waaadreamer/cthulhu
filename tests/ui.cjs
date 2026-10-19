@@ -60,6 +60,7 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.locator('#questions .btn.primary').click();
     await page.locator('#timeline .card.result').waitFor();
     await page.locator('#d-state').getByText('已完成').waitFor();
+    const taskHash = await page.evaluate(() => location.hash);
     // 工具与命令默认折叠
     const steps = page.locator('#timeline details.step');
     assert((await steps.count()) >= 2);
@@ -70,6 +71,15 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     const hash = await page.evaluate(() => location.hash); assert(hash.startsWith('#task='));
     await page.keyboard.press('Escape'); assert(await page.locator('#drawer').isHidden());
     await page.goto(url + '/' + hash); await page.locator('#timeline .card.result').waitFor();
+    // 归档：从列表收起到“已归档”，取消归档后回来。
+    await page.locator('#d-controls').getByText('归档', { exact: true }).click();
+    await page.locator('#drawer').waitFor({ state: 'hidden' });
+    await page.locator('#tasks .archive summary').waitFor();
+    assert.equal(await page.locator('#tasks > .task').count(), 0);
+    await page.locator('#tasks .archive summary').click();
+    await page.locator('#tasks .archive .task').click();
+    await page.locator('#d-controls').getByText('取消归档').click();
+    await page.locator('#tasks > .task').waitFor();
     // 添加节点命令
     await page.locator('#add-node').click(); await page.locator('#invite-form [name=name]').fill('gpu1');
     await page.locator('#invite-form .btn.primary').click(); await page.locator('#invite-cmd').getByText('curl -fsSL', { exact: false }).waitFor();

@@ -134,22 +134,34 @@ function liveInfo(aid, model) {
 const isRunning = aid => !!snap.pending?.[aid]?.since;
 
 // ---- 左栏 ----
+function taskRow(t) {
+  const q = snap.questions.some(q => q.task === t.id && ['master', 'owner'].includes(q.state));
+  const overdue = !DONE.has(t.state) && t.deadline < snap.now;
+  return el('button', { type: 'button', class: 'task' + (drawer?.task === t.id ? ' on' : ''), 'data-state': t.state,
+    'aria-pressed': String(drawer?.task === t.id), onclick: () => openTask(t.id) },
+    el('span', { class: 'dot' + (isRunning(t.agent) ? ' busy' : ''), 'aria-hidden': 'true' }),
+    el('span', { class: 'task-main' }, el('span', { class: 'task-t', text: t.title }),
+      el('span', { class: 'task-m' }, el('span', { text: STATE[t.state] || t.state }), el('span', { text: t.node }),
+        q ? el('span', { class: 'ask', text: '有提问' }) : null,
+        overdue ? el('span', { class: 'bad', text: '超期' }) : null)),
+    el('span', { class: 'chev', 'aria-hidden': 'true', text: '›' }));
+}
+
+// 已归档任务收进底部的折叠组；展开状态单独记住，否则每秒重绘会把它收起。
+let archiveOpen = false;
 function renderSide() {
   const list = $('#tasks'); list.replaceChildren();
-  const tasks = [...snap.tasks].sort((a, b) => DONE.has(a.state) - DONE.has(b.state) || b.created_at - a.created_at);
+  const byRecent = (a, b) => DONE.has(a.state) - DONE.has(b.state) || b.created_at - a.created_at;
+  const tasks = snap.tasks.filter(t => !t.archived).sort(byRecent);
+  const archived = snap.tasks.filter(t => t.archived).sort((a, b) => (b.completed_at || b.created_at) - (a.completed_at || a.created_at));
   $('#task-count').textContent = tasks.filter(t => !DONE.has(t.state)).length || '';
-  if (!tasks.length) list.append(el('p', { class: 'muted pad', text: '还没有任务' }));
-  for (const t of tasks) {
-    const q = snap.questions.some(q => q.task === t.id && ['master', 'owner'].includes(q.state));
-    const overdue = !DONE.has(t.state) && t.deadline < snap.now;
-    list.append(el('button', { type: 'button', class: 'task' + (drawer?.task === t.id ? ' on' : ''), 'data-state': t.state,
-      'aria-pressed': String(drawer?.task === t.id), onclick: () => openTask(t.id) },
-      el('span', { class: 'dot' + (isRunning(t.agent) ? ' busy' : ''), 'aria-hidden': 'true' }),
-      el('span', { class: 'task-main' }, el('span', { class: 'task-t', text: t.title }),
-        el('span', { class: 'task-m' }, el('span', { text: STATE[t.state] || t.state }), el('span', { text: t.node }),
-          q ? el('span', { class: 'ask', text: '有提问' }) : null,
-          overdue ? el('span', { class: 'bad', text: '超期' }) : null)),
-      el('span', { class: 'chev', 'aria-hidden': 'true', text: '›' })));
+  if (!tasks.length) list.append(el('p', { class: 'muted pad', text: archived.length ? '没有未归档的任务' : '还没有任务' }));
+  for (const t of tasks) list.append(taskRow(t));
+  if (archived.length) {
+    const group = el('details', { class: 'archive', open: archiveOpen, ontoggle: () => (archiveOpen = group.open) },
+      el('summary', {}, el('span', { text: '已归档' }), el('span', { class: 'count', text: archived.length })),
+      ...archived.map(taskRow));
+    list.append(group);
   }
   const nodes = $('#nodes'); nodes.replaceChildren();
   // 固定顺序：local 在前，其余按名字排序；心跳只更新圆点状态，不改变位置。
@@ -262,6 +274,9 @@ class Drawer {
       ctl.append(el('button', { type: 'button', class: 'btn' + (action === 'cancel' ? ' danger' : ''), text: { pause: '暂停', resume: '恢复', cancel: '取消' }[action],
         onclick: () => (action !== 'cancel' || confirm('取消任务？已有文件与外部作业不会回滚。')) &&
           act(() => api('api/control', { task_id: t.id, action, reason: '主人通过页面操作' })) }));
+    // 归档只是收起，可随时取消；只对已结束的任务开放。
+    if (DONE.has(t.state)) ctl.append(el('button', { type: 'button', class: 'btn', text: t.archived ? '取消归档' : '归档',
+      onclick: () => act(async () => { await api('api/task/archive', { task_id: t.id, archived: !t.archived }); if (!t.archived) closeDrawer(); }) }));
     $('#d-form').hidden = DONE.has(t.state);
   }
   // 单飞：上一次轮询未结束时直接复用，避免同一批事件并发拉取、游标互相覆盖。

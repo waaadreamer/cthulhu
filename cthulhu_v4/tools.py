@@ -17,7 +17,7 @@ COMMON = [
     spec('list_nodes', '查看星系节点在线状态、容量与原生后端；任务必须绑定可执行目标的节点。'),
     spec('list_tasks', '查看任务、DDL、执行者与等待状态。'),
     spec('read_messages', '读取自己最近的收发消息和处理状态，恢复时核对 failed/unknown 输入，不能直接重放副作用。', {'limit': I}),
-    spec('read_task_events', '读取与侧边栏完全相同的原始事件；按 next_after 翻页，不把截断当作没有进展。',
+    spec('read_task_events', '读取任务活动（与侧栏同源，已去掉遥测与流式增量，长字段截断）；默认 60 条，按 next_after 翻页，不把截断当作没有进展。',
          {'task_id': S, 'after': I, 'limit': I}, ['task_id']),
     spec('send_message', '异步发送消息；10 打断当前回合并优先执行（仅 Master 可用），其余只排序；返回只代表入队。无需对无信息增量的消息回复。',
          {'to': S, 'text': S, 'priority': I, 'reply_to': S}, ['to', 'text']),
