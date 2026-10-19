@@ -63,7 +63,7 @@ class App:
         loop = asyncio.get_running_loop()
         c = self.center
         # 本机节点：与远端节点同一实现，只是链路在进程内。
-        self.node = Node(self.state / 'local-node', capacity=self.local_capacity)
+        self.node = Node(self.state / 'local-node', capacity=self.local_capacity, protected=[self.state])
         self.node.link = LocalLink(c.hub, self.node)
         c.hub.attach(LOCAL, self.node.link)
         self.bridge = Bridge(self.node, loop); self.bridge.start()

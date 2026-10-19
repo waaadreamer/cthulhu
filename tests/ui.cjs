@@ -34,10 +34,27 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     // 新建任务 → 抽屉自动打开
     await page.locator('#new-task').click();
     const f = page.locator('#task-form');
-    await f.locator('[name=title]').fill('试用问答流程'); await f.locator('[name=description]').fill('只运行模拟任务');
-    await f.locator('[name=acceptance]').fill('问题得到回答并完成'); await f.locator('[name=cwd]').fill(state);
+    // 工作目录与中心状态目录分开：状态目录受保护，不能经网页读取。
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'cthulhu-work-'));
+    fs.writeFileSync(path.join(work, 'report.md'), '# 检查结论\n\n全部通过。');
+    await f.locator('[name=title]').fill('试用问答流程'); await f.locator('[name=description]').fill('只运行模拟任务，参考 ' + path.join(work, 'report.md'));
+    await f.locator('[name=acceptance]').fill('问题得到回答并完成'); await f.locator('[name=cwd]').fill(work);
     await f.locator('button[type=submit]').click();
     await page.locator('#drawer .task-card').waitFor();
+    // 任务卡片里的裸路径按任务所在节点渲染为固定链接，点开后由节点读取并渲染 Markdown。
+    const link = page.locator('#drawer .task-card a.file-link');
+    assert.equal(await link.getAttribute('data-ref'), 'local::' + path.join(work, 'report.md'));
+    await link.click();
+    await page.locator('#viewer-body .doc').getByText('全部通过。').waitFor();
+    assert((await page.evaluate(() => location.hash)).startsWith('#file='));
+    await page.locator('#viewer-close').click();
+    assert((await page.evaluate(() => location.hash)).startsWith('#task='));
+    // 中心状态目录（含 web-token）不能经网页读出。
+    await page.evaluate(p => { location.hash = '#file=' + encodeURIComponent('local::' + p); }, path.join(state, 'web-token'));
+    await page.locator('#viewer-body .bad').getByText('凭证', { exact: false }).waitFor();
+    await page.locator('#viewer-close').click();
+    assert((await page.evaluate(() => location.hash)).startsWith('#task='));
+    errors.splice(0);  // 上面这次 400 是预期的拒绝
     await page.locator('#timeline .card.question').waitFor();
     // 转给我 → 交给 Master：问题回到 Master 手里，卡片仍在、输入框仍可用。
     await page.locator('#questions').getByText('模拟：转给我').click();

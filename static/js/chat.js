@@ -1,5 +1,5 @@
 // 主会话：主人消息、Master 回复、公开汇报与任务动态。Master 每个回合的工作过程折叠成一组。
-import { el, markdown, clock } from './dom.js';
+import { el, markdown, clock, rich } from './dom.js';
 import { Model } from './model.js';
 import { View, Live, render, who, elapsed } from './render.js';
 
@@ -44,8 +44,8 @@ class Process {
 
 export class Chat {
   constructor(root, opts) {
-    const { openTask, taskTitle } = opts;
-    Object.assign(this, { root, opts, openTask, taskTitle });
+    const { openTask, taskTitle, taskNode } = opts;
+    Object.assign(this, { root, opts, openTask, taskTitle, taskNode: taskNode || (() => null) });
     this.proc = null; this.dirty = new Set(); this.demo = false;
     this.live = new Live(root);
   }
@@ -96,7 +96,7 @@ export class Chat {
     else if (e.kind === 'feishu_in') text = `${e.data?.sender_id || '未知发送者'}：${e.text}`;
     else if (e.kind === 'completed') text = `${title || ''}${title ? ' — ' : ''}${e.text}`;
     const row = el('div', { class: 'event ' + (LEVEL[e.kind] || 'info') },
-      el('span', { class: 'event-k', text: LINES[e.kind] }), el('span', { class: 'event-t', text }), el('time', { text: clock(e.at) }));
+      el('span', { class: 'event-k', text: LINES[e.kind] }), el('span', { class: 'event-t' }, rich(text, { node: e.task ? this.taskNode(e.task) : null })), el('time', { text: clock(e.at) }));
     if (e.task) row.append(el('button', { class: 'link', type: 'button', text: '过程 ›', onclick: () => this.openTask(e.task) }));
     this.root.append(row);
   }

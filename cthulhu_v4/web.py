@@ -97,6 +97,8 @@ class Web:
                                         conversation=q('view') == 'conversation', ui=True,
                                         before=None if before is None else int(before), compact=before is not None)
                 return {'events': events, 'more': len(events) >= limit, 'highwater': c.store.highwater()}
+            if path == '/api/file':
+                return await c.files.read(q('ref'), refresh=q('refresh') == '1')
             raise ValueError('未知接口')
         with c.store.atomic():
             if path == '/api/chat':

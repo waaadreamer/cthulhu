@@ -75,6 +75,11 @@ class Hub:
         if link:
             link.wake()
 
+    def wake_node(self, ident):
+        link = self.links.get(ident)
+        if link:
+            link.wake()
+
     def valid_job(self, node, ident):
         j = self.c.store.get('lease', ident)
         if j['node'] != node:
@@ -169,7 +174,7 @@ class Hub:
             n.update(instance=body['instance'], seen=c.clock(), version=body.get('version'),
                      capacity=max(1, min(int(body.get('capacity', 1)), 32)),
                      backends=[b for b in body.get('backends', []) if b in {'demo', 'codex', 'claude'}],
-                     host=body.get('host'), home=body.get('home'))
+                     host=body.get('host'), home=body.get('home'), features=list(body.get('features') or []))
             for e in body.get('events', []):
                 if e['seq'] <= n['ack']:
                     continue
@@ -206,7 +211,8 @@ class Hub:
                 s.emit('dispatch', '已派发至节点 ' + node, target=a['id'], task=t and t['id'],
                        data={'job': j['id'], 'node': node, 'message_id': m['id']})
                 jobs.append(j); free -= 1
-            return {'ack': n['ack'], 'lease_seconds': LEASE, 'jobs': jobs}
+            # 文件读取请求不是业务状态，不进事务、不落盘；随同步响应捎给节点即可。
+            return {'ack': n['ack'], 'lease_seconds': LEASE, 'jobs': jobs, 'files': c.files.requests_for(node)}
 
     def tool(self, node, body):
         job = self.valid_job(node, body['job'])
@@ -221,4 +227,6 @@ class Hub:
             return self.sync(node, body)
         if op == 'tool':
             return self.tool(node, body)
+        if op == 'file':
+            return self.c.files.deliver(node, body)
         raise ValueError('未知节点操作')

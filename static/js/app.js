@@ -1,5 +1,6 @@
 // 页面主控：轮询状态与事件，左栏任务/节点，中间 Master 会话，右侧抽屉展示某个 old_one 的完整过程。
-import { $, el, api, auth, toast, markdown, stamp, span } from './dom.js';
+import { $, el, api, auth, toast, markdown, stamp, span, fileCtx } from './dom.js';
+import { initViewer, fileFromHash } from './viewer.js';
 import { Model } from './model.js';
 import { View, Live } from './render.js';
 import { Chat } from './chat.js';
@@ -8,7 +9,8 @@ const STATE = { running: '进行中', waiting: '等待', paused: '已暂停', co
 const DONE = new Set(['completed', 'cancelled']);
 let snap = null, chatCursor = 0, polling = false, drawer = null, priority = 9, sentAt = null;
 
-const chat = new Chat($('#chat'), { openTask: id => openTask(id), taskTitle: id => snap?.tasks.find(t => t.id === id)?.title });
+const chat = new Chat($('#chat'), { openTask: id => openTask(id), taskTitle: id => snap?.tasks.find(t => t.id === id)?.title,
+  taskNode: id => snap?.tasks.find(t => t.id === id)?.node });
 
 // ---- 登录 ----
 function showLogin(message) {
@@ -27,6 +29,7 @@ async function poll() {
   polling = true;
   try {
     snap = await api('api/state');
+    fileCtx.nodes = snap.nodes.map(n => n.id);
     chat.demo = snap.agents.find(a => a.id === 'master')?.backend === 'demo';
     renderSide(); renderQuestions(); renderMaster();
     const stick = nearBottom($('#chat'));
@@ -224,7 +227,7 @@ function renderQuestions() {
       card.countdown = q.deadline ? el('span', { class: 'muted' }) : null;
       card.head.replaceChildren(el('span', { class: 'tag ' + (q.state === 'owner' ? 'warn' : ''), text: q.state === 'owner' ? '需要你决定' : 'Master 处理中' }),
         el('button', { class: 'link', type: 'button', text: t?.title || q.agent, onclick: () => openTask(q.task) }), card.countdown);
-      card.body.replaceChildren(markdown(q.text));
+      card.body.replaceChildren(markdown(q.text, { node: t?.node }));
       card.input.placeholder = q.recommendation ? '建议：' + q.recommendation : '你的回答';
       card.extra.replaceChildren(
         q.state === 'owner' ? el('button', { class: 'btn ghost', type: 'button', text: '交给 Master', title: '不等超时，立即让 Master 决定',
@@ -248,16 +251,17 @@ class Drawer {
     this.model = new Model(t.agent, 'drawer', { harnessTools: this.harness });
     this.pager?.close();
     $('#timeline').replaceChildren();
-    this.view = new View($('#timeline'), this.model);
+    this.ctx = { node: t.node };
+    this.view = new View($('#timeline'), this.model, this.ctx);
     this.live = new Live($('#timeline'));
     this.pager = new Pager($('#timeline'), 'agent=' + encodeURIComponent(this.agent), this.agent, (events, older) => {
       if (!older) { for (const e of events) this.model.apply(e); this.view.update(); return; }
-      const tmp = el('div'), m = new Model(this.agent, 'drawer', { harnessTools: this.harness }), v = new View(tmp, m);
+      const tmp = el('div'), m = new Model(this.agent, 'drawer', { harnessTools: this.harness }), v = new View(tmp, m, this.ctx);
       for (const e of events) m.apply(e); v.update();
       this.pager.sentinel.after(...tmp.children);
     });
     $('#drawer').hidden = false; document.body.classList.add('drawer-open');
-    history.replaceState(null, '', '#task=' + taskId);
+    if (!location.hash.startsWith('#file=')) history.replaceState(null, '', '#task=' + taskId);
   }
   head() {
     const t = snap.tasks.find(t => t.id === this.task); if (!t) return;
@@ -457,7 +461,11 @@ addEventListener('keydown', e => { if (e.key === 'Escape' && drawer && !document
 
 // ---- 启动 ----
 // #task=<id> 可直达某个任务的过程；在已打开的页面里改 hash 也生效。
-const fromHash = () => { const id = location.hash.match(/task=([\w-]+)/)?.[1]; if (id) openTask(id); };
+const fromHash = () => {
+  if (fileFromHash()) return;
+  const id = location.hash.match(/task=([\w-]+)/)?.[1]; if (id) openTask(id);
+};
+initViewer({ returnHash: () => (drawer ? '#task=' + drawer.task : '') });
 addEventListener('hashchange', fromHash);
 setPriority(9);
 if (!auth.token) showLogin(); else poll().then(fromHash);

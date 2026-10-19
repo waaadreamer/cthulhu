@@ -134,6 +134,20 @@
   </form>
 </dialog>
 
+<dialog id="viewer-dialog" class="viewer" aria-label="文件">
+  <header class="viewer-head">
+    <div id="viewer-crumbs"></div>
+    <div class="viewer-actions">
+      <button id="viewer-raw" class="btn ghost" type="button" hidden>查看源码</button>
+      <button id="viewer-copy" class="btn ghost" type="button">复制链接</button>
+      <button id="viewer-refresh" class="btn ghost" type="button">刷新</button>
+      <button id="viewer-close" class="icon" type="button" aria-label="关闭">✕</button>
+    </div>
+  </header>
+  <div id="viewer-meta" class="viewer-meta"></div>
+  <div id="viewer-body" class="viewer-body"></div>
+</dialog>
+
 <div id="toast" role="status" hidden></div>
 </body>
 </html>

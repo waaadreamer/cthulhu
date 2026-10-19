@@ -77,3 +77,22 @@ const item = (actor, it, done = true) => ev(actor, 'native:item/' + (done ? 'com
 
 assert.equal(unwrapShell("/bin/bash -lc 'echo '\\''hi'\\'''"), "echo 'hi'");
 console.log('test_model: ok');
+
+// 文件链接识别：固定写法、裸绝对路径、代码与 Markdown 链接里的路径；不误伤 URL 与普通文字。
+{
+  const { scan, fileCtx } = await import('../static/js/dom.js');
+  fileCtx.nodes = ['S', 'R6003', 'ali'];
+  const files = (t, ctx) => scan(t, ctx).filter(g => g.type === 'file').map(g => (g.node || '?') + '::' + g.path);
+  assert.deepEqual(files('S 节点：report.md (/home/wangzeyuan/code-reviews/t_80825262-20261019/report.md)'),
+    ['S::/home/wangzeyuan/code-reviews/t_80825262-20261019/report.md']);
+  assert.deepEqual(files('见 S::/data/run/config.yaml。'), ['S::/data/run/config.yaml']);
+  assert.deepEqual(files('输出在 `/tmp/out/log.txt`'), ['?::/tmp/out/log.txt']);
+  assert.deepEqual(files('输出在 `/tmp/out/log.txt`', { node: 'R6003' }), ['R6003::/tmp/out/log.txt']);
+  assert.deepEqual(files('[报告](ali::/srv/a.md) 和 https://example.com/a/b'), ['ali::/srv/a.md']);
+  assert.deepEqual(files('比例 3/4，日期 2026/10/19，单位 MB/s'), []);
+  assert.deepEqual(files('/root/a.py:12 处报错'), ['?::/root/a.py']);
+  assert.equal(scan('访问 https://h/x/y').find(g => g.type === 'url').href, 'https://h/x/y');
+  // 节点名大小写严格匹配，不把 “sali” 当成 ali。
+  assert.deepEqual(files('sali 上的 /a/b'), ['?::/a/b']);
+}
+console.log('test_model: files ok');

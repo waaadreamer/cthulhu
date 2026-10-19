@@ -132,7 +132,7 @@ async def run_node(args):
         raise SystemExit(f'{base}/node.json 不存在：先用网页生成的命令安装/加入')
     lock = lock_dir(base / 'state', 'node.lock')
     try:
-        node = Node(base / 'state', capacity=args.capacity)
+        node = Node(base / 'state', capacity=args.capacity, protected=[base])
     except RuntimeError as e:
         raise SystemExit(str(e))
     node.link = RemoteLink(config['center'], config['node'], token=config['token'], pin=config.get('pin'),

@@ -14,6 +14,7 @@ from .domain.messages import Messages
 from .domain.questions import Questions
 from .domain.review import Review
 from .domain.tasks import Tasks
+from .files import FileService
 from .hub import Hub
 from .store import Store
 from .tools import dispatch, tools_for
@@ -34,6 +35,7 @@ class Center(Messages, Questions, Tasks, Review):
         self.uid = uid
         self.hub = Hub(self)
         self.feishu = None  # 由 App 按启动参数挂载；没有它时中心完全不接触飞书
+        self.files = FileService(self)
         s = self.store
         with s.atomic():
             if not s.find('agent', 'master'):

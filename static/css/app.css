@@ -259,6 +259,44 @@ pre.cmd { color: var(--ink); }
 .evidence { margin-top: 8px; font-size: 13px; color: var(--ink-2); } .evidence summary { cursor: pointer; color: var(--ink-3); }
 .long .link { margin-top: 6px; }
 
+/* ---------- 文件链接与查看器 ---------- */
+a.file-link { color: var(--info); text-decoration: none; border-bottom: 1px dotted color-mix(in srgb, var(--info) 55%, transparent); overflow-wrap: anywhere; }
+a.file-link:hover { color: var(--live); border-bottom-style: solid; }
+a.file-link code { color: inherit; }
+a.file-link.unresolved { color: var(--ink-2); }
+pre a.file-link { border-bottom-color: color-mix(in srgb, var(--info) 35%, transparent); }
+dialog.viewer { width: min(1100px, 94vw); height: min(86vh, 900px); padding: 0; display: flex; flex-direction: column; }
+dialog.viewer:not([open]) { display: none; }
+.viewer-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+#viewer-crumbs { flex: 1; min-width: 0; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; font-family: var(--mono); font-size: 12.5px; }
+.crumbs a { color: var(--ink-2); text-decoration: none; } .crumbs a:hover { color: var(--live); }
+.crumbs .here { color: var(--ink); font-weight: 600; } .crumbs .sep { color: var(--ink-3); padding: 0 1px; }
+.crumb-node { color: var(--live); font-weight: 600; margin-right: 6px; }
+.viewer-actions { display: flex; align-items: center; gap: 4px; }
+.viewer-meta { display: flex; gap: 14px; padding: 6px 16px; font-size: 12px; color: var(--ink-3); border-bottom: 1px solid var(--line); }
+.viewer-meta:empty { display: none; }
+.viewer-meta .warn { color: var(--need); }
+.viewer-body { flex: 1; overflow: auto; }
+.viewer-body .loading::after { content: '…'; }
+.doc { max-width: 78ch; margin: 0 auto; padding: 24px 28px 48px; font: 15px/1.75 var(--serif); }
+.doc .md h3, .doc .md h4 { font-size: 17px; margin-top: 1.4em; }
+.code-view { margin: 0; padding: 12px 0; font-size: 12.5px; line-height: 1.6; counter-reset: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+.code-view .ln { display: block; padding: 0 16px 0 64px; position: relative; }
+.code-view .ln::before { content: attr(data-n); position: absolute; left: 0; width: 48px; text-align: right; color: var(--ink-3); }
+.code-view .ln:hover { background: var(--s1); }
+.dir { list-style: none; margin: 0; padding: 8px 0; font-size: 13px; }
+.dir li { display: grid; grid-template-columns: 1fr auto 120px; gap: 16px; padding: 4px 18px; }
+.dir li:hover { background: var(--s1); }
+.dir a { color: var(--ink); text-decoration: none; font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.dir li[data-dir=true] a { color: var(--info); }
+.dir a:hover { color: var(--live); }
+.dir .muted, .dir time { text-align: right; font-size: 12px; }
+.img-box { display: grid; place-items: center; padding: 20px; min-height: 100%; }
+.img { max-width: 100%; max-height: 75vh; border-radius: 8px; background: repeating-conic-gradient(var(--s1) 0 25%, var(--s2) 0 50%) 50% / 16px 16px; }
+.pick-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.pick-row .btn { text-decoration: none; }
+
 /* ---------- 登录与对话框 ---------- */
 #login { position: fixed; inset: 0; display: grid; place-items: center; z-index: 10; background: var(--bg); }
 .login-card { width: min(380px, 90vw); text-align: center; display: flex; flex-direction: column; gap: 12px; }

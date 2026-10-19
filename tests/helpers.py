@@ -23,7 +23,7 @@ class Harness:
 
     def __init__(self, path, **kw):
         self.c = Center(path / 'center', **kw)
-        self.node = Node(path / 'local-node', backends=['demo', 'codex', 'claude'])
+        self.node = Node(path / 'local-node', backends=['demo', 'codex', 'claude'], protected=[path / 'center'])
         self.node.link = LocalLink(self.c.hub, self.node)
         self.c.hub.attach(LOCAL, self.node.link)
         self.bridge = Bridge(self.node, asyncio.get_running_loop()); self.bridge.start()

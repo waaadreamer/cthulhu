@@ -16,6 +16,7 @@ import socket
 import time
 import uuid
 
+from .files import FEATURE, MAX_BYTES, read_path
 from .runtime import make_runtime
 from .store import Store
 from .util import PROTOCOL, process_alive
@@ -53,11 +54,14 @@ class Turn:
 
 
 class Node:
-    def __init__(self, state_dir, *, capacity=2, backends=None, link=None):
+    def __init__(self, state_dir, *, capacity=2, backends=None, link=None, protected=()):
         self.state_dir = Path(state_dir).resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.store = Store(self.state_dir / 'node.db')
         self.capacity = capacity
+        # 网页可以打开节点上的文件，但凭证与状态目录除外（含 node.json 里的节点 token）。
+        self.protected = [Path(p).resolve() for p in (self.state_dir, *protected)]
+        self.reads = set()
         self.backends = backends or ['demo'] + [b for b in ('codex', 'claude') if shutil.which(b)]
         self.link = link             # 由传输层注入：request(body) → result
         self.bridge_url = ''         # 本机 MCP 桥（HTTP loopback）
@@ -108,12 +112,15 @@ class Node:
         started = time.monotonic()
         result = await self.link.request({'op': 'sync', 'instance': self.instance, 'capacity': self.capacity,
                                           'backends': self.backends, 'version': VERSION,
-                                          'host': socket.gethostname(), 'home': str(Path.home()), 'events': events})
+                                          'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE], 'events': events})
         self.accept(result, started)
         return len(events)
 
     def accept(self, result, started):
         self.settings['ack'] = result['ack']; self.store.put('settings', self.settings)
+        for req in result.get('files', []):
+            task = asyncio.create_task(self.serve_file(req))
+            self.reads.add(task); task.add_done_callback(self.reads.discard)
         allowed = {j['id'] for j in result['jobs']}
         for jid, task in list(self.active.items()):
             # 中心不再续租的回合（被打断、暂停、租约失效）立即停止进程。
@@ -176,6 +183,14 @@ class Node:
                 if attempt == 7:
                     raise ConnectionError('工具调用确认未知；请先核验状态，不要盲目重试副作用')
                 await asyncio.sleep(1)
+
+    async def serve_file(self, req):
+        """读文件放到线程里，避免大文件或慢盘拖住续租心跳。回传失败就算了：网页会超时，可重试。"""
+        body = await asyncio.to_thread(read_path, req['path'], req.get('known'), req.get('max', MAX_BYTES), self.protected)
+        try:
+            await self.link.request({'op': 'file', 'id': req['id'], **body})
+        except (ConnectionError, RuntimeError):
+            pass
 
     def turn_for_token(self, token):
         for jid, turn in self.turns.items():
