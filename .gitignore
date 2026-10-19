@@ -1,0 +1,8 @@
+.state*/
+__pycache__/
+*.pyc
+.venv/
+*.png
+node-token
+*-token
+*.local
