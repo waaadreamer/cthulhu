@@ -89,8 +89,14 @@ class Web:
             if path == '/api/state':
                 return c.snapshot()
             if path == '/api/events':
-                return {'events': c.store.events(after=int(q('after', 0)), limit=int(q('limit', 300)),
-                                                 agent=q('agent'), conversation=q('view') == 'conversation')}
+                # 两种读法：before 向前翻历史（不含流式增量）；after 跟随最新（含增量以便流式显示）。
+                # highwater 与查询在同一线程读取：客户端以它作为跟随游标，被过滤掉的事件不会重复拉取。
+                limit = int(q('limit', 200))
+                before = q('before')
+                events = c.store.events(after=int(q('after', 0)), limit=limit, agent=q('agent'),
+                                        conversation=q('view') == 'conversation', ui=True,
+                                        before=None if before is None else int(before), compact=before is not None)
+                return {'events': events, 'more': len(events) >= limit, 'highwater': c.store.highwater()}
             raise ValueError('未知接口')
         with c.store.atomic():
             if path == '/api/chat':

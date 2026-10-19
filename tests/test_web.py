@@ -95,3 +95,25 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         texts = [e['text'] or e['data'].get('delta') for e in data['events']]
         self.assertIn('Master 的过程', texts); self.assertIn('执行者的问题', texts)
         self.assertNotIn('执行者的过程', texts)
+
+
+class PagingTests(unittest.TestCase):
+    def test_tail_pages_skip_telemetry_and_deltas(self):
+        from cthulhu_v4.store import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            s = Store(Path(tmp) / 'db')
+            for i in range(30):
+                s.emit('native:item/agentMessage/delta', actor='old_a', data={'itemId': 'x', 'delta': str(i)})
+                s.emit('native:thread/tokenUsage/updated', actor='old_a', data={})
+                s.emit('native:item/completed', actor='old_a', data={'item': {'id': f'i{i}', 'type': 'agentMessage', 'text': str(i)}})
+            s.emit('native:item/completed', actor='old_a', data={'item': {'type': 'userMessage', 'content': 'x' * 1000}})
+            page = s.events(before=0, limit=10, agent='old_a', ui=True, compact=True)
+            self.assertEqual([e['data']['item']['id'] for e in page], [f'i{i}' for i in range(20, 30)])
+            older = s.events(before=page[0]['seq'], limit=10, agent='old_a', ui=True, compact=True)
+            self.assertEqual(older[-1]['data']['item']['id'], 'i19')
+            tail = s.events(after=page[-1]['seq'] - 3, agent='old_a', ui=True)
+            self.assertTrue(all(e['kind'] != 'native:thread/tokenUsage/updated' for e in tail))
+            self.assertTrue(any(e['kind'].endswith('/delta') for e in s.events(after=0, agent='old_a', ui=True)))
+            # 工具读取保持原始全集。
+            self.assertEqual(len(s.events(after=0, limit=500, agent='old_a')), 91)
+            s.close()

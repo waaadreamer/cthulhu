@@ -141,6 +141,11 @@ time { font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-num
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @keyframes ellipsis { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
 
+/* 向前翻页的哨兵：滚到顶部自动加载，也可以点击。 */
+.older { display: flex; justify-content: center; padding: 4px 0 8px; }
+.older[data-loading] .link { pointer-events: none; color: var(--ink-3); text-decoration: none; }
+.older[data-loading] .link::after { content: '…'; }
+
 /* ---------- 输入区 ---------- */
 .dock { padding: 0 max(24px, calc((100% - 740px) / 2)) 18px; }
 #questions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }

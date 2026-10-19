@@ -30,17 +30,14 @@ async function poll() {
     chat.demo = snap.agents.find(a => a.id === 'master')?.backend === 'demo';
     renderSide(); renderQuestions(); renderMaster();
     const stick = nearBottom($('#chat'));
-    for (let more = true; more;) {
-      const { events } = await api(`api/events?view=conversation&after=${chatCursor}&limit=300`);
-      for (const e of events) { chat.apply(e); chatCursor = e.seq; }
-      more = events.length === 300;
-    }
+    if (!chatPager.started) { await chatPager.start(); chatCursor = Math.max(chatCursor, chatPager.highwater); }
+    chatCursor = await follow('view=conversation', chatCursor, e => chat.apply(e));
     chat.flush();
     // 刚发送、中心还没登记时也立即给出反馈，避免“发了没反应”。
     const info = liveInfo('master', chat.running()) || (sentAt && Date.now() - sentAt < 5000 ? { phase: 'wait', text: '已发送' } : null);
     if (snap.pending?.master) sentAt = null;
     chat.live.set(info);
-    if (!$('#chat').children.length) $('#chat').append(el('div', { class: 'empty' }, el('h2', { text: '从一个目标开始' }),
+    if (!$('#chat').querySelector(':scope > :not(.older):not(.live):not(.empty)') && !$('#chat .empty')) $('#chat').append(el('div', { class: 'empty' }, el('h2', { text: '从一个目标开始' }),
       el('p', { text: '告诉 Master 你想完成什么。它会拆成任务，交给星系上的独立执行者，过程都能在任务里查看。' })));
     if (stick) scrollEnd($('#chat'));
     if (drawer) await drawer.poll();
@@ -52,6 +49,70 @@ async function poll() {
 }
 const nearBottom = n => n.scrollHeight - n.scrollTop - n.clientHeight < 120;
 const scrollEnd = n => (n.scrollTop = n.scrollHeight);
+
+// ---- 分页 ----
+// 历史按页向前加载，只在滚到顶部时取更早的一页；之后只跟随增量，不把整段历史传给浏览器。
+const PAGE = 150;
+async function follow(query, cursor, apply) {
+  for (;;) {
+    const r = await api(`api/events?${query}&after=${cursor}&limit=300`);
+    for (const e of r.events) apply(e);
+    // 没取满时直接跳到 highwater：被过滤掉的遥测不会在下一次轮询里被重复扫描。
+    cursor = r.more ? r.events.at(-1).seq : Math.max(cursor, r.highwater);
+    if (!r.more) return cursor;
+  }
+}
+
+class Pager {
+  // 向前翻页，并在回合边界（dispatch）处截断，保证每一页里的回合是完整的。
+  constructor(scroller, query, agent, render) {
+    Object.assign(this, { scroller, query, agent, render, before: 0, more: true, busy: false, started: false });
+    this.sentinel = el('div', { class: 'older' }, el('button', { type: 'button', class: 'link', text: '加载更早的记录', onclick: () => this.older() }));
+    scroller.prepend(this.sentinel);
+    this.io = new IntersectionObserver(es => es.some(e => e.isIntersecting) && this.started && this.older(), { root: scroller, rootMargin: '300px 0px 0px 0px' });
+    this.starting = null;
+    this.io.observe(this.sentinel);
+  }
+  async page() {
+    const r = await api(`api/events?${this.query}&before=${this.before}&limit=${PAGE}`);
+    let events = r.events;
+    if (r.more) {
+      const i = events.findIndex(e => e.kind === 'dispatch' && e.target === this.agent);
+      if (i > 0) events = events.slice(i);
+    }
+    this.highwater = Math.max(this.highwater || 0, r.highwater);
+    this.more = r.more && events.length > 0;
+    if (events.length) this.before = events[0].seq;
+    this.sentinel.hidden = !this.more;
+    return events;
+  }
+  // 首屏只能加载一次：常规轮询与 openTask 可能同时触发，共用同一个 Promise。
+  start() {
+    this.starting ||= this.page().then(events => { this.render(events, false); this.started = true; });
+    return this.starting;
+  }
+  async older() {
+    if (this.busy || !this.more) return;
+    this.busy = true; this.sentinel.dataset.loading = 'true';
+    try {
+      const sc = this.scroller, h = sc.scrollHeight, top = sc.scrollTop;
+      const events = await this.page();
+      this.render(events, true);
+      // 保持视线不跳：新内容插在上方，按增加的高度补偿滚动位置。
+      sc.scrollTop = top + (sc.scrollHeight - h);
+    } catch (e) { toast(e.message); }
+    finally { this.busy = false; delete this.sentinel.dataset.loading; }
+  }
+  close() { this.io.disconnect(); this.sentinel.remove(); }
+}
+
+// 主会话分页：更早的页面用一个临时 Chat 渲染，再整体插到最前面。
+const chatPager = new Pager($('#chat'), 'view=conversation', 'master', (events, older) => {
+  if (!older) { for (const e of events) chat.apply(e); chat.flush(); return; }
+  const tmp = el('div'), part = new Chat(tmp, chat.opts); part.demo = chat.demo;
+  for (const e of events) part.apply(e); part.flush();
+  chatPager.sentinel.after(...tmp.children);
+});
 
 // ---- 工作中状态 ----
 // 中心的 pending（排队数、租约开始时间）决定“是否在跑”；原生事件只决定“在做什么”。
@@ -171,11 +232,18 @@ class Drawer {
     this.task = taskId; this.cursor = 0;
     const t = snap.tasks.find(t => t.id === taskId);
     this.agent = t.agent;
-    const backend = snap.agents.find(a => a.id === t.agent)?.backend;
-    this.model = new Model(t.agent, 'drawer', { harnessTools: backend === 'demo' });
+    this.harness = snap.agents.find(a => a.id === t.agent)?.backend === 'demo';
+    this.model = new Model(t.agent, 'drawer', { harnessTools: this.harness });
+    this.pager?.close();
     $('#timeline').replaceChildren();
     this.view = new View($('#timeline'), this.model);
     this.live = new Live($('#timeline'));
+    this.pager = new Pager($('#timeline'), 'agent=' + encodeURIComponent(this.agent), this.agent, (events, older) => {
+      if (!older) { for (const e of events) this.model.apply(e); this.view.update(); return; }
+      const tmp = el('div'), m = new Model(this.agent, 'drawer', { harnessTools: this.harness }), v = new View(tmp, m);
+      for (const e of events) m.apply(e); v.update();
+      this.pager.sentinel.after(...tmp.children);
+    });
     $('#drawer').hidden = false; document.body.classList.add('drawer-open');
     history.replaceState(null, '', '#task=' + taskId);
   }
@@ -196,31 +264,34 @@ class Drawer {
           act(() => api('api/control', { task_id: t.id, action, reason: '主人通过页面操作' })) }));
     $('#d-form').hidden = DONE.has(t.state);
   }
-  async poll() {
+  // 单飞：上一次轮询未结束时直接复用，避免同一批事件并发拉取、游标互相覆盖。
+  poll() {
+    this.polling ||= this.pollOnce().finally(() => (this.polling = null));
+    return this.polling;
+  }
+  async pollOnce() {
     this.head();
-    const tl = $('#timeline'), stick = nearBottom(tl);
-    for (let more = true; more && drawer === this;) {
-      const { events } = await api(`api/events?agent=${encodeURIComponent(this.agent)}&after=${this.cursor}&limit=500`);
-      for (const e of events) { this.model.apply(e); this.cursor = e.seq; }
-      more = events.length === 500;
-    }
+    const tl = $('#timeline'), first = !this.pager.started, stick = first || nearBottom(tl);
+    if (first) { await this.pager.start(); this.cursor = this.pager.highwater; }
+    if (drawer !== this) return;
+    this.cursor = await follow('agent=' + encodeURIComponent(this.agent), this.cursor, e => this.model.apply(e));
     if (drawer !== this) return;
     this.view.update();
     tl.querySelector(':scope > p.muted')?.remove();
     this.live.set(liveInfo(this.agent, this.model));
-    if (!tl.children.length) tl.append(el('p', { class: 'muted pad', text: '还没有活动' }));
+    if (!tl.querySelector(':scope > :not(.older)')) tl.append(el('p', { class: 'muted pad', text: '还没有活动' }));
     if (stick) scrollEnd(tl);
   }
 }
 
 function openTask(id) {
   if (!snap?.tasks.some(t => t.id === id)) return;
-  if (drawer?.task !== id) drawer = new Drawer(id);
+  if (drawer?.task !== id) { drawer?.pager.close(); drawer = new Drawer(id); }
   renderSide(); drawer.poll().catch(e => toast(e.message));
   document.body.classList.remove('nav-open');
 }
 function closeDrawer() {
-  drawer = null; $('#drawer').hidden = true; document.body.classList.remove('drawer-open');
+  drawer?.pager.close(); drawer = null; $('#drawer').hidden = true; document.body.classList.remove('drawer-open');
   history.replaceState(null, '', location.pathname + location.search); renderSide();
 }
 $('#d-close').onclick = closeDrawer;

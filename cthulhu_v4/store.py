@@ -5,6 +5,18 @@ import time
 from contextlib import contextmanager
 
 
+# 界面会渲染的原生事件；其余原生事件是遥测。
+UI_NATIVE = ('native:item/started', 'native:item/completed', 'native:item/agentMessage/delta',
+             'native:item/reasoning/summaryTextDelta', 'native:item/reasoning/summaryPartAdded',
+             'native:item/reasoning/textDelta', 'native:item/commandExecution/outputDelta',
+             'native:turn/completed', 'native:turn/plan/updated', 'native:stderr', 'native:error',
+             'native:declined_request', 'native:demo', 'native:stream_event', 'native:assistant',
+             'native:user', 'native:result')
+DELTAS = ('native:item/agentMessage/delta', 'native:item/reasoning/summaryTextDelta',
+          'native:item/reasoning/summaryPartAdded', 'native:item/reasoning/textDelta',
+          'native:item/commandExecution/outputDelta', 'native:item/fileChange/outputDelta', 'native:stream_event')
+
+
 class Store:
     def __init__(self, path):
         self.db = sqlite3.connect(path, isolation_level=None)
@@ -54,8 +66,20 @@ class Store:
                               json.dumps(data or {}, ensure_ascii=False), int(visible)))
         return cur.lastrowid
 
-    def events(self, after=0, limit=200, task=None, agent=None, visible=False, conversation=False):
-        clauses, args = ['seq>?'], [int(after)]
+    def events(self, after=0, limit=200, task=None, agent=None, visible=False, conversation=False,
+               before=None, ui=False, compact=False):
+        """按 seq 读取事件。
+
+        before：向前翻页（返回 seq < before 的最新 limit 条，仍按升序）；before<=0 表示从最新开始。
+        ui：只返回界面会展示的事件。遥测（token 用量、限速、握手、hook 生命周期）和包装后的路由输入
+            体积大却从不展示，不必传给浏览器。工具 read_task_events 不用这个过滤，保持原始全集。
+        compact：去掉流式增量。历史回合的完整文字/输出都在 item/completed 与 assistant 事件里。
+        """
+        clauses, args = [], []
+        if before is None:
+            clauses.append('seq>?'); args.append(int(after))
+        elif int(before) > 0:
+            clauses.append('seq<?'); args.append(int(before))
         if task:
             clauses.append('task=?'); args.append(task)
         if agent:
@@ -65,8 +89,17 @@ class Store:
         if conversation:
             # 主聊天在同一序列中合并公开汇报与 Master 原生活动；不混入执行者原生流。
             clauses.append("(visible=1 OR actor='master' OR target='master')")
+        if ui:
+            clauses.append(f"(kind NOT LIKE 'native:%' OR kind IN ({','.join('?' * len(UI_NATIVE))}))"); args.extend(UI_NATIVE)
+            clauses.append("NOT (kind IN ('native:item/started','native:item/completed') AND json_extract(data,'$.item.type')='userMessage')")
+        if compact:
+            clauses.append(f"kind NOT IN ({','.join('?' * len(DELTAS))})"); args.extend(DELTAS)
         args.append(max(1, min(int(limit), 500)))
-        rows = self.db.execute('SELECT * FROM events WHERE ' + ' AND '.join(clauses) + ' ORDER BY seq LIMIT ?', args)
+        where = ' AND '.join(clauses) or '1'
+        order = 'DESC' if before is not None else 'ASC'
+        rows = list(self.db.execute(f'SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ?', args))
+        if before is not None:
+            rows.reverse()
         return [dict(r) | {'data': json.loads(r['data'])} for r in rows]
 
     def find(self, kind, ident):

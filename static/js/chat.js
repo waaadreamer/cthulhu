@@ -43,8 +43,9 @@ class Process {
 }
 
 export class Chat {
-  constructor(root, { openTask, taskTitle }) {
-    Object.assign(this, { root, openTask, taskTitle });
+  constructor(root, opts) {
+    const { openTask, taskTitle } = opts;
+    Object.assign(this, { root, opts, openTask, taskTitle });
     this.proc = null; this.dirty = new Set(); this.demo = false;
     this.live = new Live(root);
   }

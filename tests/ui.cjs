@@ -6,7 +6,7 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
   const root = path.resolve(__dirname, '..'), state = fs.mkdtempSync(path.join(os.tmpdir(), 'cthulhu-ui-'));
   const py = fs.existsSync(path.join(root, '.venv/bin/python')) ? path.join(root, '.venv/bin/python') : 'python3';
   const server = spawn(py, ['-m', 'cthulhu_v4', 'center', '--state', state, '--port', '0', '--ws-port', '0', '--heartbeat', '1', '--question-timeout', '3'], { cwd: root });
-  let browser;
+  let browser; const errors = [];
   try {
     const url = await new Promise((ok, bad) => { let t = ''; const timer = setTimeout(() => bad(Error('server timeout')), 10000);
       server.stdout.on('data', b => { t += b; const m = t.match(/http:\/\/127\.0\.0\.1:\d+/); if (m) { clearTimeout(timer); ok(m[0]); } });
@@ -14,7 +14,7 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     const token = fs.readFileSync(path.join(state, 'web-token'), 'utf8').trim();
     browser = await chromium.launch({ args: ['--no-sandbox'] });
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } }); page.setDefaultTimeout(15000);
-    const errors = []; page.on('pageerror', e => errors.push(e.message)); page.on('console', m => m.type() === 'error' && errors.push(m.text()));
+    page.on('pageerror', e => errors.push(e.message)); page.on('console', m => m.type() === 'error' && errors.push(m.text()));
     await page.goto(url + '/');
     await page.locator('#login-token').fill(token); await page.locator('#login-form button').click();
     await page.getByText('从一个目标开始').waitFor();
@@ -79,5 +79,6 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.screenshot({ path: path.join(root, 'preview-mobile.png') });
     assert.deepEqual(errors, []);
     console.log('ui: ok');
-  } finally { if (browser) await browser.close(); server.kill(); fs.rmSync(state, { recursive: true, force: true }); }
+  } catch (e) { if (errors.length) console.error('page errors:', errors); throw e; }
+  finally { if (browser) await browser.close(); server.kill(); fs.rmSync(state, { recursive: true, force: true }); }
 })().catch(e => { console.error(e); process.exit(1); });
