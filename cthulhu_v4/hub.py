@@ -136,7 +136,7 @@ class Hub:
                 a.update(paused=True, status='paused')
                 s.emit('master_attention', 'Master 失败，已暂停。检查错误后点击恢复；原会话保留。', visible=True)
             else:
-                c.enqueue('system', 'master', f"{aid} 运行失败：{data.get('error')}。原 session 保留，心跳将有限重试。", 8)
+                c.notify_failure(aid, data.get('error'))
             s.put('agent', a)
         else:
             # stopped 但中心没要求停（节点本地租约到期/重启）或 unknown：一律当作结果未知。

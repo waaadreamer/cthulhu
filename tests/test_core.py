@@ -125,6 +125,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(self.c.store.all('message')), before)
         self.c.tool(t['agent'], 'send_message', {'to': 'master', 'text': 'x' * 20000})  # 边界内正常
 
+    def test_repeated_worker_failures_coalesce_into_one_master_message(self):
+        t = self.create()
+        for i in range(5):
+            with self.c.store.atomic(): self.c.notify_failure(t['agent'], f'blocked {i}')
+        queued = [m for m in self.c.store.all('message') if m['target'] == 'master' and m['state'] == 'queued' and '运行失败' in m['text']]
+        self.assertEqual(len(queued), 1)
+        self.assertIn('5 次未读', queued[0]['text']); self.assertIn('blocked 4', queued[0]['text'])
+        # 旧版本留下的重复通知在启动时清理，只保留最新一条。
+        for i in range(3):
+            with self.c.store.atomic(): self.c.enqueue('system', 'master', f"{t['agent']} 运行失败：old {i}。原 session 保留", 8)
+        self.c.store.close(); self.c = Center(self.tmp.name, clock=lambda: self.now)
+        left = [m for m in self.c.store.all('message') if m['target'] == 'master' and m['state'] == 'queued' and '运行失败' in m['text']]
+        self.assertEqual(len(left), 1)
+
     def test_owner_late_correction_is_preserved(self):
         t = self.create(); q = self.question(t)
         self.c.tool('master', 'answer_question', dict(question_id=q['id'], version=1, answer='A'))
