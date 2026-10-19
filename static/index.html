@@ -130,7 +130,7 @@
     <datalist id="node-models"></datalist>
     <label>默认工作目录<input name="cwd" autocomplete="off"></label>
     <p class="muted">原生 CLI 从工作目录读取 AGENTS.md / CLAUDE.md。留空时，每个任务必须自己填写目录。</p>
-    <div class="actions"><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>
+    <div class="actions"><button id="node-retry" class="btn" type="button" hidden>重试更新</button><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>
   </form>
 </dialog>
 

@@ -174,7 +174,8 @@ class Hub:
             n.update(instance=body['instance'], seen=c.clock(), version=body.get('version'),
                      capacity=max(1, min(int(body.get('capacity', 1)), 32)),
                      backends=[b for b in body.get('backends', []) if b in {'demo', 'codex', 'claude'}],
-                     host=body.get('host'), home=body.get('home'), features=list(body.get('features') or []))
+                     host=body.get('host'), home=body.get('home'), features=list(body.get('features') or []),
+                     code=body.get('code'), managed=bool(body.get('managed')))
             for e in body.get('events', []):
                 if e['seq'] <= n['ack']:
                     continue
@@ -190,7 +191,10 @@ class Hub:
                 # 被要求停止的回合不再续租，也不发给节点；节点据此停止进程并回报 stopped。
                 if not j.get('stop_reason') and not s.get('agent', j['agent'])['paused']:
                     j['until'] = c.clock() + LEASE; s.put('lease', j); jobs.append(j)
-            free = n['capacity'] - running
+            plan = c.update_plan(n, running)
+            s.put('node', n)
+            # 等待更新时不派发新回合：消息留在队列里，更新完成（或失败）后照常派发。
+            free = 0 if plan in ('draining', 'ready') else n['capacity'] - running
             for a in s.all('agent'):
                 if free <= 0:
                     break
@@ -212,7 +216,10 @@ class Hub:
                        data={'job': j['id'], 'node': node, 'message_id': m['id']})
                 jobs.append(j); free -= 1
             # 文件读取请求不是业务状态，不进事务、不落盘；随同步响应捎给节点即可。
-            return {'ack': n['ack'], 'lease_seconds': LEASE, 'jobs': jobs, 'files': c.files.requests_for(node)}
+            reply = {'ack': n['ack'], 'lease_seconds': LEASE, 'jobs': jobs, 'files': c.files.requests_for(node)}
+            if plan == 'ready':
+                reply['update'] = c.release.offer()
+            return reply
 
     def tool(self, node, body):
         job = self.valid_job(node, body['job'])
@@ -229,4 +236,12 @@ class Hub:
             return self.tool(node, body)
         if op == 'file':
             return self.c.files.deliver(node, body)
+        if op == 'release':
+            u = self.c.store.get('node', node).get('update') or {}
+            if not self.c.release or u.get('target') != self.c.release.code:
+                raise ValueError('没有待下发的更新')
+            return self.c.release.download()
+        if op == 'update_failed':
+            with self.c.store.atomic():
+                return self.c.update_failed(node, body.get('error', '未知错误'))
         raise ValueError('未知节点操作')

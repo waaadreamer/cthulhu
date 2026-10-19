@@ -119,6 +119,8 @@ class Web:
                 return c.control(body, actor='owner')
             if path == '/api/master':
                 return c.control_master(body['action'])
+            if path == '/api/node/update':
+                return c.retry_update(body['node'])
             if path == '/api/node':
                 return c.set_node_defaults(body)
             if path == '/api/agent':

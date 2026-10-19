@@ -175,7 +175,8 @@ function renderSide() {
     nodes.append(el('button', { type: 'button', class: 'node', 'data-online': String(n.online),
       title: `${n.host || ''}${hint ? '\n默认：' + hint : '\n未设置默认值'}`, onclick: () => openNode(n.id) },
       el('span', { class: 'dot', 'aria-hidden': 'true' }), el('span', { class: 'node-n', text: n.id === 'local' ? 'local（中心）' : n.id }),
-      el('span', { class: 'muted', text: n.online ? (n.backends || []).filter(b => b !== 'demo').join(' ') || 'demo' : '离线' })));
+      el('span', { class: 'muted' + (n.update ? ' upd ' + n.update.state : ''), text: updateLabel(n) ||
+        (n.online ? (n.backends || []).filter(b => b !== 'demo').join(' ') || 'demo' : '离线') })));
   }
 }
 
@@ -303,8 +304,12 @@ class Drawer {
   }
 }
 
-function openTask(id) {
-  if (!snap?.tasks.some(t => t.id === id)) return;
+async function openTask(id) {
+  // 刚创建的任务可能还不在快照里（另一轮轮询正在进行，poll() 会直接返回）：先刷新一次状态再打开。
+  if (!snap?.tasks.some(t => t.id === id)) {
+    try { snap = await api('api/state'); } catch (e) { toast(e.message); return; }
+    if (!snap.tasks.some(t => t.id === id)) return;
+  }
   if (drawer?.task !== id) { drawer?.pager.close(); drawer = new Drawer(id); }
   renderSide(); drawer.poll().catch(e => toast(e.message));
   document.body.classList.remove('nav-open');
@@ -384,18 +389,29 @@ $('#model-form').onsubmit = e => {
   });
 };
 
+// 节点相对中心代码的状态。手动启动的节点不自动更新，只提示版本不同。
+function updateLabel(n) {
+  if (n.id === 'local' || !snap.release || !n.code || n.code === snap.release.code) return '';
+  if (n.update?.state === 'failed') return '更新失败';
+  if (n.update) return n.update.state === 'ready' ? '更新中' : '等回合结束后更新';
+  return n.managed ? (snap.release.clean ? '' : '中心有未提交改动，暂不推送') : '版本不同（手动启动）';
+}
+
 // ---- 节点默认值 ----
 function openNode(id) {
   const n = snap.nodes.find(n => n.id === id), f = $('#node-form'), d = n.defaults || {};
   f.dataset.node = id;
   $('#node-dialog-t').textContent = '节点 ' + id;
-  $('#node-info').textContent = [n.online ? '在线' : '离线', n.host, n.home && '用户目录 ' + n.home,
+  $('#node-info').textContent = [n.online ? '在线' : '离线', n.host, n.home && '用户目录 ' + n.home, updateLabel(n),
+    n.update?.error && '原因：' + n.update.error,
     (n.backends || []).length && '可用后端 ' + n.backends.join(' ')].filter(Boolean).join('；');
   f.elements.backend.replaceChildren(el('option', { value: '', text: '同 Master' }),
     ...['codex', 'claude', 'demo'].filter(b => !n.backends?.length || n.backends.includes(b)).map(b => el('option', { value: b, text: b })));
   f.elements.backend.value = d.backend || ''; f.elements.model.value = d.model || '';
   f.elements.reasoning_effort.value = d.reasoning_effort || ''; f.elements.cwd.value = d.cwd || '';
   f.elements.cwd.placeholder = (n.home || '/home/user') + '/project';
+  $('#node-retry').hidden = n.update?.state !== 'failed';
+  $('#node-retry').onclick = () => act(async () => { await api('api/node/update', { node: id }); $('#node-dialog').close(); });
   syncNodeForm(); dialog('#node-dialog');
 }
 function syncNodeForm() {

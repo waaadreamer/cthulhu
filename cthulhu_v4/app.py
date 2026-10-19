@@ -23,6 +23,9 @@ class App:
         self.state = Path(state).resolve()
         self.center = Center(self.state, backend, model, reasoning_effort=reasoning_effort, **timing)
         self.notice = self.center.configure_master(backend, model, reasoning_effort)
+        from .update import Release
+        from .util import ROOT
+        self.center.release = Release(ROOT)
         self.port, self.ws_host, self.ws_port = port, ws_host, ws_port
         self.public_url = public_url.rstrip('/') if public_url else None
         self.galaxy_url = galaxy_url

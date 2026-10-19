@@ -15,6 +15,7 @@ from .domain.questions import Questions
 from .domain.review import Review
 from .domain.tasks import Tasks
 from .files import FileService
+from .update import FEATURE as UPDATE_FEATURE
 from .hub import Hub
 from .store import Store
 from .tools import dispatch, tools_for
@@ -36,6 +37,7 @@ class Center(Messages, Questions, Tasks, Review):
         self.hub = Hub(self)
         self.feishu = None  # 由 App 按启动参数挂载；没有它时中心完全不接触飞书
         self.files = FileService(self)
+        self.release = None  # 由 App 设置为中心正在运行的代码包；没有时不发起远程更新
         s = self.store
         with s.atomic():
             if not s.find('agent', 'master'):
@@ -216,6 +218,7 @@ class Center(Messages, Questions, Tasks, Review):
                 'questions': s.all('question'), 'memories': s.all('memory'), 'pending': pending,
                 'prefs': {'master_decides': self.master_decides()},
                 'feishu': self.feishu.status() if self.feishu else None,
+                'release': self.release.public() if self.release else None,
                 'seq': s.highwater(), 'now': self.clock()}
 
     # ---- 与 hub 的连接点 ----
@@ -315,6 +318,54 @@ class Center(Messages, Questions, Tasks, Review):
         else:
             raise ValueError('未知 action')
         s.emit('master_control', action, actor='owner', visible=True)
+        return {'ok': True}
+
+    # ---- 远程更新 ----
+    def update_plan(self, n, running):
+        """节点相对中心代码的状态，hub 每次同步时调用（已在事务内）。
+
+        draining：有新版本，停止派发新回合，等已派发的回合结束；ready：已空闲，可以下发更新。
+        failed 只针对同一个目标版本：中心换了新代码会重新尝试，不会对坏版本反复重试。
+        """
+        r = self.release
+        if not r or n['id'] == LOCAL or not n.get('code') or n['code'] == r.code:
+            if n.get('update') and r and n.get('code') == r.code:
+                done = n.pop('update')
+                self.store.emit('node_updated', f"节点 {n['id']} 已更新到 {r.commit or r.code}", data={'node': n['id'], 'from': done.get('from')}, visible=True)
+            return 'current'
+        if not n.get('managed'):
+            return 'manual'
+        if not r.clean:
+            return 'dirty'
+        if UPDATE_FEATURE not in (n.get('features') or []):
+            return 'unsupported'
+        u = n.get('update') or {}
+        if u.get('target') != r.code:
+            u = n['update'] = {'target': r.code, 'from': n['code'], 'state': 'draining', 'at': self.clock()}
+            self.store.emit('node_update', f"节点 {n['id']} 有新版本，当前回合结束后自动更新并重启；期间新消息照常排队",
+                            data={'node': n['id'], 'to': r.code}, visible=True)
+        if u['state'] == 'failed':
+            return 'failed'
+        if running:
+            return 'draining'
+        u['state'] = 'ready'
+        return 'ready'
+
+    def update_failed(self, node, error):
+        s = self.store
+        n = s.get('node', node)
+        u = n.get('update') or {}
+        u.update(state='failed', error=str(error)[:500], at=self.clock())
+        n['update'] = u
+        s.put('node', n)
+        s.emit('node_update_failed', f'节点 {node} 自动更新失败：{error}。节点继续用原版本运行。', data={'node': node, 'error': str(error)}, visible=True)
+        return {'ok': True}
+
+    def retry_update(self, node):
+        s = self.store
+        n = s.get('node', node)
+        n.pop('update', None)
+        s.put('node', n)
         return {'ok': True}
 
     # ---- 节点邀请 ----

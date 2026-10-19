@@ -97,6 +97,7 @@ body.drawer-open #app { grid-template-columns: var(--nav) minmax(0, 1fr) var(--d
 .node { display: flex; align-items: center; gap: 9px; padding: 6px 10px; font-size: 13px; border-radius: 8px; width: 100%; border: 0; background: none; text-align: left; cursor: pointer; }
 .node:hover { background: var(--s1); }
 .node[data-online=true] .dot { background: var(--done); }
+.node .upd.draining, .node .upd.ready { color: var(--live); } .node .upd.failed { color: var(--bad); }
 .node-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; } .node .muted { font-size: 12px; }
 
 /* ---------- 主会话 ---------- */

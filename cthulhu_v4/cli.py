@@ -130,13 +130,22 @@ async def run_node(args):
         config = json.loads((base / 'node.json').read_text())
     except OSError:
         raise SystemExit(f'{base}/node.json 不存在：先用网页生成的命令安装/加入')
+    from . import update
+    app = Path(__file__).resolve().parent.parent
+    managed = app == (base / 'app').resolve()
+    if managed and update.check_rollback(base, app):
+        # 新代码连续多次没能连上中心：已换回旧代码，用旧代码重新启动。
+        print('更新后的代码多次启动失败，已回滚到上一版本', flush=True)
+        update.reexec(app)
     lock = lock_dir(base / 'state', 'node.lock')
     try:
-        node = Node(base / 'state', capacity=args.capacity, protected=[base])
+        node = Node(base / 'state', capacity=args.capacity, protected=[base], app=app, managed=managed)
     except RuntimeError as e:
         raise SystemExit(str(e))
     node.link = RemoteLink(config['center'], config['node'], token=config['token'], pin=config.get('pin'),
                            hello={'instance': node.instance})
+    # 第一次与中心同步成功才算新版本可用：此时清理旧代码与更新标记。
+    node.on_synced = lambda: (info := update.confirm(base)) and print(f"更新已生效：{info['from']} → {info['to']}", flush=True)
     bridge = Bridge(node, asyncio.get_running_loop()); bridge.start()
     print(f"节点 {config['node']} 启动 · 后端 {', '.join(node.backends)} · 状态 {node.state_dir}", flush=True)
     runner = asyncio.create_task(node.run())
@@ -150,6 +159,8 @@ async def run_node(args):
         await node.close(); await node.link.close()
         await asyncio.to_thread(bridge.stop)
         node.store.close(); lock.close()
+    if node.restart:
+        update.reexec(app)
 
 
 def status(args):
