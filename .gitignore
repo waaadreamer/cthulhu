@@ -1,8 +1,9 @@
 .state*/
 __pycache__/
 *.pyc
-.venv/
+.venv
 *.png
 node-token
 *-token
 *.local
+*.egg-info/
