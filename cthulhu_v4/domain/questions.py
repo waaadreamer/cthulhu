@@ -22,7 +22,7 @@ class Questions:
             s.put('task', task)
         s.put('question', q)
         s.emit('question', p['text'], actor=actor, target='master', task=task['id'], data=q, visible=True)
-        self.enqueue(actor, 'master', f"问题 {q['id']} v1：{q['text']}\n执行者建议：{q['recommendation']}\n请回答或转请主人。", 8)
+        self.enqueue(actor, 'master', f"问题 {q['id']} v1：{q['text']}\n执行者建议：{q['recommendation']}\n请回答或转请主人。", 8, copy=True)
         return q
 
     def answer(self, actor, p):
@@ -46,9 +46,9 @@ class Questions:
             self.clear_wait(task)
         s.emit('answer', text, actor=actor, target=q['agent'], task=q['task'], data=q, visible=True)
         if task['state'] not in TERMINAL:
-            self.enqueue(actor, q['agent'], f"问题 {q['id']} 的回答/修正（版本 {q['version']}）：{text}\n若已按旧答案执行，先核验副作用再调整。", 8)
+            self.enqueue(actor, q['agent'], f"问题 {q['id']} 的回答/修正（版本 {q['version']}）：{text}\n若已按旧答案执行，先核验副作用再调整。", 8, copy=True)
         if actor == 'owner':
-            self.enqueue('owner', 'master', f"主人回答/修正问题 {q['id']}：{text}。已通知执行者，请核对是否需要进一步调整。", 9)
+            self.enqueue('owner', 'master', f"主人回答/修正问题 {q['id']}：{text}。已通知执行者，请核对是否需要进一步调整。", 9, copy=True)
         return q
 
     def ask_owner(self, actor, p):

@@ -101,7 +101,7 @@ class Tasks:
         s.put('task', t)
         self.close_questions(t['id'])
         s.emit('completed', p['result'], actor=actor, task=t['id'], data={'evidence': p['evidence']}, visible=True)
-        self.enqueue(actor, 'master', f"任务 {t['id']} 完成，请核验并告诉主人：{p['result']}\n证据：{p['evidence']}", 5)
+        self.enqueue(actor, 'master', f"任务 {t['id']} 完成，请核验并告诉主人：{p['result']}\n证据：{p['evidence']}", 5, copy=True)
         self.cancel_queued(actor)
         return t
 

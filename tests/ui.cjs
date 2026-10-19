@@ -1,45 +1,58 @@
-// 可选浏览器验收。依赖仅用于测试，主应用仍为零依赖。
+// 可选浏览器验收：临时状态目录 + demo 后端，不调用模型。
 // PLAYWRIGHT_PATH=/path/to/playwright node tests/ui.cjs
-const {chromium}=require(process.env.PLAYWRIGHT_PATH||'playwright');
-const {spawn}=require('child_process');const fs=require('fs');const os=require('os');const path=require('path');const assert=require('assert');
-(async()=>{
- const root=path.resolve(__dirname,'..'),state=fs.mkdtempSync(path.join(os.tmpdir(),'cthulhu-v4-ui-'));
- const server=spawn('python3',['-m','cthulhu_v4','--state',state,'--port','0','--heartbeat','1','--question-timeout','2','--review-interval','3'],{cwd:root});
- let browser;
- try{
-  const url=await new Promise((resolve,reject)=>{let text='';const timer=setTimeout(()=>reject(Error('server timeout')),10000);server.stdout.on('data',b=>{text+=b;const m=text.match(/http:\/\/127\.0\.0\.1:\d+/);if(m){clearTimeout(timer);resolve(m[0]);}});server.on('exit',code=>reject(Error('server exit '+code)));});
-  const token=fs.readFileSync(path.join(state,'web-token'),'utf8').trim();
-  browser=await chromium.launch({headless:true,args:['--no-sandbox']});
-  const page=await browser.newPage({viewport:{width:1440,height:960}});page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  await page.addInitScript(t=>sessionStorage.setItem('cthulhu-token',t),token);
-  await page.goto(url);await page.getByText('暂无任务。',{exact:false}).waitFor();
-  await page.locator('#input').fill('你好，先做一个可审核的试用。');await page.locator('#urgent').click();
-  const urgentRequest=page.waitForRequest(r=>r.url().endsWith('/api/chat')&&r.method()==='POST');
-  await page.locator('#chat-form .send-button').click();assert.equal((await urgentRequest).postDataJSON().priority,10);
-  await page.locator('#chat').getByText('[模拟 Master]',{exact:false}).first().waitFor();
-  await page.locator('#new-task').click();await page.locator('[name=title]').fill('试用问答流程');await page.locator('[name=description]').fill('只运行模拟任务');await page.locator('[name=acceptance]').fill('问题得到回答并完成');await page.locator('#task-form .primary-button').click();
-  await page.getByText('模拟：请我回答并计时',{exact:true}).waitFor();await page.getByText('模拟：请我回答并计时',{exact:true}).click();
-  await page.locator('#chat').getByText('等待主人超时，已交回 master 决定。',{exact:true}).waitFor({timeout:15000});
-  page.once('dialog',d=>d.accept('继续'));await page.getByText('我来回答',{exact:true}).click();
-  await page.locator('#tasks').getByText('已完成',{exact:true}).waitFor({timeout:15000});
-  await page.locator('#tasks').getByText('CoT ↗',{exact:true}).click();
-  await page.locator('#timeline .transcript-row').first().waitFor();
-  assert(await page.locator('#timeline').innerText().then(t=>t.includes('你')&&t.includes('Master')));
-  await page.locator('#agent-input').fill('侧栏消息验收');await page.locator('#agent-urgent').click();
-  const agentRequest=page.waitForRequest(r=>r.url().endsWith('/api/chat')&&r.method()==='POST');
-  await page.locator('#agent-form .send-button').click();assert.equal((await agentRequest).postDataJSON().priority,10);
-  await page.waitForFunction(()=>document.getElementById('agent-input').value==='');
-  const previous=await page.locator('#chat').evaluate(e=>{e.scrollTop=0;return e.scrollTop;});
-  await page.locator('#timeline').evaluate(e=>e.scrollTop=e.scrollHeight);
-  assert.equal(await page.locator('#chat').evaluate(e=>e.scrollTop),previous);
-  await page.screenshot({path:path.join(root,'preview-demo-flow.png'),fullPage:true});
-  await page.evaluate(()=>{openActivity('old_stream','流式展示测试');appendActivity([{seq:999001,at:1,actor:'old_stream',kind:'native:item/agentMessage/delta',text:'',data:{itemId:'stream-test',delta:'你好'}},{seq:999002,at:1,actor:'old_stream',kind:'native:item/agentMessage/delta',text:'',data:{itemId:'stream-test',delta:'世界'}}]);});
-  assert.equal(await page.locator('#timeline .transcript-row').count(),1);
-  assert((await page.locator('#timeline').innerText()).includes('你好世界'));
-  await page.setViewportSize({width:390,height:844});
-  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
-  await page.locator('#close-activity').click();
-  assert.equal(errors.length,0,errors.join('\n'));
-  console.log('PASS: chat, task, timeout, answer, completion, source labels, independent scroll, mobile viewport');
- }finally{if(browser)await browser.close();server.kill('SIGTERM');await new Promise(r=>server.once('exit',r));fs.rmSync(state,{recursive:true,force:true});}
-})().catch(e=>{console.error(e);process.exitCode=1;});
+const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
+const { spawn } = require('child_process'); const fs = require('fs'); const os = require('os'); const path = require('path'); const assert = require('assert');
+(async () => {
+  const root = path.resolve(__dirname, '..'), state = fs.mkdtempSync(path.join(os.tmpdir(), 'cthulhu-ui-'));
+  const py = fs.existsSync(path.join(root, '.venv/bin/python')) ? path.join(root, '.venv/bin/python') : 'python3';
+  const server = spawn(py, ['-m', 'cthulhu_v4', 'center', '--state', state, '--port', '0', '--ws-port', '0', '--heartbeat', '1', '--question-timeout', '3'], { cwd: root });
+  let browser;
+  try {
+    const url = await new Promise((ok, bad) => { let t = ''; const timer = setTimeout(() => bad(Error('server timeout')), 10000);
+      server.stdout.on('data', b => { t += b; const m = t.match(/http:\/\/127\.0\.0\.1:\d+/); if (m) { clearTimeout(timer); ok(m[0]); } });
+      server.on('exit', c => bad(Error('server exit ' + c))); });
+    const token = fs.readFileSync(path.join(state, 'web-token'), 'utf8').trim();
+    browser = await chromium.launch({ args: ['--no-sandbox'] });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } }); page.setDefaultTimeout(15000);
+    const errors = []; page.on('pageerror', e => errors.push(e.message)); page.on('console', m => m.type() === 'error' && errors.push(m.text()));
+    await page.goto(url + '/');
+    await page.locator('#login-token').fill(token); await page.locator('#login-form button').click();
+    await page.getByText('从一个目标开始').waitFor();
+    // 加急发送
+    await page.locator('#input').fill('你好'); await page.locator('[data-priority="10"]').click();
+    const req = page.waitForRequest(r => r.url().endsWith('/api/chat'));
+    await page.locator('#input').press('Enter'); assert.equal((await req).postDataJSON().priority, 10);
+    await page.locator('.reply').getByText('[模拟 Master]', { exact: false }).waitFor();
+    // 新建任务 → 抽屉自动打开
+    await page.locator('#new-task').click();
+    const f = page.locator('#task-form');
+    await f.locator('[name=title]').fill('试用问答流程'); await f.locator('[name=description]').fill('只运行模拟任务');
+    await f.locator('[name=acceptance]').fill('问题得到回答并完成'); await f.locator('[name=cwd]').fill(state);
+    await f.locator('button[type=submit]').click();
+    await page.locator('#drawer .task-card').waitFor();
+    await page.locator('#timeline .card.question').waitFor();
+    // 在输入区回答问题
+    await page.locator('#questions textarea').fill('继续'); await page.locator('#questions .btn.primary').click();
+    await page.locator('#timeline .card.result').waitFor();
+    await page.locator('#d-state').getByText('已完成').waitFor();
+    // 工具与命令默认折叠
+    const steps = page.locator('#timeline details.step');
+    assert((await steps.count()) >= 2);
+    assert.equal(await steps.first().evaluate(d => d.open), false);
+    await steps.first().locator('summary').click(); assert.equal(await steps.first().evaluate(d => d.open), true);
+    await page.screenshot({ path: path.join(root, 'preview.png') });
+    // Esc 关闭、hash 直达
+    const hash = await page.evaluate(() => location.hash); assert(hash.startsWith('#task='));
+    await page.keyboard.press('Escape'); assert(await page.locator('#drawer').isHidden());
+    await page.goto(url + '/' + hash); await page.locator('#timeline .card.result').waitFor();
+    // 添加节点命令
+    await page.locator('#add-node').click(); await page.locator('#invite-form [name=name]').fill('gpu1');
+    await page.locator('#invite-form .btn.primary').click(); await page.locator('#invite-cmd').getByText('curl -fsSL', { exact: false }).waitFor();
+    await page.locator('#invite-form [data-close]').click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({ path: path.join(root, 'preview-mobile.png') });
+    assert.deepEqual(errors, []);
+    console.log('ui: ok');
+  } finally { if (browser) await browser.close(); server.kill(); fs.rmSync(state, { recursive: true, force: true }); }
+})().catch(e => { console.error(e); process.exit(1); });

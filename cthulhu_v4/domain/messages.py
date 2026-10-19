@@ -2,7 +2,8 @@
 
 
 class Messages:
-    def enqueue(self, sender, target, text, priority=5, *, reply_to=None, key=None):
+    def enqueue(self, sender, target, text, priority=5, *, reply_to=None, key=None, copy=False):
+        """copy=True：程序为已公开事件（提问、回答、完成）生成的路由副本，界面不再重复展示。"""
         s = self.store
         s.get('agent', target)
         task = self.task_for(target)
@@ -25,10 +26,10 @@ class Messages:
             if original['sender'] != target or original['target'] != sender:
                 raise ValueError('reply_to 必须对应双方之间的来信')
         m = {'id': self.uid('m'), 'sender': sender, 'target': target, 'text': text, 'priority': priority,
-             'state': 'queued', 'at': self.clock(), 'reply_to': reply_to, 'key': key}
+             'state': 'queued', 'at': self.clock(), 'reply_to': reply_to, 'key': key, 'copy': copy}
         s.put('message', m)
         s.emit('message', text, actor=sender, target=target, task=self.task_id(target), data=m,
-               visible=sender == 'owner' and target == 'master')
+               visible=sender == 'owner' and target == 'master' and not copy)
         if priority == 10:
             # 10 是显式打断，不只是排序。新消息已先持久化；旧回合的写权限立刻撤销，
             # 但只有节点确认进程停止后才会派发新回合，不能假装已经打断成功。

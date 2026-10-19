@@ -1,63 +1,104 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#111315"><title>Cthulhu · 工作空间</title>
-<link rel="stylesheet" href="./style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Cthulhu</title>
+<link rel="stylesheet" href="./css/app.css">
+<script type="module" src="./js/app.js"></script>
 </head>
 <body>
-<header class="topbar">
-<div class="brand"><span class="brand-symbol" aria-hidden="true">✳</span><strong>cthulhu</strong><span class="version">04</span></div>
-<div class="workspace-label">个人工作空间 <span>/</span> 中心神殿</div>
-<div class="topbar-end"><span id="status" class="connection">等待连接</span><button id="login" class="quiet-button">访问凭证</button></div>
-</header>
-<div id="error" role="alert" hidden></div>
-<main>
-<nav id="navigation" aria-label="任务与节点">
-<div class="nav-heading"><span class="eyebrow">工作空间</span><div class="nav-heading-actions"><button id="new-task" class="icon-button" aria-label="新建任务" title="新建任务">＋</button><button id="close-nav" class="icon-button mobile-menu" aria-label="收起任务列表">×</button></div></div>
-<div class="workspace-item active"><span class="workspace-icon">✳</span><span>Master 会话</span><span class="live-dot"></span></div>
-<div class="nav-section-title"><h2>任务</h2><span id="task-count" class="count">0</span></div>
-<div id="tasks" class="task-list"></div>
-<div class="nav-bottom">
-<details open class="nav-group"><summary>星系节点 <span id="node-count" class="count">0</span></summary><div id="nodes"></div></details>
-<details class="nav-group"><summary>偏好记忆 <span class="subtle">◇</span></summary><div id="memories"></div></details>
-<div class="nav-footer"><span class="live-dot"></span><span>一个目标，一个独立会话</span></div>
+<div id="app">
+  <aside id="nav" aria-label="任务与节点">
+    <div class="brand"><span class="logo" aria-hidden="true">✳</span><span>cthulhu</span><span id="conn" class="conn" title="连接中"></span></div>
+    <div class="sec-h"><h2>任务 <span id="task-count" class="count"></span></h2><button id="new-task" class="icon" type="button" title="新建任务" aria-label="新建任务">＋</button></div>
+    <div id="tasks" class="tasks"></div>
+    <div class="sec-h"><h2>节点</h2><button id="add-node" class="icon" type="button" title="添加节点" aria-label="添加节点">＋</button></div>
+    <div id="nodes" class="nodes"></div>
+  </aside>
+
+  <main id="main">
+    <header class="bar">
+      <button id="nav-toggle" class="icon mobile" type="button" aria-label="任务列表">☰</button>
+      <div class="who"><strong>Master</strong><span id="master-state" class="pill"></span><span id="model" class="muted"></span></div>
+      <button id="master-toggle" class="btn" type="button">暂停</button>
+    </header>
+    <div id="chat" class="chat" aria-live="polite"></div>
+    <div class="dock">
+      <div id="questions"></div>
+      <form id="composer" data-urgent="false">
+        <textarea id="input" rows="1" aria-label="给 Master 的消息"></textarea>
+        <div class="composer-row">
+          <div class="seg" role="group" aria-label="优先级">
+            <button type="button" data-priority="9">普通</button>
+            <button type="button" data-priority="10">加急打断</button>
+          </div>
+          <button class="btn primary" type="submit">发送</button>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <aside id="drawer" hidden aria-label="任务过程">
+    <div id="d-resize" class="resize" aria-hidden="true"></div>
+    <header class="d-head">
+      <div class="d-title-row"><h2 id="d-title"></h2><span id="d-state" class="pill"></span>
+        <button id="d-close" class="icon" type="button" aria-label="关闭（Esc）" title="关闭（Esc）">✕</button></div>
+      <div id="d-meta" class="d-meta"></div>
+      <div id="d-controls" class="d-controls"></div>
+    </header>
+    <div id="timeline" class="timeline"></div>
+    <form id="d-form" class="d-form">
+      <input id="d-input" autocomplete="off" placeholder="直接给这个执行者发消息" aria-label="给执行者的消息">
+      <label class="chk"><input id="d-urgent" type="checkbox"> 加急</label>
+      <button class="btn" type="submit">发送</button>
+    </form>
+  </aside>
 </div>
-</nav>
-<section class="conversation" aria-label="Master 会话">
-<div class="conversation-heading">
-<div class="heading-left"><button id="toggle-nav" class="icon-button mobile-menu" aria-label="展开任务列表">☰</button><div class="master-avatar">✳</div><div><h1>Master <span id="master-badge" class="status-pill">就绪</span></h1><p id="model-label">你的目标，从这里开始</p></div></div>
-<div class="header-actions"><button id="pause-master" class="quiet-button" title="暂停 Master">暂停</button><button id="resume-master" class="quiet-button" title="恢复 Master">恢复</button></div>
+
+<div id="login" hidden>
+  <form id="login-form" class="login-card">
+    <div class="logo big" aria-hidden="true">✳</div>
+    <h1>Cthulhu</h1>
+    <p class="muted">粘贴中心状态目录里 <code>web-token</code> 的内容。只保存在本浏览器。</p>
+    <input id="login-token" type="password" autocomplete="current-password" aria-label="访问凭证" required>
+    <p id="login-error" class="bad" role="alert"></p>
+    <button class="btn primary" type="submit">进入</button>
+  </form>
 </div>
-<div id="chat" class="scroll transcript" aria-label="Master 消息与执行过程">
-<div id="welcome" class="welcome"><div class="welcome-emblem">✳</div><span class="eyebrow">LET’S MAKE THINGS HAPPEN</span><h2>从一个想法开始。</h2><p>和 Master 说说你想做的事。<br>过程、进展与需要你决定的事，都在这里。</p><div class="welcome-divider"></div><span class="welcome-footnote">保持专注，剩下的交给协作。</span></div>
-</div>
-<button id="chat-latest" class="latest-button" hidden>↓ 回到最新</button>
-<div id="questions" aria-live="polite"></div>
-<div class="composer-wrap">
-<form id="chat-form" class="composer">
-<textarea id="input" placeholder="和 Master 说说你的目标…" aria-label="发送给 Master 的消息" required rows="2"></textarea>
-<div class="composer-bottom"><div class="send-mode" role="group" aria-label="发送方式"><button type="button" id="normal" aria-pressed="true">普通发送</button><button type="button" id="urgent" aria-pressed="false"><span aria-hidden="true">ϟ</span> 加急打断</button></div><span id="send-hint" class="send-hint">保留当前回合</span><button type="submit" class="send-button" aria-label="发送消息" title="发送消息">↑</button></div>
-</form>
-<div class="composer-footnote"><span>Master 的过程实时显示在会话中</span><span><kbd>Enter</kbd> 发送 <span class="separator">·</span> <kbd>Shift ↵</kbd> 换行</span></div>
-</div>
-</section>
-<aside id="activity" hidden aria-label="任务执行过程">
-<div class="activity-heading"><div><span class="eyebrow">OLD ONE · 独立会话</span><h2 id="activity-title">任务执行过程</h2><p id="activity-agent"></p></div><button id="close-activity" class="icon-button" aria-label="关闭任务侧栏">×</button></div>
-<div class="activity-toolbar"><span id="activity-count">实时过程</span><button id="follow" class="quiet-button">↓ 跟随最新</button></div>
-<div id="timeline" class="scroll transcript"><p class="transcript-empty">正在读取会话…</p></div>
-<div class="agent-composer-wrap"><form id="agent-form" class="composer"><textarea id="agent-input" aria-label="发送给当前 old_one 的消息" placeholder="给这个 old_one 发消息…" required rows="2"></textarea><div class="composer-bottom"><div class="send-mode" role="group" aria-label="执行者消息发送方式"><button type="button" id="agent-normal" aria-pressed="true">普通</button><button type="button" id="agent-urgent" aria-pressed="false"><span aria-hidden="true">ϟ</span> 加急打断</button></div><button class="send-button" aria-label="发送给执行者">↑</button></div></form><p class="agent-footnote">消息将标注「你」为来源</p></div>
-</aside>
-</main>
-<dialog id="task-dialog"><form id="task-form"><div class="dialog-heading"><span class="eyebrow">NEW TASK</span><h2>交给一个 old_one</h2><p>明确目标，让独立会话专注完成。</p></div>
-<label>任务名称<input name="title" placeholder="给任务一个清晰的名字" required></label>
-<label>目标与边界<textarea name="description" placeholder="需要做什么，有哪些约束？" required></textarea></label>
-<label>验收条件<textarea name="acceptance" placeholder="怎样判断任务已经完成？" required></textarea></label>
-<div class="form-grid"><label>执行节点<select name="node"><option value="local">local · 中心机</option></select></label><label>截止时间<input name="deadline" type="datetime-local" required></label></div>
-<label>工作目录<input name="cwd" value="/root/cthulhu-v4" required></label>
-<div class="form-grid"><label>后端<select name="backend"><option>demo</option><option>codex</option><option>claude</option></select></label><label>模型<input name="model" placeholder="使用后端默认值"></label></div>
-<p class="form-note">模拟模式不执行真实工作；原生会话在所选节点的工作目录运行。</p>
-<div class="dialog-actions"><button type="button" id="cancel-task-dialog" class="quiet-button">取消</button><button class="primary-button">创建任务 ↗</button></div></form></dialog>
-<script src="./transcript.js"></script><script src="./app.js"></script>
+
+<dialog id="task-dialog" aria-labelledby="task-dialog-t">
+  <form id="task-form" method="dialog">
+    <h2 id="task-dialog-t">新建任务</h2>
+    <label>标题<input name="title" required></label>
+    <label>目标<textarea name="description" rows="3" required></textarea></label>
+    <label>验收条件<textarea name="acceptance" rows="2" required></textarea></label>
+    <div class="row">
+      <label>节点<select name="node"></select></label>
+      <label>后端<select name="backend"><option value="">同 Master</option><option>codex</option><option>claude</option><option>demo</option></select></label>
+    </div>
+    <label>工作目录（该节点上的绝对路径）<input name="cwd" required placeholder="/home/user/project"></label>
+    <label>截止时间<input name="deadline" type="datetime-local" required></label>
+    <div class="actions"><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">创建</button></div>
+  </form>
+</dialog>
+
+<dialog id="invite-dialog" aria-labelledby="invite-dialog-t">
+  <form id="invite-form">
+    <h2 id="invite-dialog-t">添加星系节点</h2>
+    <p class="muted">生成一行命令，在执行机上用将要运行 agent 的用户执行。节点只需能访问中心，不需要开放端口。</p>
+    <label>节点名<input name="name" required pattern="[A-Za-z0-9_\-]{1,64}" placeholder="gpu1"></label>
+    <div id="invite-out" hidden>
+      <pre id="invite-cmd" class="cmd-box"></pre>
+      <p id="invite-exp" class="muted"></p>
+      <p class="muted">首次使用前在执行机上登录 <code>codex login</code> 或 <code>claude</code>。重跑同一命令即升级。</p>
+    </div>
+    <div class="actions"><button class="btn" type="button" data-close>关闭</button>
+      <button id="invite-copy" class="btn" type="button">复制</button><button class="btn primary" type="submit">生成命令</button></div>
+  </form>
+</dialog>
+
+<div id="toast" role="status" hidden></div>
 </body>
 </html>

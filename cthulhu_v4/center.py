@@ -178,7 +178,7 @@ class Center(Messages, Questions, Tasks, Review):
             if self.hub.busy('master'):
                 raise ValueError('原回合正在结束，请稍后恢复')
             a.update(paused=False, failures=0, status='idle'); s.put('agent', a)
-            self.enqueue('owner', 'master', '恢复工作。用 read_messages 核对 failed/unknown 的原始请求，核验是否已有副作用，再接续目标；同时检查 list_questions。', 9)
+            self.enqueue('owner', 'master', '恢复工作。用 read_messages 核对 failed/unknown 的原始请求，核验是否已有副作用，再接续目标；同时检查 list_questions。', 9, copy=True)
         else:
             raise ValueError('未知 action')
         s.emit('master_control', action, actor='owner', visible=True)

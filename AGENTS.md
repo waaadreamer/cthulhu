@@ -5,6 +5,6 @@
 - 原生会话与压缩交给 Codex/Claude，不自建会话摘要替代历史。
 - 重要状态变化、并发、恢复与失败边界必须有解释“为什么”的中文注释。
 - 每次改动保持能独立审核；测试实际不变量，不用假模型测试结果宣称真实模型表现。
-- 修改完成运行 python3 -m unittest discover -s tests -v；改前端再做 node --check static/app.js。
+- 修改完成运行 python3 -m unittest discover -s tests -v；改前端再做 for f in static/js/*.js; do node --check $f; done 与 node tests/test_model.mjs。
 - 原生冒烟测试会调用模型，默认测试不得隐式运行它。
 - 不提交 .state*、token、原生聊天日志和认证信息。
