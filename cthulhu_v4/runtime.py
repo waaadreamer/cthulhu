@@ -189,6 +189,8 @@ class CodexRuntime(ProcessRuntime):
         params = {'threadId': self.session, 'input': [{'type': 'text', 'text': text}],
                   'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'dangerFullAccess'}}
         if self.a.get('reasoning_effort'): params['effort'] = self.a['reasoning_effort']
+        # 每轮显式带上模型：主人在网页切换模型后，沿用同一线程也立即按新模型执行。
+        if self.a.get('model'): params['model'] = self.a['model']
         await self.request('turn/start', params)
         return await self.done
 

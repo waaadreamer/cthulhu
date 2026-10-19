@@ -198,7 +198,7 @@ class Hub:
                     continue
                 t = c.task_for(a['id'])
                 j = {'id': c.uid('turn'), 'node': node, 'agent': a['id'], 'message': m['id'],
-                     'state': 'running', 'until': c.clock() + LEASE, 'agent_spec': a,
+                     'state': 'running', 'until': c.clock() + LEASE, 'started': c.clock(), 'agent_spec': a,
                      'task': t, 'prompt': c.prompt(a['id'], m)}
                 s.put('lease', j)
                 m['state'] = 'running'; s.put('message', m)

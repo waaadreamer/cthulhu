@@ -89,7 +89,7 @@ class Store:
                 OR kind IN ('task_created', 'control', 'deadline', 'completed',
                     'question', 'answer', 'ask_owner', 'question_timeout', 'overdue',
                     'recovery', 'recovery_exhausted', 'node_attention', 'runtime_error',
-                    'orphan_process', 'interrupted', 'instruction', 'turn_failed')
+                    'orphan_process', 'interrupted', 'instruction', 'turn_failed', 'agent_config')
                 OR (actor NOT IN ('master', 'system', 'owner') AND (
                     kind IN ('message', 'reply', 'remote_result', 'native_request')
                     OR (kind = 'harness_tool' AND text IN ('wait_until', 'wait_for_reply'))

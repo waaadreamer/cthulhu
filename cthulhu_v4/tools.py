@@ -27,7 +27,8 @@ COMMON = [
 MASTER = [
     spec('create_task', '创建任务与唯一 old_one。deadline 为带时区 ISO 时间；node 选择星系节点 ID（local 表示中心机），cwd 必须是该节点上的现有绝对目录。',
          {'title': S, 'description': S, 'acceptance': S, 'deadline': S, 'cwd': S, 'node': S,
-          'backend': {'type': 'string', 'enum': ['codex', 'claude', 'demo']}, 'model': S},
+          'backend': {'type': 'string', 'enum': ['codex', 'claude', 'demo']}, 'model': S,
+          'reasoning_effort': {'type': 'string', 'enum': ['low', 'medium', 'high', 'xhigh']}},
          ['title', 'description', 'acceptance', 'deadline', 'cwd']),
     spec('tell_owner', '主动向主人主聊天框汇报判断、操作结果和风险。', {'text': S}, ['text']),
     spec('list_questions', '读取问题、当前版本与等待期限。'),

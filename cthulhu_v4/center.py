@@ -19,6 +19,8 @@ from .store import Store
 from .tools import dispatch, tools_for
 from .util import LEASE, LOCAL, TERMINAL, process_alive, uid
 
+EFFORTS = {'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}
+
 
 class Center(Messages, Questions, Tasks, Review):
     def __init__(self, state_dir, backend='demo', model=None, *, reasoning_effort=None, clock=time.time,
@@ -84,25 +86,70 @@ class Center(Messages, Questions, Tasks, Review):
             s.put('settings', schedule)
 
     def configure_master(self, backend, model, effort):
-        """启动参数与已保存的 Master 不同：只允许把尚未建立真实会话的模拟 Master 切换为真实后端。"""
+        """启动参数只是新状态目录的默认值。
+
+        已建立真实会话后，以页面里保存的配置为准（主人可能已在网页切换模型），
+        启动参数不同也不覆盖、不报错，只返回提示。尚无真实会话的模拟 Master 才按参数切换。
+        """
         s = self.store
         with s.atomic():
             a = s.get('agent', 'master')
             wanted = {'backend': backend, 'model': model, 'reasoning_effort': effort}
             if all(a.get(k) == v for k, v in wanted.items()):
-                return
+                return None
             if a['backend'] != 'demo' or (a['session'] and not a['session'].startswith('demo-')):
-                raise ValueError(f"已有 Master 使用 {a['backend']} / {a.get('model')} / {a.get('reasoning_effort')}，"
-                                 '不能静默替换真实原生会话；请使用原参数启动或换一个 --state')
+                return (f"沿用已保存的 Master 配置 {a['backend']} / {a.get('model') or '默认模型'} / "
+                        f"{a.get('reasoning_effort') or '默认强度'}；启动参数仅用于新状态目录")
             if self.hub.busy('master') or self.has_queued('master'):
                 raise ValueError('Master 尚有未处理输入，先处理完再切换')
-            previous = dict(a)
-            a.update(wanted, session=None, paused=False, status='idle', failures=0, idle_at=self.clock())
-            s.put('agent', a)
-            s.emit('master_config', f"Master 已从模拟模式切换为 {backend}：{model or '默认模型'} / {effort or '默认强度'}",
-                   data={'previous': previous, 'current': a}, visible=True)
+            self.apply_config(a, backend, model, effort, actor='system')
+            return None
 
-    # ---- 查询 ----
+    def set_agent_config(self, p):
+        """网页切换模型。同后端：沿用原生会话，下一回合生效；换后端：必须明确开新会话。"""
+        s = self.store
+        a = s.get('agent', p['agent'])
+        backend = p.get('backend') or a['backend']
+        model = (p.get('model') or '').strip() or None
+        effort = p.get('reasoning_effort') or None
+        if backend not in {'codex', 'claude', 'demo'}:
+            raise ValueError('不支持的 backend')
+        if effort and effort not in EFFORTS:
+            raise ValueError('reasoning_effort 应为 ' + '/'.join(sorted(EFFORTS)))
+        if backend != 'codex':
+            effort = None  # 推理强度目前只有 Codex 适配器显式设置
+        node = s.get('node', a.get('node') or LOCAL)
+        if node.get('backends') and backend not in node['backends']:
+            raise ValueError(f"节点 {node['id']} 没有报告可用的 {backend}")
+        task = self.task_for(a['id'])
+        if task and task['state'] in TERMINAL:
+            raise ValueError('任务已结束')
+        if backend != a['backend']:
+            if not p.get('new_session'):
+                raise ValueError('换后端会开始新的原生会话，需要明确确认')
+            if self.hub.busy(a['id']):
+                raise ValueError('当前回合仍在运行；先暂停或等它结束再换后端')
+        self.apply_config(a, backend, model, effort, actor='owner')
+        return a
+
+    def apply_config(self, a, backend, model, effort, actor):
+        s = self.store
+        previous = {k: a.get(k) for k in ('backend', 'model', 'reasoning_effort', 'session')}
+        if backend != a['backend']:
+            # 原生会话不能跨后端搬运。旧 session ID 留档便于回查，epoch 让节点不再复用本机旧指针。
+            if a.get('session'):
+                a.setdefault('previous_sessions', []).append(previous | {'at': self.clock()})
+            a.update(session=None, epoch=a.get('epoch', 0) + 1, failures=0)
+        a.update(backend=backend, model=model, reasoning_effort=effort)
+        s.put('agent', a)
+        who = 'Master' if a['id'] == 'master' else a['id']
+        label = ' / '.join(x for x in (backend, model or '默认模型', effort) if x)
+        note = '开始新的原生会话' if backend != previous['backend'] else '沿用原会话，下一回合生效'
+        s.emit('agent_config', f'{who} 切换为 {label}（{note}）', actor=actor, target=a['id'],
+               task=self.task_id(a['id']), data={'previous': previous, 'current': {'backend': backend, 'model': model, 'reasoning_effort': effort}},
+               visible=True)
+
+        # ---- 查询 ----
     def task_id(self, agent):
         return next((t['id'] for t in self.store.all('task') if t['agent'] == agent), None)
 
@@ -112,8 +159,17 @@ class Center(Messages, Questions, Tasks, Review):
 
     def snapshot(self):
         s = self.store
+        # pending 让界面在模型产生第一条输出之前就能显示“排队/启动中”，而不是一片空白。
+        pending = {}
+        for m in s.all('message'):
+            if m['state'] == 'queued':
+                pending.setdefault(m['target'], {'queued': 0, 'since': None})['queued'] += 1
+        for j in s.all('lease'):
+            if j['state'] == 'running':
+                pending.setdefault(j['agent'], {'queued': 0})['since'] = j.get('started')
+                pending[j['agent']]['stopping'] = bool(j.get('stop_reason'))
         return {'agents': s.all('agent'), 'nodes': self.hub.nodes(), 'tasks': s.all('task'),
-                'questions': s.all('question'), 'memories': s.all('memory'),
+                'questions': s.all('question'), 'memories': s.all('memory'), 'pending': pending,
                 'seq': s.highwater(), 'now': self.clock()}
 
     # ---- 与 hub 的连接点 ----

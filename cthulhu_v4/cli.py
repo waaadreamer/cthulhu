@@ -53,6 +53,8 @@ async def run_center(args):
     except ValueError as e:
         raise SystemExit(str(e))
     await app.start()
+    if app.notice:
+        print(app.notice, flush=True)
     print(f'Cthulhu 中心已启动（{args.backend}）\n  网页：{app.public_url or app.web.url}\n'
           f'  访问凭证：{state / "web-token"}\n  星系：{app.center_ws_url()}', flush=True)
     try:

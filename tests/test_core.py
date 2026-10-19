@@ -244,7 +244,26 @@ class CoreTests(unittest.TestCase):
         self.c.save_session('master', 'native-session')
         self.c.configure_master('codex', 'gpt-6-astra', 'medium')
         self.assertEqual(self.c.store.get('agent', 'master')['session'], 'native-session')
-        with self.assertRaises(ValueError): self.c.configure_master('codex', 'another-model', 'medium')
+        # 已有真实会话：启动参数不同只给提示，以页面保存的配置为准。
+        self.assertIn('沿用', self.c.configure_master('codex', 'another-model', 'medium'))
+        self.assertEqual(self.c.store.get('agent', 'master')['model'], 'gpt-6-astra')
+
+    def test_web_model_switch_keeps_session_and_backend_switch_needs_confirmation(self):
+        self.c.configure_master('codex', 'gpt-6-astra', 'medium')
+        self.c.save_session('master', 'native-session')
+        with self.c.store.atomic():
+            self.c.set_agent_config({'agent': 'master', 'backend': 'codex', 'model': 'gpt-6.1-sol', 'reasoning_effort': 'high'})
+        a = self.c.store.get('agent', 'master')
+        self.assertEqual((a['model'], a['reasoning_effort'], a['session']), ('gpt-6.1-sol', 'high', 'native-session'))
+        with self.assertRaisesRegex(ValueError, '新的原生会话'):
+            self.c.set_agent_config({'agent': 'master', 'backend': 'claude', 'model': 'claude-opus-5-5'})
+        epoch = self.c.store.get('agent', 'master').get('epoch', 0)
+        with self.c.store.atomic():
+            self.c.set_agent_config({'agent': 'master', 'backend': 'claude', 'model': 'claude-opus-5-5', 'new_session': True})
+        a = self.c.store.get('agent', 'master')
+        self.assertEqual((a['backend'], a['session'], a['reasoning_effort'], a['epoch']), ('claude', None, None, epoch + 1))
+        self.assertEqual(a['previous_sessions'][0]['session'], 'native-session')
+        self.assertTrue(any(e['kind'] == 'agent_config' for e in self.c.store.events(visible=True, limit=500)))
 
     def test_configure_master_does_not_discard_pending_input(self):
         self.c.enqueue('owner', 'master', '尚未处理的请求')

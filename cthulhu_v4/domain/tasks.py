@@ -42,7 +42,7 @@ class Tasks:
         s.put('task', task)
         s.put('agent', {'id': aid, 'node': node, 'backend': backend,
                         'model': p.get('model') or (master.get('model') if same else None),
-                        'reasoning_effort': master.get('reasoning_effort') if same and backend == 'codex' else None,
+                        'reasoning_effort': (p.get('reasoning_effort') or (master.get('reasoning_effort') if same else None)) if backend == 'codex' else None,
                         'cwd': str(cwd.resolve()) if node == LOCAL else str(cwd), 'session': None,
                         'status': 'idle', 'failures': 0, 'idle_at': self.clock(), 'paused': False})
         s.emit('task_created', f"创建任务：{task['title']}（{node}）", actor=initiator,

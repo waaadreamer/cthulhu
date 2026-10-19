@@ -103,6 +103,8 @@ class Web:
                 return c.control(body, actor='owner')
             if path == '/api/master':
                 return c.control_master(body['action'])
+            if path == '/api/agent':
+                return c.set_agent_config(body)
             if path == '/api/invite':
                 return app.invite(body.get('name', ''))
         if path == '/api/demo/escalate':

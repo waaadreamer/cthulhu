@@ -129,7 +129,8 @@ class Node:
                 continue
             spec = dict(job['agent_spec'])
             local = self.store.find('agent', spec['id'])
-            if local:
+            # 主人在中心换了后端时 epoch 增加：本机旧 session 属于另一个后端，不能复用。
+            if local and local.get('epoch', 0) == spec.get('epoch', 0):
                 if spec.get('session') and local.get('session') and local['session'] != spec['session']:
                     raise RuntimeError('中心和本机 session 不一致，拒绝执行')
                 spec['session'] = local.get('session') or spec.get('session')

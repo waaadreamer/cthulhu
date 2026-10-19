@@ -21,7 +21,7 @@ class App:
                  tls_cert=None, tls_key=None, install_url=INSTALL_URL, local_capacity=4, **timing):
         self.state = Path(state).resolve()
         self.center = Center(self.state, backend, model, reasoning_effort=reasoning_effort, **timing)
-        self.center.configure_master(backend, model, reasoning_effort)
+        self.notice = self.center.configure_master(backend, model, reasoning_effort)
         self.port, self.ws_host, self.ws_port = port, ws_host, ws_port
         self.public_url = public_url.rstrip('/') if public_url else None
         self.galaxy_url = galaxy_url
