@@ -32,6 +32,7 @@ umask 077
 mkdir -p "$CTHULHU_HOME"
 
 # 1. 代码：本地源（测试/离线）或 git 分支。只覆盖 app/，不触碰 state/。
+#    以 editable 方式安装：skills/ 与 mcp.py 按仓库路径定位，不能只装进 site-packages。
 if [[ -n "${CTHULHU_SRC:-}" ]]; then
   say "使用本地代码 $CTHULHU_SRC"
   rm -rf "$APP.new" && mkdir -p "$APP.new"
@@ -48,7 +49,7 @@ fi
 
 # 2. 虚拟环境
 if [[ ! -x "$VENV/bin/python" ]]; then say '创建虚拟环境'; "$PY" -m venv "$VENV"; fi
-"$VENV/bin/python" -m pip install -q --disable-pip-version-check --upgrade "$APP" \
+"$VENV/bin/python" -m pip install -q --disable-pip-version-check -e "$APP" \
   || die 'pip 安装失败（可设置 PIP_INDEX_URL 使用镜像后重试）'
 CLI="$VENV/bin/cthulhu"
 

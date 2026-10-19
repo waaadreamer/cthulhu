@@ -1,0 +1,18 @@
+# 安装：cp deploy/cthulhu-v4.service /etc/systemd/system/ && systemctl enable --now cthulhu-v4
+[Unit]
+Description=Cthulhu v4 center
+After=network-online.target
+
+[Service]
+ExecStart=/root/cthulhu-v4/deploy/start-center.sh
+WorkingDirectory=/root/cthulhu-v4
+Restart=on-failure
+RestartSec=5
+# 先 SIGTERM 让中心收尾（停止本机原生进程组、关闭数据库），超时才强杀。
+KillMode=mixed
+TimeoutStopSec=30
+StandardOutput=append:/root/cthulhu-v4/.state/center.log
+StandardError=append:/root/cthulhu-v4/.state/center.log
+
+[Install]
+WantedBy=multi-user.target
