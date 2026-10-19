@@ -98,6 +98,23 @@ class CoreTests(unittest.TestCase):
         out = next(e for e in r['events'] if e['kind'] == 'native:item/completed')['data']['item']['aggregatedOutput']
         self.assertIn('截断，共 100000 字符', out)
 
+    def test_codex_master_prompt_carries_core_rules_and_memories(self):
+        self.c.tool('master', 'memory', {'key': 'k', 'text': '偏好 A', 'source': '主人明确说明'})
+        state = json.loads(self.c.prompt('master', {'text': 'x'}).split('\n', 1)[1])['current_state']
+        self.assertNotIn('core_rules', state)  # demo 后端不需要
+        self.assertEqual([m['text'] for m in state['preferences']], ['偏好 A'])
+        self.c.configure_master('codex', 'gpt-6-astra', 'medium')
+        state = json.loads(self.c.prompt('master', {'text': 'x'}).split('\n', 1)[1])['current_state']
+        self.assertIn('master_decides', state['core_rules'])
+        self.assertLess(len(state['core_rules']), 1200)
+
+    def test_switch_state_is_not_stored_as_memory_and_owner_can_delete(self):
+        with self.assertRaisesRegex(ValueError, '界面开关'):
+            self.c.tool('master', 'memory', {'key': 'm', 'text': '主人已关闭「Master 全权回答」', 'source': '设置'})
+        self.c.tool('master', 'memory', {'key': 'k', 'text': '偏好 A', 'source': '主人明确说明'})
+        with self.c.store.atomic(): self.c.memory('owner', {'key': 'k', 'delete': True})
+        self.assertTrue(self.c.store.get('memory', 'k')['deleted'])
+
     def test_owner_late_correction_is_preserved(self):
         t = self.create(); q = self.question(t)
         self.c.tool('master', 'answer_question', dict(question_id=q['id'], version=1, answer='A'))

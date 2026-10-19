@@ -45,7 +45,7 @@ MASTER = [
          {'task_id': S, 'deadline': S, 'reason': S}, ['task_id', 'deadline', 'reason']),
     spec('finish_review', '先 list_tasks 再读取增量并提交报告；无新增信息返回 skipped，不补发重复报告。记录事件阅读位置。',
          {'text': S, 'cursors': {'type': 'object', 'additionalProperties': I}}, ['text', 'cursors']),
-    spec('memory', '读取或维护偏好。推测不得当成授权；source 写明依据。读取不传 key。',
+    spec('memory', '读取或维护主人的长期偏好（每回合随 current_state.preferences 提供，不受上下文压缩影响）。推测不得当成授权；source 写明依据。界面开关和任务进度等系统状态不要记录。读取不传 key。',
          {'key': S, 'text': S, 'source': S, 'inferred': B, 'delete': B}),
 ]
 WORKER = [
