@@ -2,7 +2,7 @@
 
 Codex 使用 app-server；Claude 使用持久 stream-json CLI。两者均挂同一个
 MCP server，所有公开输出原样入事件库。运行时事件流包含工具与 hook 事件，
-无需为采集额外执行 shell hooks。一次只有一个活动 turn（Core 负责串行）。
+无需为采集额外执行 shell hooks。一个 agent 同时只有一个活动 turn（中心租约保证）。
 """
 import asyncio
 import json
@@ -11,12 +11,23 @@ import signal
 import sys
 import uuid
 
-from .core import ROOT, process_identity
+from .util import ROOT, process_identity
+
+
+class Sink:
+    """运行时与外界的窄接口；由节点实现。运行时不接触业务状态。
+
+    native(kind, payload)  记录原生公开事件
+    session(sid)           原生 session 指针（先落盘再上传）
+    pid(pid, identity)     记录/清除子进程，用于重启后的孤儿检测
+    tool(name, args)       经节点调用中心工具（demo 使用；真实后端走 MCP）
+    url, token             本机 MCP 桥地址与本 agent 的 token
+    """
 
 
 class ProcessRuntime:
-    def __init__(self, core, agent):
-        self.core, self.a = core, agent
+    def __init__(self, sink, agent):
+        self.sink, self.a = sink, agent
         self.proc = None
         self.readers = []
         self.done = None
@@ -25,7 +36,7 @@ class ProcessRuntime:
     def env(self):
         env = os.environ.copy()
         env.pop('CLAUDECODE', None)  # harness 启动独立会话，不嵌套当前交互客户端。
-        env.update(CTHULHU_URL=self.core.url, CTHULHU_AGENT=self.a['id'], CTHULHU_TOKEN=self.a['token'])
+        env.update(CTHULHU_URL=self.sink.url, CTHULHU_AGENT=self.a['id'], CTHULHU_TOKEN=self.sink.token)
         return env
 
     def instructions(self):
@@ -40,16 +51,14 @@ class ProcessRuntime:
         self.proc = await asyncio.create_subprocess_exec(*argv, cwd=self.a['cwd'], env=self.env(),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             limit=16 * 1024 * 1024, start_new_session=True)
-        a = self.core.store.get('agent', self.a['id'])
-        a.update(pid=self.proc.pid, pid_identity=process_identity(self.proc.pid))
-        self.core.store.put('agent', a)
+        self.sink.pid(self.proc.pid, process_identity(self.proc.pid))
         self.readers.append(asyncio.create_task(self.stderr()))
 
     async def stderr(self):
         while line := await self.proc.stderr.readline():
             text = line.decode(errors='replace')
             self.stderr_tail = (self.stderr_tail + text)[-6000:]
-            self.core.record_native(self.a['id'], 'stderr', {'text': text})
+            self.sink.native('stderr', {'text': text})
 
     async def write(self, payload):
         self.proc.stdin.write((json.dumps(payload, ensure_ascii=False) + '\n').encode())
@@ -73,16 +82,14 @@ class ProcessRuntime:
             reader.cancel()
         await asyncio.gather(*self.readers, return_exceptions=True)
         self.readers.clear()
-        a = self.core.store.get('agent', self.a['id'])
-        if self.proc and a.get('pid') == self.proc.pid:
-            a.update(pid=None, pid_identity=None)
-            self.core.store.put('agent', a)
+        if self.proc:
+            self.sink.pid(None, None)
         self.proc = None
 
 
 class CodexRuntime(ProcessRuntime):
-    def __init__(self, core, agent):
-        super().__init__(core, agent)
+    def __init__(self, sink, agent):
+        super().__init__(sink, agent)
         self.pending, self.serial, self.final = {}, 0, []
         self.session = agent['session']
 
@@ -125,8 +132,8 @@ class CodexRuntime(ProcessRuntime):
             params['developerInstructions'] = self.instructions()
             response = await self.request('thread/start', params)
             self.session = response['thread']['id']
-            self.core.save_session(self.a['id'], self.session)
-        self.core.record_native(self.a['id'], 'runtime_config', {
+            self.sink.session(self.session)
+        self.sink.native('runtime_config', {
             'model': response.get('model'), 'reasoning_effort': response.get('reasoningEffort'),
             'session': self.session, 'approval_policy': response.get('approvalPolicy'),
             'sandbox': response.get('sandbox')})
@@ -148,7 +155,7 @@ class CodexRuntime(ProcessRuntime):
                         else: fut.set_result(frame.get('result', {}))
                     continue
                 method, p = frame.get('method', ''), frame.get('params', {})
-                self.core.record_native(self.a['id'], method, p)
+                self.sink.native(method, p)
                 if 'id' in frame:
                     # 首版无原生审批 UI。明确拒绝而非挂起；模型可通过 ask_master 说明需求。
                     if method.endswith('requestApproval'):
@@ -157,8 +164,7 @@ class CodexRuntime(ProcessRuntime):
                         await self.write({'id': frame['id'], 'result': {'answers': {}}})
                     else:
                         await self.write({'id': frame['id'], 'error': {'code': -32601, 'message': 'Unsupported request'}})
-                    self.core.store.emit('native_request', '原生审批/输入请求未执行，请通过 harness 问题工具处理：' + method,
-                                         target=self.a['id'], task=self.core.task_id(self.a['id']), visible=True)
+                    self.sink.native('declined_request', {'method': method})
                 if method == 'item/completed':
                     item = p.get('item', {})
                     if item.get('type') == 'agentMessage' and item.get('phase') != 'commentary':
@@ -188,8 +194,8 @@ class CodexRuntime(ProcessRuntime):
 
 
 class ClaudeRuntime(ProcessRuntime):
-    def __init__(self, core, agent):
-        super().__init__(core, agent)
+    def __init__(self, sink, agent):
+        super().__init__(sink, agent)
         self.session = agent['session'] or str(uuid.uuid4())
 
     async def start(self):
@@ -208,9 +214,9 @@ class ClaudeRuntime(ProcessRuntime):
         try:
             while line := await self.proc.stdout.readline():
                 frame = json.loads(line)
-                self.core.record_native(self.a['id'], frame.get('type', 'unknown'), frame)
+                self.sink.native(frame.get('type', 'unknown'), frame)
                 if frame.get('type') == 'system' and frame.get('subtype') == 'init':
-                    self.core.save_session(self.a['id'], frame['session_id'])
+                    self.sink.session(frame['session_id'])
                 if frame.get('type') == 'result' and self.done and not self.done.done():
                     if frame.get('is_error'):
                         self.fail(frame.get('result') or str(frame.get('errors', frame)))
@@ -229,37 +235,48 @@ class ClaudeRuntime(ProcessRuntime):
 
 
 class DemoRuntime:
-    """可预测的本地演示，不联网、不伪装成真实模型结果。"""
-    def __init__(self, core, agent):
-        self.core, self.a = core, agent
+    """可预测的本地演示：不联网、不调用模型、不执行命令，也不伪装成真实模型结果。
+
+    与真实后端走同一条节点 → 中心工具路径，用来验证调度与协议，而不是模型质量。
+    """
+    def __init__(self, sink, agent):
+        self.sink, self.a = sink, agent
 
     async def run(self, text):
-        c, aid = self.core, self.a['id']
-        if not self.a['session']:
+        sink, aid = self.sink, self.a['id']
+        if not self.a.get('session'):
             self.a['session'] = 'demo-' + aid
-            c.save_session(aid, self.a['session'])
-        c.record_native(aid, 'demo', {'text': '模拟模式：正在处理输入，不调用模型或执行命令。'})
+            sink.session(self.a['session'])
+        payload = json.loads(text.split('\n', 1)[1])
+        message, task = payload['message'], payload['current_state']['task']
+        sink.native('demo', {'text': '模拟模式：正在处理输入，不调用模型或执行命令。'})
         await asyncio.sleep(0.15)
-        message = json.loads(text.split('\n', 1)[1])['message']
         if aid == 'master':
             if message.get('key') == 'review':
-                tasks = c.tool(aid, 'list_tasks', {})['tasks']
-                c.tool(aid, 'finish_review', {'text': '[模拟审核] ' + '；'.join(t['title'] + '：' + t['state'] for t in tasks),
-                                             'cursors': {t['id']: c.store.highwater() for t in tasks}})
+                tasks = (await sink.tool('list_tasks', {}))['tasks']
+                await sink.tool('finish_review', {
+                    'text': '[模拟审核] ' + '；'.join(t['title'] + '：' + t['state'] for t in tasks),
+                    'cursors': {t['id']: t['review_cursor'] for t in tasks}})
                 return ''
             return '[模拟 Master] 已收到。请用「新建任务」试用完整任务、提问与侧栏流程；实际模型请选择 codex/claude 模式。'
-        task = c.task_for(aid)
-        if task['state'] == 'completed': return '[模拟] 原任务已经完成，记录在任务事件中。'
-        if task['state'] == 'waiting': return '[模拟] 等待问题答复。'
-        if not any(q['task'] == task['id'] for q in c.store.all('question')):
-            c.tool(aid, 'ask_master', {'text': '这是模拟问题：是否按任务验收条件继续？',
-                   'recommendation': '建议继续；本演示不会修改业务文件。', 'blocking': True})
-            return '[模拟] 已提出问题，等待回答。'
-        c.tool(aid, 'finish_task', {'result': '[模拟] 任务流程演示完成。', 'evidence': '本地事件记录；未执行真实业务。'})
-        return '[模拟] 完成。'
+        if task['state'] == 'completed':
+            return '[模拟] 原任务已经完成，记录在任务事件中。'
+        if '回答/修正' in message['text']:
+            sink.native('item/completed', {'item': {'id': 'demo-cmd-' + message['id'], 'type': 'commandExecution',
+                        'command': 'echo 模拟验证', 'status': 'completed', 'exitCode': 0,
+                        'aggregatedOutput': '模拟验证'}})
+            await sink.tool('finish_task', {'result': '[模拟] 任务流程演示完成。',
+                                            'evidence': '本地事件记录；未执行真实业务。'})
+            return '[模拟] 完成。'
+        if task['state'] == 'waiting':
+            return '[模拟] 等待问题答复。'
+        await sink.tool('ask_master', {'text': '这是模拟问题：是否按任务验收条件继续？',
+                                       'recommendation': '建议继续；本演示不会修改业务文件。', 'blocking': True})
+        return '[模拟] 已提出问题，等待回答。'
 
-    async def close(self): pass
+    async def close(self):
+        pass
 
 
-def make_runtime(core, agent):
-    return {'codex': CodexRuntime, 'claude': ClaudeRuntime, 'demo': DemoRuntime}[agent['backend']](core, agent)
+def make_runtime(sink, agent):
+    return {'codex': CodexRuntime, 'claude': ClaudeRuntime, 'demo': DemoRuntime}[agent['backend']](sink, agent)

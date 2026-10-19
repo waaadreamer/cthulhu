@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cthulhu-v4"
+version = "4.1.0"
+requires-python = ">=3.11"
+dependencies = ["websockets==15.0.1"]
+
+[project.scripts]
+cthulhu = "cthulhu_v4.cli:main"
+
+[tool.setuptools]
+packages = ["cthulhu_v4", "cthulhu_v4.domain"]

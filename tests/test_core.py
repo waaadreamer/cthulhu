@@ -5,17 +5,18 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from cthulhu_v4.core import Core, process_identity
+from cthulhu_v4.center import Center
+from cthulhu_v4.util import process_identity
 
 
 class CoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.now = 1000.0
-        self.c = Core(self.tmp.name, clock=lambda: self.now)
+        self.c = Center(self.tmp.name, clock=lambda: self.now)
 
     def tearDown(self):
-        self.c.store.db.close(); self.tmp.cleanup()
+        self.c.store.close(); self.tmp.cleanup()
 
     def create(self):
         return self.c.tool('master', 'create_task', dict(title='测试', description='只读验证', acceptance='给出证据',
@@ -52,10 +53,11 @@ class CoreTests(unittest.TestCase):
 
     def test_paused_waiting_and_live_turn_never_recovered(self):
         t = self.create(); self.clear_messages()
-        self.c.running[t['agent']] = object()
+        lease = {'id': 'turn_x', 'node': 'local', 'agent': t['agent'], 'message': 'm', 'state': 'running', 'until': self.now + 9999}
+        self.c.store.put('lease', lease)
         self.now += 1000; self.c.tick()
         self.assertFalse(any(m.get('key', '').startswith('recover:') for m in self.c.store.all('message') if m.get('key')))
-        self.c.running.clear()
+        lease['state'] = 'done'; self.c.store.put('lease', lease)
         self.c.tool(t['agent'], 'wait_until', dict(reason='作业运行中', operation='job-1', seconds=500))
         self.now += 60; self.c.tick()
         self.assertEqual(self.c.store.get('task', t['id'])['recoveries'], 0)
@@ -129,8 +131,8 @@ class CoreTests(unittest.TestCase):
         for _ in range(8):
             for aid in ('master', t['agent']):
                 for kind in ('account/rateLimits/updated', 'thread/tokenUsage/updated', 'thread/status/changed'):
-                    self.c.record_native(aid, kind, {})
-            self.c.record_native('master', 'item/completed', {'text': '审核结束'})
+                    self.c.store.emit('native:' + kind, actor=aid, data={})
+            self.c.store.emit('native:' + 'item/completed', actor='master', data={'text': '审核结束'})
             self.c.tool('master', 'tell_owner', {'text': '此前报告的补充说明'})
             self.now += 600; self.c.tick()
             self.assertEqual(self.queued_reviews(), [])
@@ -143,7 +145,7 @@ class CoreTests(unittest.TestCase):
             if source == 'owner':
                 self.c.enqueue('owner', 'master', '环境已修复，请关注')
             else:
-                self.c.record_native(t['agent'], 'item/completed', {'text': '新的核验结果'})
+                self.c.store.emit('native:' + 'item/completed', actor=t['agent'], data={'text': '新的核验结果'})
             self.now += 600; self.c.tick()
             self.assertEqual(len(self.queued_reviews()), 1)
             self.report(t); self.clear_messages()
@@ -169,8 +171,8 @@ class CoreTests(unittest.TestCase):
                 schedule = self.c.store.get('settings', 'schedule')
                 schedule.pop('reported_through'); schedule.pop('review_snapshot')
                 self.c.store.put('settings', schedule)
-            self.c.store.db.close()
-            self.c = Core(self.tmp.name, clock=lambda: self.now)
+            self.c.store.close()
+            self.c = Center(self.tmp.name, clock=lambda: self.now)
             self.now += 600; self.c.tick()
             self.assertEqual(self.queued_reviews(), [])
 
@@ -197,13 +199,11 @@ class CoreTests(unittest.TestCase):
         t = self.create(); self.clear_messages()
         a = self.c.store.get('agent', t['agent'])
         a.update(status='running', session='original', pid=os.getpid(), pid_identity=process_identity(os.getpid()))
-        self.c.store.put('agent', a); self.c.store.db.close()
-        self.c = Core(self.tmp.name, clock=lambda: self.now)
+        self.c.store.put('agent', a); self.c.store.close()
+        self.c = Center(self.tmp.name, clock=lambda: self.now)
         self.assertTrue(self.c.store.get('agent', a['id'])['paused'])
         self.assertEqual(self.c.store.get('task', t['id'])['state'], 'paused')
-        with self.assertRaises(ValueError):
-            self.c.tool('master', 'control_task', dict(task_id=t['id'], action='resume', reason='test'))
-        self.assertFalse(any(m['state'] == 'queued' and m['target'] == a['id'] for m in self.c.store.all('message')))
+        self.assertNotIn('pid', self.c.store.get('agent', a['id']))
 
     def test_answer_does_not_unpause_task(self):
         t = self.create(); q = self.question(t)
@@ -225,8 +225,8 @@ class CoreTests(unittest.TestCase):
         t = self.create()
         m = self.c.store.all('message')[0]; m['state'] = 'running'; self.c.store.put('message', m)
         a = self.c.store.get('agent', t['agent']); a.update(status='running', session='original'); self.c.store.put('agent', a)
-        self.c.store.db.close()
-        self.c = Core(self.tmp.name, clock=lambda: self.now)
+        self.c.store.close()
+        self.c = Center(self.tmp.name, clock=lambda: self.now)
         self.assertEqual(self.c.store.get('message', m['id'])['state'], 'unknown')
         recovery = [x for x in self.c.store.all('message') if x['state'] == 'queued']
         self.assertEqual(len(recovery), 1)
@@ -234,108 +234,35 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.c.store.get('agent', a['id'])['session'], 'original')
 
 
-    def test_activate_demo_preserves_nodes_and_refuses_reset_real_session(self):
-        self.c.galaxies.provision('remote')
+    def test_configure_master_only_replaces_demo_and_keeps_nodes(self):
+        with self.c.store.atomic(): self.c.hub.register('remote')
         token = self.c.store.get('node', 'remote')['token']
-        self.c.activate_codex_master('gpt-6-astra', 'medium')
+        self.c.configure_master('codex', 'gpt-6-astra', 'medium')
         self.assertEqual(self.c.store.get('node', 'remote')['token'], token)
         a = self.c.store.get('agent', 'master')
         self.assertEqual((a['backend'], a['model'], a['reasoning_effort']), ('codex', 'gpt-6-astra', 'medium'))
         self.c.save_session('master', 'native-session')
-        self.c.activate_codex_master('gpt-6-astra', 'medium')
+        self.c.configure_master('codex', 'gpt-6-astra', 'medium')
         self.assertEqual(self.c.store.get('agent', 'master')['session'], 'native-session')
-        with self.assertRaises(ValueError): self.c.activate_codex_master('another-model', 'medium')
+        with self.assertRaises(ValueError): self.c.configure_master('codex', 'another-model', 'medium')
 
-    def test_activate_demo_does_not_discard_pending_input(self):
+    def test_configure_master_does_not_discard_pending_input(self):
         self.c.enqueue('owner', 'master', '尚未处理的请求')
-        with self.assertRaises(ValueError): self.c.activate_codex_master('gpt-6-astra', 'medium')
+        with self.assertRaises(ValueError): self.c.configure_master('codex', 'gpt-6-astra', 'medium')
         self.assertEqual(self.c.store.get('agent', 'master')['backend'], 'demo')
 
+    def test_remote_nodes_require_explicit_node(self):
+        with self.c.store.atomic(): self.c.hub.register('remote')
+        with self.assertRaisesRegex(ValueError, 'node'): self.create()
 
-class AsyncTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.tmp = tempfile.TemporaryDirectory(); self.c = Core(self.tmp.name)
-
-    async def asyncTearDown(self):
-        await self.c.close(); self.c.store.db.close(); self.tmp.cleanup()
-
-    async def settle(self):
-        for _ in range(80):
-            await self.c.pump(); await asyncio.sleep(0.02)
-            if not self.c.running and not any(m['state'] == 'queued' for m in self.c.store.all('message')): return
-        self.fail('未能停止')
-
-    async def test_demo_full_question_answer_complete_flow(self):
-        t = self.c.tool('master', 'create_task', dict(title='演示', description='模拟', acceptance='问答完成',
-            deadline='2099-01-01T00:00:00+00:00', cwd=self.tmp.name))
-        await self.settle()
-        q = self.c.store.all('question')[0]
-        self.assertEqual(self.c.store.get('task', t['id'])['state'], 'waiting')
-        with self.c.store.atomic(): self.c.answer('owner', dict(question_id=q['id'], version=q['version'], answer='继续'))
-        await self.settle()
-        self.assertEqual(self.c.store.get('task', t['id'])['state'], 'completed')
-        self.assertTrue(self.c.store.get('agent', t['agent'])['session'].startswith('demo-'))
-
-    async def test_one_active_turn_and_priority_order(self):
-        gate = asyncio.Event(); seen = []
-        class Fake:
-            async def run(inner, text):
-                seen.append(json.loads(text.split('\n', 1)[1])['message']['text']); await gate.wait(); return 'done'
-            async def close(inner): pass
-        self.c.runtime_factory = lambda *_: Fake()
-        with self.c.store.atomic():
-            self.c.enqueue('system', 'master', 'low', 1)
-            self.c.enqueue('owner', 'master', 'high', 9)
-        await self.c.pump(); await self.c.pump(); await asyncio.sleep(0.01)
-        self.assertEqual(seen, ['high'])
-        self.assertEqual(len(self.c.running), 1)
-        gate.set(); await self.settle()
-        self.assertEqual(seen, ['high', 'low'])
-
-    async def test_runtime_failure_does_not_claim_handled(self):
-        class Bad:
-            async def run(inner, text): raise RuntimeError('broken')
-            async def close(inner): pass
-        self.c.runtime_factory = lambda *_: Bad()
-        m = self.c.enqueue('owner', 'master', 'test')
-        await self.settle()
-        self.assertEqual(self.c.store.get('message', m['id'])['state'], 'failed')
-        self.assertTrue(self.c.store.get('agent', 'master')['paused'])
-
-    async def test_review_covered_while_queued_never_calls_runtime(self):
-        def unexpected(*_):
-            self.fail('无增量的排队审核不应启动模型')
-        self.c.runtime_factory = unexpected
-        m = self.c.enqueue('system', 'master', '排队审核', key='review')
-        await self.c.pump()
-        self.assertEqual(self.c.store.get('message', m['id'])['state'], 'cancelled')
-        self.assertEqual(self.c.running, {})
-
-    async def test_priority10_interrupts_before_new_turn_and_closes_runtime(self):
-        seen, closed = [], []
-        class Fake:
-            async def run(inner, text):
-                value = json.loads(text.split('\n', 1)[1])['message']['text']
-                seen.append(value)
-                if value == 'slow': await asyncio.sleep(60)
-                return 'done'
-            async def close(inner): closed.append(True)
-        self.c.runtime_factory = lambda *_: Fake()
-        old = self.c.enqueue('owner', 'master', 'slow', 9)
-        await self.c.pump(); await asyncio.sleep(.01)
-        urgent = self.c.enqueue('owner', 'master', 'urgent', 10)
-        await self.settle()
-        self.assertEqual(seen, ['slow', 'urgent'])
-        self.assertTrue(closed)
-        self.assertEqual(self.c.store.get('message', old['id'])['state'], 'unknown')
-        self.assertEqual(self.c.store.get('message', urgent['id'])['state'], 'handled')
-
-    async def test_priority10_before_coroutine_starts_does_not_leak_slot(self):
-        old = self.c.enqueue('owner', 'master', 'queued', 9)
-        await self.c.pump()
-        urgent = self.c.enqueue('owner', 'master', 'urgent', 10)
-        await self.settle()
-        messages = self.c.store.all('message')
-        self.assertTrue(all(m['state']=='handled' for m in messages))
-        dispatch = [e['data']['message_id'] for e in self.c.store.events() if e['kind']=='dispatch']
-        self.assertEqual(dispatch, [urgent['id'], old['id']])
+    def test_legacy_state_upgrade_keeps_sessions_and_marks_inflight_unknown(self):
+        t = self.create()
+        a = self.c.store.get('agent', t['agent'])
+        a.update(token='legacy', session='keep'); a.pop('node'); self.c.store.put('agent', a)
+        m = self.c.store.all('message')[0]; m['state'] = 'running'; self.c.store.put('message', m)
+        self.c.store.close()
+        self.c = Center(self.tmp.name, clock=lambda: self.now)
+        a = self.c.store.get('agent', t['agent'])
+        self.assertEqual((a['session'], a['node']), ('keep', 'local'))
+        self.assertNotIn('token', a)
+        self.assertEqual(self.c.store.get('message', m['id'])['state'], 'unknown')

@@ -68,6 +68,16 @@ class Store:
         rows = self.db.execute('SELECT * FROM events WHERE ' + ' AND '.join(clauses) + ' ORDER BY seq LIMIT ?', args)
         return [dict(r) | {'data': json.loads(r['data'])} for r in rows]
 
+    def find(self, kind, ident):
+        row = self.db.execute('SELECT data FROM objects WHERE kind=? AND id=?', (kind, ident)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def delete(self, kind, ident):
+        self.db.execute('DELETE FROM objects WHERE kind=? AND id=?', (kind, ident))
+
+    def close(self):
+        self.db.close()
+
     def highwater(self):
         return self.db.execute('SELECT COALESCE(MAX(seq),0) FROM events').fetchone()[0]
 
@@ -79,7 +89,7 @@ class Store:
                 OR kind IN ('task_created', 'control', 'deadline', 'completed',
                     'question', 'answer', 'ask_owner', 'question_timeout', 'overdue',
                     'recovery', 'recovery_exhausted', 'node_attention', 'runtime_error',
-                    'runtime_updated', 'orphan_process', 'interrupted', 'instruction')
+                    'orphan_process', 'interrupted', 'instruction', 'turn_failed')
                 OR (actor NOT IN ('master', 'system', 'owner') AND (
                     kind IN ('message', 'reply', 'remote_result', 'native_request')
                     OR (kind = 'harness_tool' AND text IN ('wait_until', 'wait_for_reply'))

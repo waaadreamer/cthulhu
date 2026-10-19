@@ -1,12 +1,13 @@
-"""唯一的工具目录，Codex 与 Claude 均通过同一个 MCP bridge 使用。"""
+"""唯一的工具目录与分发表；Codex 与 Claude 通过同一个 MCP bridge 使用。"""
 S = {'type': 'string'}
 I = {'type': 'integer'}
 B = {'type': 'boolean'}
+READ_ONLY = {'list_tasks', 'read_task_events', 'list_questions', 'read_messages', 'list_nodes'}
 
 
 def spec(name, description, props=None, required=()):
     return {'name': name, 'description': description,
-            'annotations': {'readOnlyHint': name in {'list_tasks', 'read_task_events', 'list_questions', 'read_messages', 'list_nodes'},
+            'annotations': {'readOnlyHint': name in READ_ONLY,
                             'destructiveHint': name in {'control_task', 'memory'}, 'openWorldHint': False},
             'inputSchema': {'type': 'object', 'properties': props or {},
                             'required': list(required), 'additionalProperties': False}}
@@ -57,3 +58,38 @@ WORKER = [
 def tools_for(agent):
     return ([t for t in COMMON if t['name'] != 'wait_for_reply'] + MASTER
             if agent == 'master' else COMMON + WORKER)
+
+
+def send_message(c, actor, p):
+    message = c.enqueue(actor, p['to'], p['text'], p.get('priority', 5), reply_to=p.get('reply_to'))
+    if actor == 'master':
+        # Master 的纠正指令公开到主聊天，并明确只是“已入队”，不是已执行。
+        c.store.emit('instruction', p['text'], actor=actor, target=p['to'], task=c.task_id(p['to']),
+                     data={'message_id': message['id'], 'delivery': 'queued'}, visible=True)
+    return message
+
+
+HANDLERS = {
+    'list_nodes': lambda c, a, p: c.hub.nodes(),
+    'list_tasks': lambda c, a, p: c.list_tasks(a),
+    'read_messages': lambda c, a, p: c.read_messages(a, p.get('limit', 30)),
+    'read_task_events': lambda c, a, p: c.read_task_events(p),
+    'send_message': send_message,
+    'create_task': lambda c, a, p: c.create_task(p),
+    'ask_master': lambda c, a, p: c.question(a, p),
+    'list_questions': lambda c, a, p: c.store.all('question'),
+    'answer_question': lambda c, a, p: c.answer(a, p),
+    'ask_owner': lambda c, a, p: c.ask_owner(a, p),
+    'tell_owner': lambda c, a, p: {'seq': c.store.emit('chat', p['text'], actor='master', visible=True)},
+    'finish_review': lambda c, a, p: c.finish_review(p),
+    'control_task': lambda c, a, p: c.control(p),
+    'set_deadline': lambda c, a, p: c.set_deadline(a, p),
+    'memory': lambda c, a, p: c.memory(a, p),
+    'finish_task': lambda c, a, p: c.finish_task(a, p),
+    'wait_for_reply': lambda c, a, p: c.wait(a, 'wait_for_reply', p),
+    'wait_until': lambda c, a, p: c.wait(a, 'wait_until', p),
+}
+
+
+def dispatch(center, actor, name, args):
+    return HANDLERS[name](center, actor, args)
