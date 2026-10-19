@@ -51,7 +51,7 @@ const item = (actor, it, done = true) => ev(actor, 'native:item/' + (done ? 'com
   assert.equal(bash.type, 'command'); assert.equal(bash.output, '3 passed'); assert.equal(bash.status, 'completed');
   assert.equal(edit.type, 'patch'); assert.deepEqual(diffStat(edit.files[0].diff), { add: 1, del: 1 });
   assert.equal(edit.status, 'running');
-  assert.equal(mcp.name, 'cthulhu · ask_master'); assert.equal(mcp.status, 'failed');
+  assert.equal(mcp.name, 'ask_master'); assert.equal(mcp.server, 'cthulhu'); assert.equal(mcp.status, 'failed');
 }
 
 // 主会话 process 模式：Master 的最终回复不进过程区（由 chat 事件单独显示），其他 agent 的消息不出现。
@@ -62,6 +62,17 @@ const item = (actor, it, done = true) => ev(actor, 'native:item/' + (done ? 'com
   m.apply(item('master', { id: 't', type: 'mcpToolCall', server: 'cthulhu', tool: 'list_nodes', arguments: {}, status: 'completed' }));
   assert.deepEqual(m.live().map(b => b.type), ['tool']);
   assert.equal(m.dropText('不存在'), false);
+}
+
+// 原生重连只保留最新进度，并在工作中指示里显示。
+{
+  const m = new Model('master', 'process');
+  m.apply(ev('master', 'native:error', { error: { message: 'Reconnecting... 2/5' } }));
+  m.apply(ev('master', 'native:error', { error: { message: 'Reconnecting... 3/5' } }));
+  assert.equal(m.live().length, 1);
+  assert.deepEqual(m.activity(), { kind: 'retry', text: '模型连接中断，正在重连（3/5）' });
+  m.apply(item('master', { id: 'c2', type: 'commandExecution', command: 'nvidia-smi', status: 'inProgress' }, false));
+  assert.equal(m.activity().kind, 'command');
 }
 
 assert.equal(unwrapShell("/bin/bash -lc 'echo '\\''hi'\\'''"), "echo 'hi'");

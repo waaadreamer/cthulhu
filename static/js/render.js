@@ -8,6 +8,7 @@ const trunc = (s, n) => { s = String(s || '').replace(/\s+/g, ' ').trim(); retur
 const seconds = ms => ms == null ? '' : ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
 const base = p => String(p || '').split('/').pop();
 const STATUS = { running: '进行中', failed: '失败', completed: '完成' };
+const ICON = { command: '❯', tool: '◆', patch: '✎', log: '≡' };
 
 function out(text, cls = 'out') {
   text = clean(text).replace(/\n+$/, '');
@@ -30,7 +31,7 @@ function diff(text) {
 }
 
 function step(b, icon, title, meta, body) {
-  return el('details', { class: 'step', 'data-status': b.status || 'completed' },
+  return el('details', { class: 'step', 'data-kind': b.type, 'data-status': b.status || 'completed' },
     el('summary', {},
       el('span', { class: 'ic', 'aria-hidden': 'true', text: icon }),
       el('span', { class: 'ti' }, ...title),
@@ -43,7 +44,7 @@ const label = t => el('div', { class: 'lbl', text: t });
 
 export function render(b) {
   switch (b.type) {
-    case 'turn': return el('div', { class: 'turn', role: 'separator' }, el('span', { text: '新回合 · ' + clock(b.at) }));
+    case 'turn': return el('div', { class: 'turn', role: 'separator' }, el('span', { text: '新回合 ' + clock(b.at) }));
     case 'task': {
       const t = b.task || {};
       return el('section', { class: 'card task-card' },
@@ -67,7 +68,7 @@ export function render(b) {
       const cmd = String(b.command || ''), first = cmd.split('\n')[0];
       const meta = [b.exitCode != null && b.exitCode !== 0 ? el('span', { class: 'bad', text: 'exit ' + b.exitCode }) : null,
         seconds(b.duration) || null].filter(Boolean);
-      return step(b, '$', [el('code', { text: trunc(first, 140) + (cmd.includes('\n') ? ' …' : '') })], meta,
+      return step(b, ICON.command, [el('code', { text: trunc(first, 140) + (cmd.includes('\n') ? ' …' : '') })], meta,
         [b.description ? el('div', { class: 'desc', text: b.description }) : null,
          cmd.includes('\n') || cmd.length > 140 ? out(cmd, 'cmd') : null,
          b.cwd ? el('div', { class: 'desc', text: b.cwd }) : null,
@@ -75,7 +76,8 @@ export function render(b) {
     }
     case 'tool': {
       const arg = trunc(preview(b.input), 90);
-      return step(b, '⚙', [el('span', { class: 'name', text: b.name }), arg ? el('span', { class: 'arg', text: arg }) : null],
+      return step(b, ICON.tool, [el('span', { class: 'name', text: b.name }), b.server ? el('span', { class: 'srv', text: b.server }) : null,
+        arg ? el('span', { class: 'arg', text: arg }) : null],
         seconds(b.duration), [label('参数'), out(toText(b.input) || '{}'), b.output != null ? label('结果') : null,
           b.output != null ? out(toText(b.output)) : null]);
     }
@@ -83,20 +85,20 @@ export function render(b) {
       const files = b.files || [];
       let add = 0, del = 0;
       for (const f of files) { const s = diffStat(f.diff); add += s.add; del += s.del; }
-      return step(b, '±', [el('span', { class: 'name', text: '编辑' }), el('span', { class: 'arg', text: files.map(f => base(f.path)).join(', ') })],
+      return step(b, ICON.patch, [el('span', { class: 'name', text: '编辑' }), el('span', { class: 'arg', text: files.map(f => base(f.path)).join(', ') })],
         [el('span', { class: 'add', text: '+' + add }), el('span', { class: 'del', text: '−' + del })],
         files.map(f => el('div', { class: 'file' }, el('div', { class: 'file-h', text: f.path }), diff(f.diff))));
     }
     case 'result':
-      return el('section', { class: 'card result' }, el('div', { class: 'card-k', text: '✓ 任务结果' }), markdown(b.text),
+      return el('section', { class: 'card result' }, el('div', { class: 'card-k', text: '任务结果' }), markdown(b.text),
         b.evidence ? el('details', { class: 'evidence', open: true }, el('summary', { text: '证据' }), markdown(b.evidence)) : null);
     case 'question':
-      return el('section', { class: 'card question' }, el('div', { class: 'card-k', text: b.blocking ? '提问 · 等待回答' : '提问' }),
+      return el('section', { class: 'card question' }, el('div', { class: 'card-k', text: b.blocking ? '提问，等待回答' : '提问' }),
         markdown(b.text), b.recommendation ? el('p', { class: 'rec', text: '建议：' + b.recommendation }) : null);
     case 'notice': return el('div', { class: 'notice ' + (b.level || 'info') }, el('span', { text: b.text }), el('time', { text: clock(b.at) }));
     case 'log':
-      return el('details', { class: 'step log' }, el('summary', {}, el('span', { class: 'ic', text: '≡' }),
-        el('span', { class: 'ti', text: `运行日志 · ${b.lines.length} 行` })), el('div', { class: 'step-body' }, out(b.lines.join('\n'))));
+      return el('details', { class: 'step log' }, el('summary', {}, el('span', { class: 'ic', text: ICON.log }),
+        el('span', { class: 'ti', text: `运行日志（${b.lines.length} 行）` })), el('div', { class: 'step-body' }, out(b.lines.join('\n'))));
     default: return el('div');
   }
 }
@@ -115,5 +117,27 @@ export class View {
       this.nodes.set(b.key, node);
     }
     return changed.length;
+  }
+}
+
+// 工作中指示器：持续显示在会话末尾。状态来自中心的排队与租约，动作来自已公开的原生事件。
+export function elapsed(s) {
+  if (s == null) return '';
+  return s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + String(s % 60).padStart(2, '0') + 's';
+}
+export class Live {
+  constructor(root) {
+    this.root = root;
+    this.text = el('span', { class: 'live-t' }); this.code = el('code', { class: 'live-c' }); this.time = el('time');
+    this.node = el('div', { class: 'live', role: 'status' },
+      el('span', { class: 'sigil', 'aria-hidden': 'true', text: '✳' }), this.text, this.code, this.time);
+  }
+  set(info) {
+    if (!info) { this.node.remove(); return; }
+    this.node.dataset.phase = info.phase;
+    this.text.textContent = info.text;
+    this.code.textContent = info.code || ''; this.code.hidden = !info.code;
+    this.time.textContent = elapsed(info.elapsed);
+    if (this.root.lastElementChild !== this.node) this.root.append(this.node);
   }
 }

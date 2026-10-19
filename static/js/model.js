@@ -51,7 +51,7 @@ export function preview(input) {
   if (input == null) return '';
   if (typeof input !== 'object') return String(input);
   return Object.values(input).filter(v => v != null && typeof v !== 'object' && String(v).trim())
-    .map(v => String(v).replace(/\s+/g, ' ')).join(' · ');
+    .map(v => String(v).replace(/\s+/g, ' ')).join(', ');
 }
 
 export class Model {
@@ -88,6 +88,20 @@ export class Model {
     if (b) this.remove(b.key);
     return !!b;
   }
+  // 当前在做什么：给“思考中”指示用。只描述已公开的动作，不猜测模型内部状态。
+  activity() {
+    const b = this.live().filter(b => !['turn', 'log'].includes(b.type) && (b.type !== 'notice' || b.retry)).at(-1);
+    if (!b) return { kind: 'think', text: '思考中' };
+    if (b.retry) return { kind: 'retry', text: b.text };
+    if (b.status === 'running') {
+      if (b.type === 'command') return { kind: 'command', text: '正在执行', code: String(b.command || '').split('\n')[0] };
+      if (b.type === 'tool') return { kind: 'tool', text: '正在调用 ' + b.name };
+      if (b.type === 'patch') return { kind: 'patch', text: '正在编辑 ' + (b.files || []).map(f => String(f.path).split('/').pop()).join(', ') };
+    }
+    if (b.type === 'text') return { kind: 'text', text: '正在回复' };
+    return { kind: 'think', text: '思考中' };
+  }
+
   take() { const out = this.blocks.filter(b => this.changed.has(b.key)); this.changed.clear(); return out; }
   steps() { return this.live().filter(b => STEP_TYPES.has(b.type)).length; }
 
@@ -149,7 +163,13 @@ export class Model {
       if (b) { b.lines.push(String(d.text || '').replace(/\n$/, '')); this.changed.add(key); }
       return;
     }
-    if (m === 'error') return this.put(k, e, { type: 'notice', level: 'error', text: toText(d.error?.message || d.error || d.message || d) });
+    if (m === 'error') {
+      const msg = toText(d.error?.message || d.error || d.message || d);
+      // 原生 CLI 的自动重连是同一件事的进度，只保留最新一条，不刷屏。
+      const retry = msg.match(/Reconnecting\.*\s*(\d+\/\d+)/);
+      if (retry) return this.put('retry:' + this.turn, e, { type: 'notice', level: 'warn', retry: true, text: '模型连接中断，正在重连（' + retry[1] + '）' });
+      return this.put(k, e, { type: 'notice', level: 'error', text: msg });
+    }
     if (m === 'declined_request') return this.put(k, e, { type: 'notice', level: 'warn', text: '原生审批/输入请求未执行：' + d.method });
     if (m === 'demo') return this.put(k, e, { type: 'reasoning', text: d.text });
     if (m === 'stream_event') return this.claudeStream(d.event || {}, e);
@@ -184,7 +204,7 @@ export class Model {
         return;
       }
       case 'mcpToolCall': case 'dynamicToolCall': case 'collabToolCall':
-        this.put(key, e, { type: 'tool', name: [it.server, it.tool].filter(Boolean).join(' · ') || it.type,
+        this.put(key, e, { type: 'tool', name: it.tool || it.type, server: it.server,
           input: it.arguments, output: it.error || it.result, status: it.error ? 'failed' : status, duration: it.durationMs });
         return;
       case 'fileChange':
@@ -217,7 +237,8 @@ export class Model {
     this.toolKeys.set(b.id, tk);
     if (name === 'Bash') this.put(tk, e, { type: 'command', command: input.command || '', description: input.description, status });
     else if (['Edit', 'Write', 'MultiEdit'].includes(name) && input.file_path) this.put(tk, e, { type: 'patch', status, files: [{ path: input.file_path, diff: editDiff(input) }] });
-    else this.put(tk, e, { type: 'tool', name: name.startsWith('mcp__') ? name.slice(5).replace('__', ' · ') : name, input, status });
+    else if (name.startsWith('mcp__')) { const [, server, ...rest] = name.split('__'); this.put(tk, e, { type: 'tool', name: rest.join('__'), server, input, status }); }
+    else this.put(tk, e, { type: 'tool', name, input, status });
   }
 
   toolResult(b, e) {

@@ -22,7 +22,15 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.locator('#input').fill('你好'); await page.locator('[data-priority="10"]').click();
     const req = page.waitForRequest(r => r.url().endsWith('/api/chat'));
     await page.locator('#input').press('Enter'); assert.equal((await req).postDataJSON().priority, 10);
+    // 发送后立即有“工作中”反馈，回复到达后消失。
+    await page.locator('#chat .live').waitFor({ timeout: 3000 });
     await page.locator('.reply').getByText('[模拟 Master]', { exact: false }).waitFor();
+    await page.locator('#chat .live').waitFor({ state: 'detached' });
+    // 切换模型：同后端直接保存；换后端需要确认新会话。
+    await page.locator('#model').click();
+    await page.locator('#model-form [name=model]').fill('demo-model');
+    await page.locator('#model-form .btn.primary').click();
+    await page.locator('#model').getByText('demo-model').waitFor();
     // 新建任务 → 抽屉自动打开
     await page.locator('#new-task').click();
     const f = page.locator('#task-form');

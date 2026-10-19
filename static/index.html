@@ -21,7 +21,8 @@
   <main id="main">
     <header class="bar">
       <button id="nav-toggle" class="icon mobile" type="button" aria-label="任务列表">☰</button>
-      <div class="who"><strong>Master</strong><span id="master-state" class="pill"></span><span id="model" class="muted"></span></div>
+      <div class="who"><strong>Master</strong><span id="master-state" class="pill"></span>
+        <button id="model" class="model-btn" type="button" title="切换模型"></button></div>
       <button id="master-toggle" class="btn" type="button">暂停</button>
     </header>
     <div id="chat" class="chat" aria-live="polite"></div>
@@ -96,6 +97,22 @@
     </div>
     <div class="actions"><button class="btn" type="button" data-close>关闭</button>
       <button id="invite-copy" class="btn" type="button">复制</button><button class="btn primary" type="submit">生成命令</button></div>
+  </form>
+</dialog>
+
+<dialog id="model-dialog" aria-labelledby="model-dialog-t">
+  <form id="model-form">
+    <h2 id="model-dialog-t">切换模型</h2>
+    <p class="muted" id="model-who"></p>
+    <div class="row">
+      <label>后端<select name="backend"></select></label>
+      <label>推理强度<select name="reasoning_effort"><option value="">默认</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></label>
+    </div>
+    <label>模型<input name="model" list="model-list" placeholder="留空使用 CLI 默认模型" autocomplete="off"></label>
+    <datalist id="model-list"></datalist>
+    <p id="model-note" class="muted"></p>
+    <label id="model-new" class="chk" hidden><input type="checkbox" name="new_session"> 我了解：将开始新的原生会话</label>
+    <div class="actions"><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>
   </form>
 </dialog>
 

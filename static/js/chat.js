@@ -1,7 +1,7 @@
 // 主会话：主人消息、Master 回复、公开汇报与任务动态。Master 每个回合的工作过程折叠成一组。
 import { el, markdown, clock } from './dom.js';
 import { Model } from './model.js';
-import { View, render, who } from './render.js';
+import { View, Live, render, who, elapsed } from './render.js';
 
 const LINES = {
   task_created: '新任务', instruction: '已下达', completed: '任务完成', question: '提问', ask_owner: '需要你决定',
@@ -36,8 +36,8 @@ class Process {
     const n = this.model.steps();
     this.root.dataset.state = this.done ? 'done' : 'running';
     if (this.done && n === 0) { this.root.remove(); return; }
-    const took = this.done && this.end ? ` · ${Math.max(1, Math.round(this.end - this.start))}s` : '';
-    this.title.textContent = this.done ? `工作过程 · ${n} 步${took}` : `Master 工作中${n ? ` · ${n} 步` : ''}`;
+    const took = this.done && this.end ? `，用时 ${elapsed(Math.max(1, Math.round(this.end - this.start)))}` : '';
+    this.title.textContent = this.done ? `工作过程：${n} 步${took}` : `工作过程${n ? `：${n} 步` : ''}`;
   }
 }
 
@@ -45,6 +45,7 @@ export class Chat {
   constructor(root, { openTask, taskTitle }) {
     Object.assign(this, { root, openTask, taskTitle });
     this.proc = null; this.dirty = new Set(); this.demo = false;
+    this.live = new Live(root);
   }
 
   current(e) {
@@ -62,7 +63,7 @@ export class Chat {
     if (e.actor === 'master' && e.kind === 'remote_result') { if (this.proc) { this.proc.finish(e); this.dirty.add(this.proc); } return; }
     if (e.kind === 'message') {
       if (e.actor === 'owner' && e.target === 'master' && !d.copy) this.root.append(el('div', { class: 'me' }, el('div', { class: 'me-b' }, markdown(e.text)),
-        el('time', { text: (d.priority >= 10 ? '加急 · ' : '') + clock(e.at) })));
+        el('div', { class: 'me-m' }, d.priority >= 10 ? el('span', { class: 'tag warn', text: '加急' }) : null, el('time', { text: clock(e.at) }))));
       return;
     }
     if ((e.kind === 'chat' || e.kind === 'review') && e.actor === 'master') {
@@ -70,7 +71,7 @@ export class Chat {
       if (this.proc) { this.proc.model.dropText(e.text); this.dirty.add(this.proc); }
       this.root.append(el('div', { class: 'reply' + (e.kind === 'review' ? ' review' : '') },
         el('div', { class: 'reply-h' }, el('span', { class: 'av', 'aria-hidden': 'true', text: '✳' }),
-          el('span', { text: e.kind === 'review' ? 'Master · 定期审核' : 'Master' }), el('time', { text: clock(e.at) })),
+          el('span', { text: e.kind === 'review' ? 'Master 定期审核' : 'Master' }), el('time', { text: clock(e.at) })),
         markdown(e.text)));
       return;
     }
@@ -91,5 +92,7 @@ export class Chat {
   }
 
   flush() { for (const p of this.dirty) p.update(); this.dirty.clear(); }
+  // 进行中的回合模型（给工作中指示器读取当前动作）。
+  running() { return this.proc && !this.proc.done ? this.proc.model : null; }
 }
 export { render };
