@@ -49,7 +49,9 @@ async def run_center(args):
                   port=args.port, ws_host=args.ws_host, ws_port=args.ws_port, public_url=args.public_url,
                   galaxy_url=args.galaxy_url, tls_cert=args.tls_cert, tls_key=args.tls_key,
                   heartbeat=args.heartbeat, review_interval=args.review_interval,
-                  question_timeout=args.question_timeout, **({'install_url': args.install_url} if args.install_url else {}))
+                  question_timeout=args.question_timeout,
+                  feishu_cli=args.feishu_cli, feishu_config=args.feishu_config, feishu_owner=args.feishu_owner,
+                  **({'install_url': args.install_url} if args.install_url else {}))
     except ValueError as e:
         raise SystemExit(str(e))
     await app.start()
@@ -178,6 +180,9 @@ def main(argv=None):
     c.add_argument('--heartbeat', type=int, default=60)
     c.add_argument('--review-interval', type=int, default=600)
     c.add_argument('--question-timeout', type=int, default=300)
+    c.add_argument('--feishu-cli', help='lark-cli 可执行文件；指定后中心订阅飞书消息并交给 Master')
+    c.add_argument('--feishu-config', help='lark-cli 凭据目录（默认 <state>/feishu/lark-cli）')
+    c.add_argument('--feishu-owner', help='主人的飞书 open_id（ou_…）；其他发送者按非主人处理')
 
     i = sub.add_parser('invite', help='生成节点接入命令（需中心在运行）')
     i.add_argument('name'); i.add_argument('--state', default='.state')
@@ -191,6 +196,7 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.cmd == 'center':
         if bool(args.tls_cert) != bool(args.tls_key): p.error('TLS 证书与私钥必须一起提供')
+        if (args.feishu_config or args.feishu_owner) and not args.feishu_cli: p.error('飞书参数需要同时指定 --feishu-cli')
         if min(args.heartbeat, args.review_interval, args.question_timeout) <= 0: p.error('时间间隔必须大于零')
         asyncio.run(run_center(args))
     elif args.cmd == 'invite':

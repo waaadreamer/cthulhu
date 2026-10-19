@@ -82,6 +82,7 @@ class ProcessRuntime:
     def env(self):
         env = os.environ.copy()
         env.pop('CLAUDECODE', None)  # harness 启动独立会话，不嵌套当前交互客户端。
+        env.update(self.a.get('env') or {})  # 中心按角色下发的附加环境（如 Master 的飞书 CLI），只含路径不含秘密。
         env.update(CTHULHU_URL=self.sink.url, CTHULHU_AGENT=self.a['id'], CTHULHU_TOKEN=self.sink.token)
         return env
 

@@ -18,7 +18,8 @@ INSTALL_URL = 'https://raw.githubusercontent.com/waaadreamer/cthulhu/v4/deploy/i
 class App:
     def __init__(self, state, *, backend='demo', model=None, reasoning_effort=None, port=8767,
                  ws_host='127.0.0.1', ws_port=8770, public_url=None, galaxy_url=None,
-                 tls_cert=None, tls_key=None, install_url=INSTALL_URL, local_capacity=4, **timing):
+                 tls_cert=None, tls_key=None, install_url=INSTALL_URL, local_capacity=4,
+                 feishu_cli=None, feishu_config=None, feishu_owner=None, **timing):
         self.state = Path(state).resolve()
         self.center = Center(self.state, backend, model, reasoning_effort=reasoning_effort, **timing)
         self.notice = self.center.configure_master(backend, model, reasoning_effort)
@@ -29,6 +30,12 @@ class App:
         self.install_url = install_url
         self.local_capacity = local_capacity
         self.tasks = []
+        if feishu_cli:
+            from .feishu import Feishu
+            # 凭据目录默认放在状态目录内，与其他 lark-cli 配置（如旧桥的 profile）隔离；
+            # 不能和另一个仍在订阅同一应用的进程共用，否则事件会被两边随机分走。
+            self.center.feishu = Feishu(self.center, feishu_cli, feishu_config or self.state / 'feishu' / 'lark-cli',
+                                        owner=feishu_owner)
 
     def center_ws_url(self):
         if self.galaxy_url:
@@ -70,6 +77,8 @@ class App:
         self.web = Web(self, loop, self.port); self.web.start()
         (self.state / 'center.json').write_text(json.dumps({'port': self.web.port, 'ws_port': self.ws_actual_port}))
         self.tasks = [asyncio.create_task(self.node.run()), asyncio.create_task(self.scheduler())]
+        if c.feishu:
+            self.tasks.append(asyncio.create_task(c.feishu.run()))
 
     async def scheduler(self):
         c = self.center
@@ -81,6 +90,8 @@ class App:
             await asyncio.sleep(1)
 
     async def stop(self):
+        if self.center.feishu:
+            await self.center.feishu.stop()
         await self.node.close()
         for t in self.tasks: t.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)

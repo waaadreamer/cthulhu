@@ -33,6 +33,7 @@ class Center(Messages, Questions, Tasks, Review):
         self.heartbeat, self.review_interval, self.question_timeout = heartbeat, review_interval, question_timeout
         self.uid = uid
         self.hub = Hub(self)
+        self.feishu = None  # 由 App 按启动参数挂载；没有它时中心完全不接触飞书
         s = self.store
         with s.atomic():
             if not s.find('agent', 'master'):
@@ -183,7 +184,14 @@ class Center(Messages, Questions, Tasks, Review):
                task=self.task_id(a['id']), data={'previous': previous, 'current': {'backend': backend, 'model': model, 'reasoning_effort': effort}},
                visible=True)
 
-        # ---- 查询 ----
+    # ---- 查询 ----
+    def agent_env(self, aid):
+        """派发时随回合下发的附加环境。只给 Master：飞书机器人凭据代表主人的对外身份，
+        执行者需要对外联系时经 Master 转达，而不是各自持有发送能力。"""
+        if aid == 'master' and self.feishu:
+            return {'env': self.feishu.env()}
+        return {}
+
     def task_id(self, agent):
         return next((t['id'] for t in self.store.all('task') if t['agent'] == agent), None)
 
@@ -205,6 +213,7 @@ class Center(Messages, Questions, Tasks, Review):
         return {'agents': s.all('agent'), 'nodes': self.hub.nodes(), 'tasks': s.all('task'),
                 'questions': s.all('question'), 'memories': s.all('memory'), 'pending': pending,
                 'prefs': {'master_decides': self.master_decides()},
+                'feishu': self.feishu.status() if self.feishu else None,
                 'seq': s.highwater(), 'now': self.clock()}
 
     # ---- 与 hub 的连接点 ----

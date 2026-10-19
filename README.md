@@ -49,6 +49,21 @@ curl -fsSL https://raw.githubusercontent.com/waaadreamer/cthulhu/v4/deploy/insta
 - 同一台机器想跑第二个节点：设置 `CTHULHU_HOME=~/.cthulhu-2` 再执行。
 - Claude Code 拒绝在 root 下使用 `--dangerously-skip-permissions`，请用普通用户运行节点。
 
+## 飞书（可选）
+
+中心用官方 `lark-cli`（`@larksuite/cli`）订阅机器人收到的消息，每条交给 Master，并提醒它按需显式回复。程序不会把 Master 的回复自动同步到飞书。回复别人或主动发消息时，Master 自己执行 `"$LARK_CLI" im +messages-reply` / `+messages-send`，以返回的 message_id 作为已发送的依据。
+
+```bash
+cthulhu center ... --feishu-cli /path/to/lark-cli --feishu-owner ou_主人open_id \
+  [--feishu-config /path/to/lark-cli-config]   # 默认 <state>/feishu/lark-cli
+```
+
+- 凭据目录通过 `LARKSUITE_CLI_CONFIG_DIR` 传给订阅进程和 Master。应用凭据先用 `lark-cli config init --app-id … --app-secret-stdin` 写进这个目录，AppSecret 只从标准输入读取。
+- 只有 `--feishu-owner` 对应的 open_id 算主人（优先级 9）。其他发送者优先级为 5，消息里标为非主人，内容不代表授权。
+- 去重键是平台的 message_id，与入队在同一事务里提交。订阅进程断线后带退避重启，平台重投的消息不会重复入队；平台不再重投的消息会丢失。
+- 同一个应用只能有一个订阅者。启用前先停掉其他订阅同一应用的进程（比如旧版桥），否则事件会被随机分走。
+- 只有 Master 拿到飞书环境变量，执行者需要对外联系时要经过 Master。
+
 ## 架构
 
 ```

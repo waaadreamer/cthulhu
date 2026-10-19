@@ -9,10 +9,10 @@ const LINES = {
   interrupted: '已打断', urgent: '加急', runtime_error: '运行失败', master_attention: 'Master 已暂停',
   master_config: '配置', master_control: 'Master', node_joined: '节点', memory: '偏好', deadline: 'DDL 调整',
   recovery: '恢复', recovery_exhausted: '续办已暂停', orphan_process: '旧进程',
-  question_delegated: '交给 Master', settings: '设置', agent_config: '模型', node_config: '节点',
+  question_delegated: '交给 Master', feishu_in: '飞书', feishu_error: '飞书异常', settings: '设置', agent_config: '模型', node_config: '节点',
 };
 const LEVEL = { completed: 'ok', node_joined: 'ok', node_attention: 'error', runtime_error: 'error', master_attention: 'error',
-  orphan_process: 'error', recovery_exhausted: 'error', overdue: 'warn', interrupted: 'warn', urgent: 'warn', question_timeout: 'warn',
+  orphan_process: 'error', feishu_error: 'error', recovery_exhausted: 'error', overdue: 'warn', interrupted: 'warn', urgent: 'warn', question_timeout: 'warn',
   question: 'ask', ask_owner: 'ask' };
 
 class Process {
@@ -68,6 +68,13 @@ export class Chat {
         el('div', { class: 'me-m' }, d.priority >= 10 ? el('span', { class: 'tag warn', text: '加急' }) : null, el('time', { text: clock(e.at) }))));
       return;
     }
+    if (e.kind === 'feishu_in') {
+      // 飞书原文按来源展示：主人的消息和网页输入同侧，其他人的消息只作为一行动态。
+      if (d.owner) this.root.append(el('div', { class: 'me' }, el('div', { class: 'me-b' }, markdown(e.text)),
+        el('div', { class: 'me-m' }, el('span', { class: 'tag', text: '飞书' }), el('time', { text: clock(e.at) }))));
+      else this.line(e);
+      return;
+    }
     if ((e.kind === 'chat' || e.kind === 'review') && e.actor === 'master') {
       // 最终回复单独展示；过程中同一段文字（Claude 的最后一个文本块）不重复出现。
       if (this.proc) { this.proc.model.dropText(e.text); this.dirty.add(this.proc); }
@@ -86,6 +93,7 @@ export class Chat {
     if (e.kind === 'instruction') text = `→ ${title || who(e.target)}：${e.text}（已入队）`;
     else if (e.kind === 'question') text = `${title || who(e.actor)}：${e.text}`;
     else if (e.kind === 'answer') text = `${who(e.actor)}：${e.text}`;
+    else if (e.kind === 'feishu_in') text = `${e.data?.sender_id || '未知发送者'}：${e.text}`;
     else if (e.kind === 'completed') text = `${title || ''}${title ? ' — ' : ''}${e.text}`;
     const row = el('div', { class: 'event ' + (LEVEL[e.kind] || 'info') },
       el('span', { class: 'event-k', text: LINES[e.kind] }), el('span', { class: 'event-t', text }), el('time', { text: clock(e.at) }));
