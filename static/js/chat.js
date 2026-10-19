@@ -9,6 +9,7 @@ const LINES = {
   interrupted: '已打断', urgent: '加急', runtime_error: '运行失败', master_attention: 'Master 已暂停',
   master_config: '配置', master_control: 'Master', node_joined: '节点', memory: '偏好', deadline: 'DDL 调整',
   recovery: '恢复', recovery_exhausted: '续办已暂停', orphan_process: '旧进程',
+  question_delegated: '交给 Master', settings: '设置', agent_config: '模型', node_config: '节点',
 };
 const LEVEL = { completed: 'ok', node_joined: 'ok', node_attention: 'error', runtime_error: 'error', master_attention: 'error',
   orphan_process: 'error', recovery_exhausted: 'error', overdue: 'warn', interrupted: 'warn', urgent: 'warn', question_timeout: 'warn',

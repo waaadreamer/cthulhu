@@ -110,6 +110,10 @@ function renderMaster() {
   $('#master-state').textContent = a.paused ? '已暂停' : a.status === 'running' ? '工作中' : '就绪';
   $('#master-state').dataset.state = a.paused ? 'paused' : a.status;
   $('#master-toggle').textContent = a.paused ? '恢复' : '暂停';
+  const decides = !!snap.prefs?.master_decides, sw = $('#decides');
+  sw.setAttribute('aria-checked', String(decides));
+  sw.title = decides ? 'Master 会直接回答执行者的问题，不再转给你；你仍可事后修正' : '需要时 Master 会把问题转给你决定';
+  sw.onclick = () => act(() => api('api/settings', { master_decides: !decides }));
   $('#master-toggle').onclick = () => act(() => api('api/master', { action: a.paused ? 'resume' : 'pause' }));
 }
 
@@ -149,8 +153,11 @@ function renderQuestions() {
         el('button', { class: 'link', type: 'button', text: t?.title || q.agent, onclick: () => openTask(q.task) }), card.countdown);
       card.body.replaceChildren(markdown(q.text));
       card.input.placeholder = q.recommendation ? '建议：' + q.recommendation : '你的回答';
-      card.extra.replaceChildren(chat.demo && q.state === 'master' ? el('button', { class: 'btn', type: 'button', text: '模拟：转给我',
-        onclick: () => act(() => api('api/demo/escalate', { question_id: q.id, version: q.version, recommendation: q.recommendation })) }) : '');
+      card.extra.replaceChildren(
+        q.state === 'owner' ? el('button', { class: 'btn ghost', type: 'button', text: '交给 Master', title: '不等超时，立即让 Master 决定',
+          onclick: () => act(() => api('api/question/delegate', { question_id: q.id })) }) : '',
+        chat.demo && q.state === 'master' ? el('button', { class: 'btn ghost', type: 'button', text: '模拟：转给我',
+          onclick: () => act(() => api('api/demo/escalate', { question_id: q.id, version: q.version, recommendation: q.recommendation })) }) : '');
     }
     if (card.countdown) card.countdown.textContent = span(q.deadline - snap.now) + '后交回 Master';
   }

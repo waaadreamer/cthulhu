@@ -36,7 +36,7 @@ MASTER = [
     spec('list_questions', '读取问题、当前版本与等待期限。'),
     spec('answer_question', '回答问题；必须提交读取时的 version，旧版本拒绝，防止覆盖主人晚到的回答。',
          {'question_id': S, 'version': I, 'answer': S}, ['question_id', 'version', 'answer']),
-    spec('ask_owner', '将执行者的问题转请主人回答；默认五分钟后退回 master 自行决定。',
+    spec('ask_owner', '将执行者的问题转请主人回答；默认五分钟后退回 master 自行决定。主人开启「Master 全权回答」时不可用，current_state.master_decides 为 true 时请直接 answer_question。',
          {'question_id': S, 'version': I, 'recommendation': S}, ['question_id', 'version', 'recommendation']),
     spec('control_task', '暂停/恢复/取消；暂停会中断原生进程，恢复前应检查外部作业。',
          {'task_id': S, 'action': {'type': 'string', 'enum': ['pause', 'resume', 'cancel']}, 'reason': S},

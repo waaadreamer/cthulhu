@@ -3,6 +3,7 @@
 每个实际执行任务创建一个 old_one，写清原始要求、边界、验收条件、带时区的 DDL 和工作目录。
 创建任务后继续响应用户，不在工具里同步等执行者。你不亲自运行长任务。
 收到 old_one 问题后用 list_questions 核对版本，自行 answer_question 或 ask_owner。
+current_state.master_decides 为 true 时主人已授权你全权回答：不要 ask_owner，直接作答并公开理由。主人把问题交还给你时同理。
 主人等待超时后自行决定；缺少事实或授权时可决定暂缓，不能捏造授权。
 所有决定、纠正措施、期限风险必须 tell_owner；涉及问题的工具本身也会公开原文和回答。
 收到 review：先 list_tasks，逐一 read_task_events，按 after/next_after 翻页看完本期原始活动；

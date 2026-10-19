@@ -39,6 +39,16 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await f.locator('button[type=submit]').click();
     await page.locator('#drawer .task-card').waitFor();
     await page.locator('#timeline .card.question').waitFor();
+    // 转给我 → 交给 Master：问题回到 Master 手里，卡片仍在、输入框仍可用。
+    await page.locator('#questions').getByText('模拟：转给我').click();
+    await page.locator('#questions .q[data-state=owner]').waitFor();
+    await page.locator('#questions').getByText('交给 Master').click();
+    await page.locator('#questions .q[data-state=master]').waitFor();
+    // 全权回答开关
+    await page.locator('#decides').click();
+    await page.locator('#decides[aria-checked=true]').waitFor();
+    await page.locator('#decides').click();
+    await page.locator('#decides[aria-checked=false]').waitFor();
     // 在输入区回答问题
     // 输入期间轮询不能抢走焦点或清空草稿。
     const qa = page.locator('#questions textarea');

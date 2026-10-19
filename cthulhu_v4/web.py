@@ -99,6 +99,10 @@ class Web:
                 return c.create_task(body, initiator='owner')
             if path == '/api/answer':
                 return c.answer('owner', body)
+            if path == '/api/question/delegate':
+                return c.delegate(body)
+            if path == '/api/settings':
+                return c.set_master_decides(body.get('master_decides'))
             if path == '/api/control':
                 return c.control(body, actor='owner')
             if path == '/api/master':

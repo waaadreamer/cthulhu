@@ -43,6 +43,27 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.c.store.get('question', q['id'])['history'][-1]['text'], '选择 B')
         self.assertEqual(self.c.store.get('task', t['id'])['state'], 'running')
 
+    def test_owner_delegates_question_and_master_decides_mode(self):
+        t = self.create(); q = self.question(t)
+        q = self.c.tool('master', 'ask_owner', dict(question_id=q['id'], version=1, recommendation='A'))
+        with self.c.store.atomic(): q = self.c.delegate({'question_id': q['id']})
+        self.assertEqual((q['state'], q['version'], q['deadline']), ('master', 3, None))
+        with self.assertRaises(ValueError):  # 已不在等主人
+            with self.c.store.atomic(): self.c.delegate({'question_id': q['id']})
+        # 全权模式：Master 不能再转问；开启时等待主人的问题自动交回。
+        t2 = self.create(); q2 = self.question(t2)
+        self.c.tool('master', 'ask_owner', dict(question_id=q2['id'], version=1, recommendation='B'))
+        with self.c.store.atomic(): result = self.c.set_master_decides(True)
+        self.assertEqual(result['delegated'], 1)
+        self.assertEqual(self.c.store.get('question', q2['id'])['state'], 'master')
+        with self.assertRaisesRegex(ValueError, '全权'):
+            self.c.tool('master', 'ask_owner', dict(question_id=q['id'], version=3, recommendation='A'))
+        self.assertTrue(self.c.snapshot()['prefs']['master_decides'])
+        self.c.tool('master', 'answer_question', dict(question_id=q['id'], version=3, answer='A'))
+        # 主人仍可事后修正。
+        with self.c.store.atomic(): self.c.answer('owner', dict(question_id=q['id'], version=4, answer='B'))
+        self.assertEqual([h.get('text') for h in self.c.store.get('question', q['id'])['history'] if h.get('text')][-2:], ['A', 'B'])
+
     def test_owner_late_correction_is_preserved(self):
         t = self.create(); q = self.question(t)
         self.c.tool('master', 'answer_question', dict(question_id=q['id'], version=1, answer='A'))
