@@ -115,6 +115,16 @@ class CoreTests(unittest.TestCase):
         with self.c.store.atomic(): self.c.memory('owner', {'key': 'k', 'delete': True})
         self.assertTrue(self.c.store.get('memory', 'k')['deleted'])
 
+    def test_agent_text_over_limit_is_rejected_without_side_effects(self):
+        t = self.create()
+        before = len(self.c.store.all('message'))
+        with self.assertRaisesRegex(ValueError, '精炼后重发'):
+            self.c.tool(t['agent'], 'send_message', {'to': 'master', 'text': 'x' * 20001})
+        with self.assertRaisesRegex(ValueError, 'text'):
+            self.c.tool('master', 'tell_owner', {'text': 'y' * 30000})
+        self.assertEqual(len(self.c.store.all('message')), before)
+        self.c.tool(t['agent'], 'send_message', {'to': 'master', 'text': 'x' * 20000})  # 边界内正常
+
     def test_owner_late_correction_is_preserved(self):
         t = self.create(); q = self.question(t)
         self.c.tool('master', 'answer_question', dict(question_id=q['id'], version=1, answer='A'))

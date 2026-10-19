@@ -14,6 +14,52 @@ import uuid
 from .util import ROOT, process_identity
 
 
+CHUNK = 1 << 20
+# 单个原生事件超过这个体积时截断其中的长字符串再记录：远端节点经 WebSocket 上传，单帧上限 20MB；
+# 浏览器与 Master 也用不到几 MB 的单条事件。完整内容仍在原生 CLI 自己的会话文件里。
+RECORD_LIMIT = 2 * 1024 * 1024
+
+
+async def lines(stream):
+    """按行读取子进程输出，不限制单行长度。
+
+    asyncio 的 readline 受 StreamReader limit 约束：恢复一个很长的原生会话时，
+    Codex 的 thread/resume 回执会把整段历史放在一行 JSON 里（实测超过 16MB），
+    readline 直接抛出 “Separator is not found, and chunk exceed the limit”，回合失败。
+    """
+    buf, start = bytearray(), 0
+    while True:
+        data = await stream.read(CHUNK)
+        if not data:
+            if buf:
+                yield bytes(buf)
+            return
+        buf += data
+        while (i := buf.find(b'\n', start)) >= 0:
+            yield bytes(buf[:i + 1])
+            del buf[:i + 1]
+            start = 0
+        start = len(buf)  # 下次只从新数据开始找换行，超长行不会反复扫描
+
+
+def bounded(payload, size):
+    """体积过大的原生事件：截断长字符串，保留结构与原始长度说明。"""
+    if size <= RECORD_LIMIT:
+        return payload
+    def cut(v):
+        if isinstance(v, str) and len(v) > 20000:
+            return v[:20000] + f'…[截断，共 {len(v)} 字符]'
+        if isinstance(v, list):
+            return [cut(x) for x in v[:200]] + ([f'…[另有 {len(v) - 200} 项]'] if len(v) > 200 else [])
+        if isinstance(v, dict):
+            return {k: cut(x) for k, x in v.items()}
+        return v
+    out = cut(payload)
+    if isinstance(out, dict):
+        out['_truncated'] = f'原始事件 {size} 字节，已截断记录'
+    return out
+
+
 class Sink:
     """运行时与外界的窄接口；由节点实现。运行时不接触业务状态。
 
@@ -50,12 +96,12 @@ class ProcessRuntime:
     async def spawn(self, argv):
         self.proc = await asyncio.create_subprocess_exec(*argv, cwd=self.a['cwd'], env=self.env(),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            limit=16 * 1024 * 1024, start_new_session=True)
+            start_new_session=True)
         self.sink.pid(self.proc.pid, process_identity(self.proc.pid))
         self.readers.append(asyncio.create_task(self.stderr()))
 
     async def stderr(self):
-        while line := await self.proc.stderr.readline():
+        async for line in lines(self.proc.stderr):
             text = line.decode(errors='replace')
             self.stderr_tail = (self.stderr_tail + text)[-6000:]
             self.sink.native('stderr', {'text': text})
@@ -146,7 +192,7 @@ class CodexRuntime(ProcessRuntime):
 
     async def read(self):
         try:
-            while line := await self.proc.stdout.readline():
+            async for line in lines(self.proc.stdout):
                 frame = json.loads(line)
                 if 'id' in frame and 'method' not in frame:
                     fut = self.pending.get(frame['id'])
@@ -155,7 +201,7 @@ class CodexRuntime(ProcessRuntime):
                         else: fut.set_result(frame.get('result', {}))
                     continue
                 method, p = frame.get('method', ''), frame.get('params', {})
-                self.sink.native(method, p)
+                self.sink.native(method, bounded(p, len(line)))
                 if 'id' in frame:
                     # 首版无原生审批 UI。明确拒绝而非挂起；模型可通过 ask_master 说明需求。
                     if method.endswith('requestApproval'):
@@ -214,9 +260,9 @@ class ClaudeRuntime(ProcessRuntime):
 
     async def read(self):
         try:
-            while line := await self.proc.stdout.readline():
+            async for line in lines(self.proc.stdout):
                 frame = json.loads(line)
-                self.sink.native(frame.get('type', 'unknown'), frame)
+                self.sink.native(frame.get('type', 'unknown'), bounded(frame, len(line)))
                 if frame.get('type') == 'system' and frame.get('subtype') == 'init':
                     self.sink.session(frame['session_id'])
                 if frame.get('type') == 'result' and self.done and not self.done.done():

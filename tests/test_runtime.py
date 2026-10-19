@@ -54,3 +54,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_codex_protocol_and_resume(self): await self.check_backend('codex')
     async def test_claude_protocol_and_resume(self): await self.check_backend('claude')
     async def test_codex_explicit_model_and_effort_survive_resume(self): await self.check_backend('codex', configured=True)
+
+    async def test_lines_reader_handles_lines_over_asyncio_limit(self):
+        from cthulhu_v4.runtime import lines, bounded
+        reader = asyncio.StreamReader()
+        big = b'{"a": "' + b'x' * (20 * 1024 * 1024) + b'"}\n'
+        reader.feed_data(b'first\n' + big + b'tail-without-newline'); reader.feed_eof()
+        got = [l async for l in lines(reader)]
+        self.assertEqual([len(l) for l in got], [6, len(big), 20])
+        small = bounded({'a': 'x' * (20 * 1024 * 1024)}, len(big))
+        self.assertLess(len(str(small)), 100000)
+        self.assertIn('截断', small['_truncated'])

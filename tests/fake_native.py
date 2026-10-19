@@ -12,7 +12,9 @@ for line in sys.stdin:
         elif method in {'thread/start', 'thread/resume'}:
             assert f['params']['sandbox'] == 'danger-full-access'
             assert f['params']['approvalPolicy'] == 'never'
-            send({'id': f['id'], 'result': {'thread': {'id': f['params'].get('threadId', 'native-codex-1')}, 'model': f['params'].get('model'), 'reasoningEffort': f['params'].get('config', {}).get('model_reasoning_effort'), 'approvalPolicy': 'never', 'sandbox': {'type': 'dangerFullAccess'}}})
+            # 恢复长会话时回执里带整段历史，实测单行可超过 16MB。
+            history = [{'type': 'agentMessage', 'text': 'x' * 1000}] * (20000 if f['params'].get('threadId') else 0)
+            send({'id': f['id'], 'result': {'history': history, 'thread': {'id': f['params'].get('threadId', 'native-codex-1')}, 'model': f['params'].get('model'), 'reasoningEffort': f['params'].get('config', {}).get('model_reasoning_effort'), 'approvalPolicy': 'never', 'sandbox': {'type': 'dangerFullAccess'}}})
         elif method == 'turn/start':
             assert f['params']['approvalPolicy'] == 'never'
             assert f['params']['sandboxPolicy'] == {'type': 'dangerFullAccess'}
