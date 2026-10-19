@@ -34,7 +34,8 @@ class Store:
             raise
 
     def put(self, kind, obj):
-        self.db.execute('INSERT OR REPLACE INTO objects VALUES (?, ?, ?)',
+        # 原地更新而不是 REPLACE：REPLACE 会删行重插、换掉 rowid，按 rowid 排序的列表会随心跳乱跳。
+        self.db.execute('INSERT INTO objects VALUES (?, ?, ?) ON CONFLICT(kind, id) DO UPDATE SET data=excluded.data',
                         (kind, obj['id'], json.dumps(obj, ensure_ascii=False)))
         return obj
 

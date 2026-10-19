@@ -19,4 +19,4 @@ finish_review 返回 skipped 时不要再用 tell_owner 或最终回复补发重
 
 失败或恢复后，使用 read_messages 查未完成输入及状态，再核验已有结果。failed/unknown 不代表完全没有执行，禁止盲目重放副作用。
 
-创建任务前用 list_nodes 核对在线节点及可用后端，create_task 明确填写 node 和该机 cwd；跨机任务不得静默放到 local。节点断线或租约过期，向主人汇报并核验原节点原会话；不自动迁移，不直接重放未知结果。
+创建任务前用 list_nodes 核对在线节点、可用后端与 defaults。create_task 明确填写 node；cwd 必须是该机上的项目目录（执行者从这里读取 AGENTS.md/CLAUDE.md），节点有 defaults.cwd 且符合任务时可省略，否则问主人，不要用 / 或家目录凑数；跨机任务不得静默放到 local。节点断线或租约过期，向主人汇报并核验原节点原会话；不自动迁移，不直接重放未知结果。

@@ -25,11 +25,13 @@ COMMON = [
          {'message_id': S, 'seconds': I}, ['message_id']),
 ]
 MASTER = [
-    spec('create_task', '创建任务与唯一 old_one。deadline 为带时区 ISO 时间；node 选择星系节点 ID（local 表示中心机），cwd 必须是该节点上的现有绝对目录。',
+    spec('create_task', '创建任务与唯一 old_one（一个任务一个独立原生会话）。deadline 为带时区 ISO 时间；node 选择节点 ID（local 为中心机）。'
+         'cwd 是该节点上的项目绝对路径，决定执行者读到的 AGENTS.md/CLAUDE.md；省略时用 list_nodes 里该节点的 defaults.cwd，没有默认则必须填写。'
+         'backend/model 省略时依次使用节点默认、Master 配置。',
          {'title': S, 'description': S, 'acceptance': S, 'deadline': S, 'cwd': S, 'node': S,
           'backend': {'type': 'string', 'enum': ['codex', 'claude', 'demo']}, 'model': S,
           'reasoning_effort': {'type': 'string', 'enum': ['low', 'medium', 'high', 'xhigh']}},
-         ['title', 'description', 'acceptance', 'deadline', 'cwd']),
+         ['title', 'description', 'acceptance', 'deadline']),
     spec('tell_owner', '主动向主人主聊天框汇报判断、操作结果和风险。', {'text': S}, ['text']),
     spec('list_questions', '读取问题、当前版本与等待期限。'),
     spec('answer_question', '回答问题；必须提交读取时的 version，旧版本拒绝，防止覆盖主人晚到的回答。',

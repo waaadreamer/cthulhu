@@ -83,7 +83,8 @@ body.drawer-open #app { grid-template-columns: var(--nav) minmax(0, 1fr) var(--d
 .task[data-state=waiting] .dot, .task[data-state=paused] .dot { background: var(--ember); }
 .task[data-state=completed] .dot { background: var(--moss); }
 .dot.busy { animation: breathe 2.4s ease-in-out infinite; }
-.node { display: flex; align-items: center; gap: 9px; padding: 6px 10px; font-size: 13px; border-radius: 7px; }
+.node { display: flex; align-items: center; gap: 9px; padding: 6px 10px; font-size: 13px; border-radius: 7px; width: 100%; border: 0; background: none; text-align: left; cursor: pointer; }
+.node:hover { background: var(--tide); }
 .node[data-online=true] .dot { background: var(--moss); }
 .node-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; } .node .muted { font-size: 12px; }
 
@@ -164,7 +165,7 @@ time { font-size: 11.5px; color: var(--silt); font-variant-numeric: tabular-nums
 .d-title-row { display: flex; align-items: center; gap: 10px; }
 .d-title-row h2 { margin: 0; font: 600 17px/1.3 var(--serif); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .d-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 12.5px; color: var(--silt); margin-top: 6px; }
-.d-meta .mono { font-family: var(--mono); font-size: 11.5px; }
+.d-meta .mono { font-family: var(--mono); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .d-controls { display: flex; gap: 6px; margin-top: 10px; } .d-controls:empty { display: none; }
 .timeline { flex: 1; overflow-y: auto; padding: 16px 20px 28px; display: flex; flex-direction: column; gap: 10px; }
 .d-form { display: flex; gap: 8px; align-items: center; padding: 12px 20px; border-top: 1px solid var(--kelp); }
@@ -254,6 +255,7 @@ dialog label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5p
 dialog .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 dialog p { margin: 0; }
+dialog input:disabled { opacity: .5; }
 .cmd-box { background: var(--abyss); border: 1px solid #73d6bd44; border-radius: 8px; padding: 11px 13px; white-space: pre-wrap; word-break: break-all; margin: 0; color: var(--glow); }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--tide); border: 1px solid var(--wound); color: var(--bone);
   padding: 9px 18px; border-radius: 10px; z-index: 20; max-width: 90vw; box-shadow: 0 12px 30px -10px #000; }

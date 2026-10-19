@@ -91,9 +91,16 @@ function renderSide() {
       el('span', { class: 'chev', 'aria-hidden': 'true', text: '›' })));
   }
   const nodes = $('#nodes'); nodes.replaceChildren();
-  for (const n of snap.nodes) nodes.append(el('div', { class: 'node', 'data-online': String(n.online), title: n.host || '' },
-    el('span', { class: 'dot', 'aria-hidden': 'true' }), el('span', { class: 'node-n', text: n.id === 'local' ? 'local（中心）' : n.id }),
-    el('span', { class: 'muted', text: n.online ? (n.backends || []).filter(b => b !== 'demo').join(' ') || 'demo' : '离线' })));
+  // 固定顺序：local 在前，其余按名字排序；心跳只更新圆点状态，不改变位置。
+  const ordered = [...snap.nodes].sort((a, b) => (b.id === 'local') - (a.id === 'local') || a.id.localeCompare(b.id));
+  for (const n of ordered) {
+    const d = n.defaults || {};
+    const hint = [d.backend && [d.backend, d.model].filter(Boolean).join(' '), d.cwd].filter(Boolean).join('，');
+    nodes.append(el('button', { type: 'button', class: 'node', 'data-online': String(n.online),
+      title: `${n.host || ''}${hint ? '\n默认：' + hint : '\n未设置默认值'}`, onclick: () => openNode(n.id) },
+      el('span', { class: 'dot', 'aria-hidden': 'true' }), el('span', { class: 'node-n', text: n.id === 'local' ? 'local（中心）' : n.id }),
+      el('span', { class: 'muted', text: n.online ? (n.backends || []).filter(b => b !== 'demo').join(' ') || 'demo' : '离线' })));
+  }
 }
 
 function renderMaster() {
@@ -149,7 +156,8 @@ class Drawer {
     $('#d-meta').replaceChildren(el('span', { text: t.node }),
       DONE.has(t.state) ? el('span', { text: modelLabel(a) }) : el('button', { type: 'button', class: 'model-btn', text: modelLabel(a), title: '切换模型', onclick: () => openModel(a.id) }),
       el('span', { class: t.deadline < snap.now && !DONE.has(t.state) ? 'bad' : '', text: '截止 ' + stamp(t.deadline) }),
-      a.session ? el('span', { class: 'mono', title: a.session, text: a.session.slice(0, 8) }) : null);
+      el('span', { class: 'mono', title: '工作目录：原生 CLI 从这里读取 AGENTS.md / CLAUDE.md', text: a.cwd }),
+      a.session ? el('span', { class: 'mono', title: '原生会话 ' + a.session, text: a.session.slice(0, 8) }) : null);
     const ctl = $('#d-controls'); ctl.replaceChildren();
     if (!DONE.has(t.state)) for (const action of t.state === 'paused' ? ['resume', 'cancel'] : ['pause', 'cancel'])
       ctl.append(el('button', { type: 'button', class: 'btn' + (action === 'cancel' ? ' danger' : ''), text: { pause: '暂停', resume: '恢复', cancel: '取消' }[action],
@@ -255,6 +263,35 @@ $('#model-form').onsubmit = e => {
   });
 };
 
+// ---- 节点默认值 ----
+function openNode(id) {
+  const n = snap.nodes.find(n => n.id === id), f = $('#node-form'), d = n.defaults || {};
+  f.dataset.node = id;
+  $('#node-dialog-t').textContent = '节点 ' + id;
+  $('#node-info').textContent = [n.online ? '在线' : '离线', n.host, n.home && '用户目录 ' + n.home,
+    (n.backends || []).length && '可用后端 ' + n.backends.join(' ')].filter(Boolean).join('；');
+  f.elements.backend.replaceChildren(el('option', { value: '', text: '同 Master' }),
+    ...['codex', 'claude', 'demo'].filter(b => !n.backends?.length || n.backends.includes(b)).map(b => el('option', { value: b, text: b })));
+  f.elements.backend.value = d.backend || ''; f.elements.model.value = d.model || '';
+  f.elements.reasoning_effort.value = d.reasoning_effort || ''; f.elements.cwd.value = d.cwd || '';
+  f.elements.cwd.placeholder = (n.home || '/home/user') + '/project';
+  syncNodeForm(); dialog('#node-dialog');
+}
+function syncNodeForm() {
+  const f = $('#node-form'), b = f.elements.backend.value;
+  $('#node-models').replaceChildren(...(MODELS[b] || []).map(m => el('option', { value: m })));
+  f.elements.model.disabled = !b; f.elements.reasoning_effort.closest('label').hidden = b !== 'codex';
+}
+$('#node-form').elements.backend.onchange = syncNodeForm;
+$('#node-form').onsubmit = e => {
+  e.preventDefault(); const f = e.target;
+  act(async () => {
+    await api('api/node', { node: f.dataset.node, backend: f.elements.backend.value, model: f.elements.model.value,
+      reasoning_effort: f.elements.reasoning_effort.value, cwd: f.elements.cwd.value });
+    $('#node-dialog').close();
+  });
+};
+
 // ---- 对话框 ----
 function dialog(id) { const d = $(id); d.showModal(); d.querySelector('input,textarea,select')?.focus(); return d; }
 for (const d of document.querySelectorAll('dialog')) d.querySelector('[data-close]')?.addEventListener('click', () => d.close());
@@ -263,6 +300,13 @@ $('#new-task').onclick = () => {
   const f = $('#task-form'), select = f.elements.node;
   select.replaceChildren(...snap.nodes.map(n => el('option', { value: n.id, text: n.id + (n.online ? '' : '（离线）') })));
   select.value = snap.nodes.find(n => n.online && n.id !== 'local')?.id || 'local';
+  const sync = () => {
+    const d = snap.nodes.find(n => n.id === select.value)?.defaults || {};
+    f.elements.cwd.placeholder = d.cwd ? '留空使用节点默认：' + d.cwd : '/home/user/project';
+    f.elements.cwd.required = !d.cwd;
+    f.elements.backend.options[0].textContent = d.backend ? `节点默认（${[d.backend, d.model].filter(Boolean).join(' ')}）` : '同 Master';
+  };
+  select.onchange = sync; sync();
   const d = new Date(Date.now() + 86400000); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   f.elements.deadline.value ||= d.toISOString().slice(0, 16);
   f.elements.backend.value = '';
@@ -270,7 +314,7 @@ $('#new-task').onclick = () => {
 };
 $('#task-form').onsubmit = e => {
   e.preventDefault(); const f = e.target, v = Object.fromEntries(new FormData(f));
-  const body = { title: v.title, description: v.description, acceptance: v.acceptance, cwd: v.cwd, node: v.node,
+  const body = { title: v.title, description: v.description, acceptance: v.acceptance, cwd: v.cwd || undefined, node: v.node,
     deadline: new Date(v.deadline).toISOString() };
   if (v.backend) body.backend = v.backend;
   act(async () => { const t = await api('api/task', body); $('#task-dialog').close(); f.reset(); await poll(); openTask(t.id); });

@@ -270,6 +270,31 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.c.configure_master('codex', 'gpt-6-astra', 'medium')
         self.assertEqual(self.c.store.get('agent', 'master')['backend'], 'demo')
 
+    def test_node_defaults_fill_backend_model_and_cwd(self):
+        with self.c.store.atomic():
+            self.c.hub.register('gpu')
+            self.c.set_node_defaults({'node': 'gpu', 'backend': 'claude', 'model': 'claude-opus-5-5', 'cwd': '/srv/project'})
+        args = dict(title='测试', description='只读验证', acceptance='给出证据', deadline='2099-01-01T00:00:00+00:00', node='gpu')
+        t = self.c.tool('master', 'create_task', args)
+        a = self.c.store.get('agent', t['agent'])
+        self.assertEqual((a['backend'], a['model'], a['cwd']), ('claude', 'claude-opus-5-5', '/srv/project'))
+        # 显式参数优先；换了后端时不沿用别的后端的模型名。
+        t = self.c.tool('master', 'create_task', args | {'backend': 'demo', 'cwd': '/srv/other'})
+        a = self.c.store.get('agent', t['agent'])
+        self.assertEqual((a['backend'], a['model'], a['cwd']), ('demo', None, '/srv/other'))
+        with self.c.store.atomic():
+            self.c.set_node_defaults({'node': 'gpu'})
+        with self.assertRaisesRegex(ValueError, '默认工作目录|cwd'):
+            self.c.tool('master', 'create_task', args)
+
+    def test_heartbeat_updates_keep_listing_order(self):
+        with self.c.store.atomic():
+            for name in ('zeta', 'alpha', 'mid'): self.c.hub.register(name)
+        before = [n['id'] for n in self.c.store.all('node')]
+        for n in self.c.store.all('node'):
+            n['seen'] = self.now; self.c.store.put('node', n)
+        self.assertEqual([n['id'] for n in self.c.store.all('node')], before)
+
     def test_remote_nodes_require_explicit_node(self):
         with self.c.store.atomic(): self.c.hub.register('remote')
         with self.assertRaisesRegex(ValueError, 'node'): self.create()

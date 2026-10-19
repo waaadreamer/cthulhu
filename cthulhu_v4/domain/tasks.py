@@ -20,16 +20,30 @@ class Tasks:
                 raise ValueError('已有星系节点，create_task 必须明确指定 node（中心机为 local）')
             node = LOCAL
         n = s.get('node', node)
-        cwd = Path(str(p['cwd'])).expanduser() if node == LOCAL else Path(str(p['cwd']))
+        defaults = n.get('defaults') or {}
+        # 工作目录决定原生 CLI 读到哪个 AGENTS.md / CLAUDE.md：显式 > 节点默认，绝不静默用 / 或家目录。
+        raw = p.get('cwd') or defaults.get('cwd')
+        if not raw:
+            raise ValueError(f'节点 {node} 没有默认工作目录，必须提供 cwd（该节点上的项目绝对路径）')
+        cwd = Path(str(raw)).expanduser() if node == LOCAL else Path(str(raw))
         if not cwd.is_absolute() or (node == LOCAL and not cwd.is_dir()):
             raise ValueError('cwd 必须是该节点上存在的绝对目录')
         due = deadline(p['deadline'])
         master = s.get('agent', 'master')
-        backend = p.get('backend') or master['backend']
+        backend = p.get('backend') or defaults.get('backend') or master['backend']
         if backend not in {'codex', 'claude', 'demo'}:
             raise ValueError('不支持的 backend')
         if n.get('backends') and backend not in n['backends']:
             raise ValueError(f"节点 {node} 未报告可用的 {backend}；可用：{', '.join(n['backends'])}")
+
+        def inherit(key):
+            # 模型名只对同一后端有意义：显式 > 节点默认（同后端）> Master（同后端）。
+            if p.get(key):
+                return p[key]
+            if defaults.get(key) and defaults.get('backend') == backend:
+                return defaults[key]
+            return master.get(key) if backend == master['backend'] else None
+
         for key in ('title', 'description', 'acceptance'):
             if not str(p.get(key, '')).strip():
                 raise ValueError(f'{key} 不能为空')
@@ -38,11 +52,9 @@ class Tasks:
                 'acceptance': p['acceptance'], 'node': node, 'deadline': due, 'original_deadline': due,
                 'state': 'running', 'wait': {}, 'created_at': self.clock(), 'review_cursor': 0,
                 'recoveries': 0, 'overdue_notified': False}
-        same = backend == master['backend']
         s.put('task', task)
-        s.put('agent', {'id': aid, 'node': node, 'backend': backend,
-                        'model': p.get('model') or (master.get('model') if same else None),
-                        'reasoning_effort': (p.get('reasoning_effort') or (master.get('reasoning_effort') if same else None)) if backend == 'codex' else None,
+        s.put('agent', {'id': aid, 'node': node, 'backend': backend, 'model': inherit('model'),
+                        'reasoning_effort': inherit('reasoning_effort') if backend == 'codex' else None,
                         'cwd': str(cwd.resolve()) if node == LOCAL else str(cwd), 'session': None,
                         'status': 'idle', 'failures': 0, 'idle_at': self.clock(), 'paused': False})
         s.emit('task_created', f"创建任务：{task['title']}（{node}）", actor=initiator,

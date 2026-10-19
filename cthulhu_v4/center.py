@@ -132,6 +132,31 @@ class Center(Messages, Questions, Tasks, Review):
         self.apply_config(a, backend, model, effort, actor='owner')
         return a
 
+    def set_node_defaults(self, p):
+        """节点默认值：新任务未指定时使用。只影响之后创建的任务，不改已有任务与会话。"""
+        s = self.store
+        n = s.get('node', p['node'])
+        clean = lambda k: (str(p.get(k) or '').strip() or None)
+        d = {k: clean(k) for k in ('backend', 'model', 'reasoning_effort', 'cwd')}
+        if d['backend'] and d['backend'] not in {'codex', 'claude', 'demo'}:
+            raise ValueError('不支持的 backend')
+        if d['reasoning_effort'] and d['reasoning_effort'] not in EFFORTS:
+            raise ValueError('reasoning_effort 应为 ' + '/'.join(sorted(EFFORTS)))
+        if not d['backend']:
+            d['model'] = d['reasoning_effort'] = None  # 模型名离开后端没有意义
+        if d['backend'] != 'codex':
+            d['reasoning_effort'] = None
+        if d['cwd']:
+            path = Path(d['cwd']).expanduser() if n['id'] == LOCAL else Path(d['cwd'])
+            if not path.is_absolute() or (n['id'] == LOCAL and not path.is_dir()):
+                raise ValueError('默认工作目录必须是该节点上存在的绝对路径')
+            d['cwd'] = str(path)
+        n['defaults'] = d
+        s.put('node', n)
+        label = '，'.join(f'{k}={v}' for k, v in d.items() if v) or '已清空'
+        s.emit('node_config', f"节点 {n['id']} 默认值：{label}", actor='owner', data={'node': n['id'], 'defaults': d}, visible=True)
+        return {k: v for k, v in n.items() if k != 'token'}
+
     def apply_config(self, a, backend, model, effort, actor):
         s = self.store
         previous = {k: a.get(k) for k in ('backend', 'model', 'reasoning_effort', 'session')}

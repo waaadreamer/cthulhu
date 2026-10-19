@@ -169,7 +169,7 @@ class Hub:
             n.update(instance=body['instance'], seen=c.clock(), version=body.get('version'),
                      capacity=max(1, min(int(body.get('capacity', 1)), 32)),
                      backends=[b for b in body.get('backends', []) if b in {'demo', 'codex', 'claude'}],
-                     host=body.get('host'))
+                     host=body.get('host'), home=body.get('home'))
             for e in body.get('events', []):
                 if e['seq'] <= n['ack']:
                     continue

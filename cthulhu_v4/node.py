@@ -108,7 +108,7 @@ class Node:
         started = time.monotonic()
         result = await self.link.request({'op': 'sync', 'instance': self.instance, 'capacity': self.capacity,
                                           'backends': self.backends, 'version': VERSION,
-                                          'host': socket.gethostname(), 'events': events})
+                                          'host': socket.gethostname(), 'home': str(Path.home()), 'events': events})
         self.accept(result, started)
         return len(events)
 

@@ -79,7 +79,7 @@
       <label>节点<select name="node"></select></label>
       <label>后端<select name="backend"><option value="">同 Master</option><option>codex</option><option>claude</option><option>demo</option></select></label>
     </div>
-    <label>工作目录（该节点上的绝对路径）<input name="cwd" required placeholder="/home/user/project"></label>
+    <label>工作目录（该节点上的项目路径，执行者从这里读取 AGENTS.md / CLAUDE.md）<input name="cwd" placeholder="/home/user/project"></label>
     <label>截止时间<input name="deadline" type="datetime-local" required></label>
     <div class="actions"><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">创建</button></div>
   </form>
@@ -112,6 +112,23 @@
     <datalist id="model-list"></datalist>
     <p id="model-note" class="muted"></p>
     <label id="model-new" class="chk" hidden><input type="checkbox" name="new_session"> 我了解：将开始新的原生会话</label>
+    <div class="actions"><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>
+  </form>
+</dialog>
+
+<dialog id="node-dialog" aria-labelledby="node-dialog-t">
+  <form id="node-form">
+    <h2 id="node-dialog-t"></h2>
+    <p id="node-info" class="muted"></p>
+    <p class="muted">新任务没有指定时使用这些默认值，已有任务不受影响。</p>
+    <div class="row">
+      <label>默认后端<select name="backend"></select></label>
+      <label>推理强度<select name="reasoning_effort"><option value="">默认</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></label>
+    </div>
+    <label>默认模型<input name="model" list="node-models" placeholder="留空使用 CLI 默认模型" autocomplete="off"></label>
+    <datalist id="node-models"></datalist>
+    <label>默认工作目录<input name="cwd" autocomplete="off"></label>
+    <p class="muted">原生 CLI 从工作目录读取 AGENTS.md / CLAUDE.md。留空时，每个任务必须自己填写目录。</p>
     <div class="actions"><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>
   </form>
 </dialog>
