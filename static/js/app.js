@@ -114,21 +114,45 @@ function renderMaster() {
 }
 
 // ---- 待回答问题：显示在输入框上方 ----
+// 每个问题一张卡片，原地更新：轮询每秒一次，整块重建会替换正在输入的文本框，导致失焦、草稿丢失。
+const qCards = new Map();
 function renderQuestions() {
-  const box = $('#questions'); box.replaceChildren();
-  for (const q of snap.questions.filter(q => ['master', 'owner'].includes(q.state))) {
-    const t = snap.tasks.find(t => t.id === q.task);
-    const input = el('textarea', { rows: 1, placeholder: q.recommendation ? '建议：' + q.recommendation : '你的回答', 'aria-label': '回答' });
-    const send = () => input.value.trim() && act(() => api('api/answer', { question_id: q.id, version: q.version, answer: input.value }));
-    input.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } };
-    box.append(el('div', { class: 'q', 'data-state': q.state },
-      el('div', { class: 'q-h' }, el('span', { class: 'tag ' + (q.state === 'owner' ? 'warn' : ''), text: q.state === 'owner' ? '需要你决定' : 'Master 处理中' }),
-        el('button', { class: 'link', type: 'button', text: t?.title || q.agent, onclick: () => openTask(q.task) }),
-        q.deadline ? el('span', { class: 'muted', text: span(q.deadline - snap.now) + '后交回 Master' }) : null),
-      markdown(q.text),
-      el('div', { class: 'q-a' }, input, el('button', { class: 'btn primary', type: 'button', text: '回答', onclick: send }),
-        chat.demo && q.state === 'master' ? el('button', { class: 'btn', type: 'button', text: '模拟：转给我',
-          onclick: () => act(() => api('api/demo/escalate', { question_id: q.id, version: q.version, recommendation: q.recommendation })) }) : null)));
+  const box = $('#questions');
+  const open = snap.questions.filter(q => ['master', 'owner'].includes(q.state));
+  const ids = new Set(open.map(q => q.id));
+  for (const [id, card] of qCards) if (!ids.has(id)) { card.root.remove(); qCards.delete(id); }
+  for (const q of open) {
+    let card = qCards.get(q.id);
+    if (!card) {
+      card = { head: el('div', { class: 'q-h' }), body: el('div'), extra: el('span'), key: '' };
+      card.input = el('textarea', { rows: 1, 'aria-label': '回答' });
+      // 提交时读取最新版本：输入期间问题可能已超时交回 Master，版本号随之变化。
+      const send = () => {
+        const cur = snap.questions.find(x => x.id === q.id), text = card.input.value.trim();
+        if (!cur || !text) return;
+        act(async () => { await api('api/answer', { question_id: cur.id, version: cur.version, answer: text }); card.input.value = ''; });
+      };
+      card.input.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } };
+      card.root = el('div', { class: 'q' }, card.head, card.body,
+        el('div', { class: 'q-a' }, card.input, el('button', { class: 'btn primary', type: 'button', text: '回答', onclick: send }), card.extra));
+      qCards.set(q.id, card);
+      box.append(card.root);
+    }
+    // 只有状态或版本变化才重建标题与正文；文本框始终是同一个元素。
+    const key = q.state + ':' + q.version;
+    if (card.key !== key) {
+      card.key = key;
+      const t = snap.tasks.find(t => t.id === q.task);
+      card.root.dataset.state = q.state;
+      card.countdown = q.deadline ? el('span', { class: 'muted' }) : null;
+      card.head.replaceChildren(el('span', { class: 'tag ' + (q.state === 'owner' ? 'warn' : ''), text: q.state === 'owner' ? '需要你决定' : 'Master 处理中' }),
+        el('button', { class: 'link', type: 'button', text: t?.title || q.agent, onclick: () => openTask(q.task) }), card.countdown);
+      card.body.replaceChildren(markdown(q.text));
+      card.input.placeholder = q.recommendation ? '建议：' + q.recommendation : '你的回答';
+      card.extra.replaceChildren(chat.demo && q.state === 'master' ? el('button', { class: 'btn', type: 'button', text: '模拟：转给我',
+        onclick: () => act(() => api('api/demo/escalate', { question_id: q.id, version: q.version, recommendation: q.recommendation })) }) : '');
+    }
+    if (card.countdown) card.countdown.textContent = span(q.deadline - snap.now) + '后交回 Master';
   }
 }
 

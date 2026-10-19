@@ -40,7 +40,14 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.locator('#drawer .task-card').waitFor();
     await page.locator('#timeline .card.question').waitFor();
     // 在输入区回答问题
-    await page.locator('#questions textarea').fill('继续'); await page.locator('#questions .btn.primary').click();
+    // 输入期间轮询不能抢走焦点或清空草稿。
+    const qa = page.locator('#questions textarea');
+    await qa.click(); await page.keyboard.type('继');
+    await page.waitForTimeout(2500);
+    assert(await qa.evaluate(n => n === document.activeElement), '回答框在轮询后失去焦点');
+    await page.keyboard.type('续');
+    assert.equal(await qa.inputValue(), '继续');
+    await page.locator('#questions .btn.primary').click();
     await page.locator('#timeline .card.result').waitFor();
     await page.locator('#d-state').getByText('已完成').waitFor();
     // 工具与命令默认折叠
