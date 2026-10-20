@@ -412,21 +412,42 @@ function updateLabel(n) {
 
 // ---- 一键更新中心 ----
 // 有新提交时显示按钮；点击后中心先跑测试，等本机回合结束再重启，远端节点随后自动更新。
+// 节点是否已与中心同一版本；手动启动或旧代码的节点无法自动更新，单独说明原因。
+function nodeLag() {
+  const code = snap.release?.code;
+  return snap.nodes.filter(n => n.id !== 'local' && code && n.code !== code).map(n => ({
+    id: n.id,
+    why: !n.online ? '离线' : !n.managed || !(n.features || []).includes('update') ? '需在该机器重跑一次安装命令'
+      : n.update?.state === 'failed' ? '自动更新失败：' + (n.update.error || '') : '空闲时自动更新',
+  }));
+}
+
 function renderDeploy() {
+  // 按钮常驻。中心与所有节点都已是 v4 最新时禁用；中心落后时可点击更新；
+  // 中心已最新但有节点没跟上时可点击查看原因（节点由中心推送，不需要再点更新）。
   const d = snap.deploy, b = $('#deploy');
   if (!d) { b.hidden = true; return; }
-  const av = d.available || {}, phase = d.phase;
+  const av = d.available || {}, phase = d.phase, lag = nodeLag();
   const busy = { testing: '测试中', draining: '等回合结束', restarting: '重启中' }[phase];
-  b.hidden = !(busy || av.behind > 0 || phase === 'failed');
-  b.disabled = !!busy;
-  b.dataset.phase = phase;
-  b.textContent = busy ? `更新中：${busy}` : phase === 'failed' && !(av.behind > 0) ? '更新失败' : `更新到 ${av.remote}（${av.behind}）`;
-  b.title = phase === 'failed' ? (d.error || '') : (av.commits || []).join('\n');
+  const state = busy ? 'busy' : av.behind > 0 ? 'ready' : phase === 'failed' ? 'failed' : av.error ? 'error' : lag.length ? 'nodes' : 'current';
+  b.hidden = false;
+  b.disabled = state === 'busy' || state === 'current';
+  b.dataset.state = state;
+  b.textContent = {
+    busy: `更新中：${busy}`, ready: `更新到 ${av.remote}（${av.behind}）`, failed: '更新失败', error: '无法检查更新',
+    nodes: `${lag.length} 个节点未同步`, current: `已是最新 ${av.head || ''}`,
+  }[state];
+  b.title = {
+    ready: (av.commits || []).join('\n'), failed: d.error || '', error: av.error || '',
+    nodes: lag.map(x => `${x.id}：${x.why}`).join('\n'), current: '中心与所有节点都是 v4 最新版本；每 5 分钟检查一次 GitHub',
+  }[state] || '';
   b.onclick = () => {
-    if (phase === 'failed' && !(av.behind > 0)) { toast(d.error || '更新失败'); return; }
-    const list = (av.commits || []).map(c => '· ' + c).join('\n');
-    if (confirm(`更新中心到 ${av.remote}？\n\n${list}\n\n会先运行测试；通过后等中心机上的回合结束再重启，远端节点随后在空闲时自动更新。`))
-      act(() => api('api/deploy', {}));
+    if (state === 'ready') {
+      const list = (av.commits || []).map(c => '· ' + c).join('\n');
+      if (confirm(`更新中心到 ${av.remote}？\n\n${list}\n\n会先运行测试；通过后等中心机上的回合结束再重启，远端节点随后在空闲时自动更新。`))
+        act(() => api('api/deploy', {}));
+    } else if (state === 'nodes') toast(lag.map(x => `${x.id}：${x.why}`).join('；'));
+    else if (state === 'failed' || state === 'error') toast(b.title);
   };
 }
 

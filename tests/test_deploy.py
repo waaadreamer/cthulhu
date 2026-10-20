@@ -74,6 +74,15 @@ class DeployTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.d.restart); self.assertEqual(self.exits, [True])
         self.assertTrue(any(e['kind'] == 'deploy' for e in self.c.store.events(visible=True, limit=50)))
 
+    async def test_running_commit_counts_even_if_head_already_moved(self):
+        class R: commit = None
+        r = R(); r.commit = subprocess.run(['git', '-C', str(self.live), 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        self.c.release = r
+        self.push('two')
+        sh('git', 'pull', '-q', '--ff-only', cwd=self.live)          # 运行目录已拉到新提交，但进程还是旧代码
+        info = await asyncio.to_thread(self.d.check)
+        self.assertEqual(info['behind'], 1)
+
     async def test_failed_tests_keep_current_version_and_resume_dispatch(self):
         self.push('two')
         def fail(self, target): raise RuntimeError('测试未通过：FAIL: test_x')

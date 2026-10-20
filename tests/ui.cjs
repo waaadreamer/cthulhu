@@ -113,6 +113,8 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.locator('#d-controls').getByText('重新打开').click();
     await page.locator('#d-state').getByText('进行中').waitFor();
     await page.locator('#timeline').getByText('重新打开：补一份说明').waitFor();
+    // 更新按钮常驻：临时中心不是 git 仓库时显示“无法检查更新”，而不是隐藏。
+    await page.locator('#deploy:not([hidden])').waitFor();
     // 监控：打开对话框，看到流量面板（统计卡、24 根小时柱、表格），截图检查布局。
     await page.locator('#monitor-open').click();
     await page.locator('#monitor-body .panel .stat').first().waitFor();

@@ -58,9 +58,13 @@ body.drawer-open #app { grid-template-columns: var(--nav) minmax(0, 1fr) var(--d
 .tag.warn { color: var(--need); background: color-mix(in srgb, var(--need) 14%, transparent); }
 .model-btn { border: 1px solid transparent; background: var(--s1); border-radius: 7px; padding: 1px 9px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .model-btn:hover { border-color: var(--line-2); color: var(--ink); }
-.upd-btn { color: var(--live); border-color: color-mix(in srgb, var(--live) 45%, var(--line-2)); }
-.upd-btn[data-phase=failed] { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line-2)); }
-.upd-btn:disabled { opacity: .8; cursor: default; }
+.upd-btn { font-size: 12.5px; color: var(--ink-2); background: none; border-color: transparent; font-variant-numeric: tabular-nums; }
+.upd-btn:hover { color: var(--ink); background: var(--s1); }
+.upd-btn[data-state=ready] { color: var(--live); border-color: color-mix(in srgb, var(--live) 45%, var(--line-2)); background: color-mix(in srgb, var(--live) 10%, transparent); }
+.upd-btn[data-state=busy] { color: var(--live); border-color: var(--line-2); opacity: .85; cursor: default; }
+.upd-btn[data-state=failed], .upd-btn[data-state=error] { color: var(--bad); }
+.upd-btn[data-state=nodes] { color: var(--need); }
+.upd-btn[data-state=current]:disabled { opacity: 1; cursor: default; color: var(--ink-3); background: none; }
 .switch { display: inline-flex; align-items: center; gap: 8px; border: 0; background: none; color: var(--ink-2); font-size: 12.5px; cursor: pointer; padding: 4px 6px; border-radius: 7px; white-space: nowrap; }
 .switch:hover { color: var(--ink); background: var(--s1); }
 .switch .knob { position: relative; width: 28px; height: 16px; border-radius: 99px; background: var(--s3); transition: background .15s; flex: none; }

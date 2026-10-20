@@ -71,11 +71,16 @@ class Deployer:
         """对比本地与远端：有没有新提交、能不能快进、工作区是否干净。"""
         g = self.git
         g('fetch', '--quiet', 'origin', BRANCH, timeout=120)
-        head, remote = g('rev-parse', 'HEAD'), g('rev-parse', f'origin/{BRANCH}')
+        remote = g('rev-parse', f'origin/{BRANCH}')
+        # 以“正在运行的代码”为准，而不是目录里的 HEAD：直接在运行目录提交后 HEAD 已是新版本，
+        # 但进程还没重启，此时仍需要更新（_apply 的快进是空操作，只重启）。
+        release = getattr(self.app.center, 'release', None)
+        running = (release.commit or '').rstrip('+') if release else ''
+        head = g('rev-parse', running or 'HEAD')
         dirty = g('status', '--porcelain', '--untracked-files=no')
-        ahead = int(g('rev-list', '--count', f'HEAD..origin/{BRANCH}'))
+        ahead = int(g('rev-list', '--count', f'{head}..origin/{BRANCH}'))
         ff = subprocess.run(['git', '-C', str(self.root), 'merge-base', '--is-ancestor', 'HEAD', f'origin/{BRANCH}']).returncode == 0
-        log = g('log', '--format=%h %s', f'HEAD..origin/{BRANCH}', '-n', '20') if ahead else ''
+        log = g('log', '--format=%h %s', f'{head}..origin/{BRANCH}', '-n', '20') if ahead else ''
         return {'head': head[:7], 'remote': remote[:7], 'behind': ahead, 'fast_forward': ff, 'dirty': bool(dirty),
                 'commits': [line for line in log.splitlines() if line], 'checked_at': time.time()}
 
