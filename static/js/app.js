@@ -190,6 +190,7 @@ function renderMaster() {
   $('#master-state').textContent = a.paused ? '已暂停' : a.status === 'running' ? '工作中' : '就绪';
   $('#master-state').dataset.state = a.paused ? 'paused' : a.status;
   $('#master-toggle').textContent = a.paused ? '恢复' : '暂停';
+  renderDeploy();
   const decides = !!snap.prefs?.master_decides, sw = $('#decides');
   sw.setAttribute('aria-checked', String(decides));
   sw.title = decides ? 'Master 会直接回答执行者的问题，不再转给你；你仍可事后修正' : '需要时 Master 会把问题转给你决定';
@@ -406,6 +407,26 @@ function updateLabel(n) {
   if (n.update?.state === 'failed') return '更新失败';
   if (n.update) return n.update.state === 'ready' ? '更新中' : '等回合结束后更新';
   return n.managed ? (snap.release.clean ? '' : '中心有未提交改动，暂不推送') : '版本不同（手动启动）';
+}
+
+// ---- 一键更新中心 ----
+// 有新提交时显示按钮；点击后中心先跑测试，等本机回合结束再重启，远端节点随后自动更新。
+function renderDeploy() {
+  const d = snap.deploy, b = $('#deploy');
+  if (!d) { b.hidden = true; return; }
+  const av = d.available || {}, phase = d.phase;
+  const busy = { testing: '测试中', draining: '等回合结束', restarting: '重启中' }[phase];
+  b.hidden = !(busy || av.behind > 0 || phase === 'failed');
+  b.disabled = !!busy;
+  b.dataset.phase = phase;
+  b.textContent = busy ? `更新中：${busy}` : phase === 'failed' && !(av.behind > 0) ? '更新失败' : `更新到 ${av.remote}（${av.behind}）`;
+  b.title = phase === 'failed' ? (d.error || '') : (av.commits || []).join('\n');
+  b.onclick = () => {
+    if (phase === 'failed' && !(av.behind > 0)) { toast(d.error || '更新失败'); return; }
+    const list = (av.commits || []).map(c => '· ' + c).join('\n');
+    if (confirm(`更新中心到 ${av.remote}？\n\n${list}\n\n会先运行测试；通过后等中心机上的回合结束再重启，远端节点随后在空闲时自动更新。`))
+      act(() => api('api/deploy', {}));
+  };
 }
 
 // ---- 节点默认值 ----

@@ -99,7 +99,13 @@ class Web:
                 return {'events': events, 'more': len(events) >= limit, 'highwater': c.store.highwater()}
             if path == '/api/file':
                 return await c.files.read(q('ref'), refresh=q('refresh') == '1')
+            if path == '/api/deploy':
+                c.deployer.available = await asyncio.to_thread(c.deployer.check)
+                return c.deployer.status()
             raise ValueError('未知接口')
+        if path == '/api/deploy':
+            # 部署会 fetch、跑测试并最终重启中心：只能由主人在网页触发，agent 没有对应工具。
+            return await c.deployer.start()
         with c.store.atomic():
             if path == '/api/chat':
                 return c.enqueue('owner', body.get('to', 'master'), body['text'], body.get('priority', 9))

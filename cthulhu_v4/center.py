@@ -38,6 +38,8 @@ class Center(Messages, Questions, Tasks, Review):
         self.feishu = None  # 由 App 按启动参数挂载；没有它时中心完全不接触飞书
         self.files = FileService(self)
         self.release = None  # 由 App 设置为中心正在运行的代码包；没有时不发起远程更新
+        self.deployer = None   # 由 App 挂载：网页一键更新中心
+        self.hold_local = False  # 中心准备重启时为 True：不再向中心机节点派发新回合
         s = self.store
         with s.atomic():
             if not s.find('agent', 'master'):
@@ -223,6 +225,7 @@ class Center(Messages, Questions, Tasks, Review):
                 'prefs': {'master_decides': self.master_decides()},
                 'feishu': self.feishu.status() if self.feishu else None,
                 'release': self.release.public() if self.release else None,
+                'deploy': self.deployer.status() if self.deployer else None,
                 'seq': s.highwater(), 'now': self.clock()}
 
     # ---- 与 hub 的连接点 ----

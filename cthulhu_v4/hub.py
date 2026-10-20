@@ -195,6 +195,8 @@ class Hub:
             s.put('node', n)
             # 等待更新时不派发新回合：消息留在队列里，更新完成（或失败）后照常派发。
             free = 0 if plan in ('draining', 'ready') else n['capacity'] - running
+            if node == LOCAL and c.hold_local:
+                free = 0  # 中心即将重启：本机节点不接新回合，等已派发的回合结束
             for a in s.all('agent'):
                 if free <= 0:
                     break

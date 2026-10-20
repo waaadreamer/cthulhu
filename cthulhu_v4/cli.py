@@ -63,6 +63,9 @@ async def run_center(args):
         await until_signal()
     finally:
         await app.stop(); lock.close()
+    if getattr(app, 'deployer', None) and app.deployer.restart:
+        # 已切换到新代码：用非零退出码让 systemd（Restart=on-failure）重新拉起。
+        raise SystemExit(75)
 
 
 def invite(args):
