@@ -157,6 +157,7 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(json.dumps(rules, ensure_ascii=False), m['text'])
         self.assertIn('在白名单内', m['text'])
         self.assertIn('om_a', m['text'])
+        self.assertIn(f'<at user_id=\\"{ALICE}\\">爱丽丝</at> <回复>', m['text'])  # 路由里给出带 @ 的回复写法
         shown = self.kinds('feishu_in')[0]['data']
         self.assertEqual((shown['name'], shown['owner']), ('爱丽丝', False))
         self.assertNotIn(ALICE, json.dumps(shown))
@@ -181,9 +182,12 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.inbox(), [])
         reply, = [a for a in self.calls() if a[:2] == ['im', '+messages-reply']]
         self.assertEqual(reply[reply.index('--message-id') + 1], 'om_a')
-        self.assertEqual(reply[reply.index('--text') + 1], DENY_TEXT)
+        # 拒绝回复先 @ 对方并附理由；网页展示 @名字，不露 open_id。
+        self.assertEqual(reply[reply.index('--text') + 1],
+                         f'<at user_id="{ALICE}">爱丽丝</at> {DENY_TEXT}：请求访问主人私信，超出白名单')
         out, = self.kinds('feishu_out')
-        self.assertEqual((out['actor'], out['text'], out['data']['ok']), ('system', DENY_TEXT, True))
+        self.assertEqual((out['actor'], out['text'], out['data']['ok']),
+                         ('system', f'@爱丽丝 {DENY_TEXT}：请求访问主人私信，超出白名单', True))
         self.assertEqual(self.kinds('feishu_denied')[0]['data']['reason'], '请求访问主人私信，超出白名单')
 
     async def test_judge_failure_neither_admits_nor_replies(self):
@@ -263,6 +267,14 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         out, = self.kinds('feishu_out')
         self.assertEqual((out['text'], out['data']['target'], out['data']['ok']), ('好的，已处理', '回复 主人（测试群）', True))
         self.assertTrue(out['data']['message_id'].startswith('om_sent_'))
+        # 帮助与预演不算发送，不出现在“发往飞书”的记录里。
+        await self.c.hub.tool('local', {'job': job['id'], 'call_id': 8, 'name': 'feishu', 'arguments': {'argv': ['im', '+messages-reply', '--help']}})
+        self.assertEqual(len(self.kinds('feishu_out')), 1)
+        post = json.dumps({'zh_cn': {'content': [[{'tag': 'at', 'user_id': ALICE, 'user_name': 'x'}, {'tag': 'text', 'text': ' 好的'}]]}})
+        self.grant(ALICE, '爱丽丝', ['r'])
+        await self.c.hub.tool('local', {'job': job['id'], 'call_id': 9, 'name': 'feishu', 'arguments': {
+            'argv': ['im', '+messages-send', '--as', 'bot', '--chat-id', 'oc_x', '--msg-type', 'post', '--content', post]}})
+        self.assertEqual(self.kinds('feishu_out')[-1]['text'], '@爱丽丝 好的')
         for bad in (['auth', 'login'], ['config', 'init'], ['event', 'consume', 'x'], []):
             with self.assertRaises(ValueError):
                 await self.c.hub.tool('local', {'job': job['id'], 'call_id': str(bad), 'name': 'feishu', 'arguments': {'argv': bad}})
