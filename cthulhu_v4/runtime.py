@@ -186,6 +186,9 @@ class CodexRuntime(ProcessRuntime):
             params['config'] = {'model_reasoning_effort': self.a['reasoning_effort']}
         if self.session:
             params['threadId'] = self.session
+            # 不要回执里的历史：适配器只读模型、强度与权限字段。不加时 Codex 会把整段历史拼进回执，
+            # 会话越长恢复越慢（50MB 会话实测 116 秒，单行回执超过 16MB）。原生上下文本身不受影响。
+            params['excludeTurns'] = True
             # 恢复失败必须抛错；不能偷偷 start 新线程“修好”错误。
             response = await self.request('thread/resume', params)
         else:

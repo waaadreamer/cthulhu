@@ -15,7 +15,10 @@ for line in sys.stdin:
             assert f['params']['sandbox'] == 'danger-full-access'
             assert f['params']['approvalPolicy'] == 'never'
             # 恢复长会话时回执里带整段历史，实测单行可超过 16MB。
-            history = [{'type': 'agentMessage', 'text': 'x' * 1000}] * (20000 if f['params'].get('threadId') else 0)
+            # 没有 excludeTurns 时才返回整段历史；适配器应当总是要求省略。
+            history = [{'type': 'agentMessage', 'text': 'x' * 1000}] * (20000 if f['params'].get('threadId') and not f['params'].get('excludeTurns') else 0)
+            if f['params'].get('threadId'):
+                assert f['params'].get('excludeTurns') is True, 'resume 必须带 excludeTurns'
             send({'id': f['id'], 'result': {'history': history, 'thread': {'id': f['params'].get('threadId', 'native-codex-1')}, 'model': f['params'].get('model'), 'reasoningEffort': f['params'].get('config', {}).get('model_reasoning_effort'), 'approvalPolicy': 'never', 'sandbox': {'type': 'dangerFullAccess'}}})
         elif method == 'turn/start':
             assert f['params']['approvalPolicy'] == 'never'
