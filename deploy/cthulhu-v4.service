@@ -7,10 +7,7 @@ After=network-online.target
 # systemd 默认 PATH 不含用户目录；codex/claude 装在 ~/.local/bin，找不到时本机节点只会报告 demo。
 Environment=HOME=/root
 Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin
-# 本机访问模型服务需经出站代理；loopback 必须绕过代理，否则本机 MCP 桥会被转发出去。
-Environment=HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 ALL_PROXY=http://127.0.0.1:7897
-Environment=http_proxy=http://127.0.0.1:7897 https_proxy=http://127.0.0.1:7897
-Environment=NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1
+# 不设置全局代理：模型 CLI 与 GitHub 更新各自通过 start-center.sh 的 --model-proxy / --git-proxy 使用代理。
 ExecStart=/root/cthulhu-v4/deploy/start-center.sh
 WorkingDirectory=/root/cthulhu-v4
 Restart=on-failure

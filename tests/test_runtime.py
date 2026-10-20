@@ -9,7 +9,7 @@ from cthulhu_v4.runtime import make_runtime
 
 
 class FakeSink:
-    url, token = 'http://127.0.0.1:1', 'test-token'
+    url, token, proxy = 'http://127.0.0.1:1', 'test-token', None
 
     def __init__(self): self.events, self.sessions, self.pids = [], [], []
     def native(self, kind, payload): self.events.append(kind)
@@ -71,6 +71,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await rt.close()
         self.assertIn('resume_timing', sink.events)
         self.assertGreaterEqual(CodexRuntime.TIMEOUTS['thread/resume'], 300)
+
+    def test_proxy_only_for_model_cli_not_for_agent_commands(self):
+        from cthulhu_v4 import proxy
+        from cthulhu_v4.runtime import CodexRuntime
+        sink = FakeSink(); sink.proxy = 'http://127.0.0.1:7897'
+        agent = {'id': 'master', 'backend': 'codex', 'cwd': '/', 'session': None}
+        with patch.dict('os.environ', {'HTTPS_PROXY': 'http://leaked:1', 'no_proxy': 'x'}):
+            env = CodexRuntime(sink, agent).env()
+            self.assertEqual(env['HTTPS_PROXY'], 'http://127.0.0.1:7897')       # 外层漏进来的代理被替换
+            self.assertIn('127.0.0.1', env['NO_PROXY'])                           # 本机 MCP 桥直连
+            sink.proxy = None
+            env = CodexRuntime(sink, agent).env()
+            self.assertFalse(any(k in env for k in proxy.VARS))                   # 不配代理就不走代理
+        self.assertIn('shell_environment_policy.exclude=["*proxy*", "*PROXY*"]', ' '.join(proxy.codex_args('http://p:1')))
+        self.assertEqual(proxy.codex_args(None), [])
+        g = proxy.git_env('http://127.0.0.1:7897')
+        self.assertIn('nc -X connect -x 127.0.0.1:7897', g['GIT_SSH_COMMAND'])
 
     async def test_lines_reader_handles_lines_over_asyncio_limit(self):
         from cthulhu_v4.runtime import lines, bounded

@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 
+from . import proxy
 from .util import ROOT, process_identity
 
 
@@ -69,6 +70,7 @@ class Sink:
     pid(pid, identity)     记录/清除子进程，用于重启后的孤儿检测
     tool(name, args)       经节点调用中心工具（demo 使用；真实后端走 MCP）
     url, token             本机 MCP 桥地址与本 agent 的 token
+    proxy                  模型 CLI 访问模型服务的代理（None 表示直连）
     """
 
 
@@ -81,7 +83,8 @@ class ProcessRuntime:
         self.stderr_tail = ''
 
     def env(self):
-        env = os.environ.copy()
+        # 不继承外层环境的代理：只有模型 CLI 本身需要代理，见 proxy.py。
+        env = proxy.strip(os.environ) | proxy.proxy_env(self.sink.proxy)
         env.pop('CLAUDECODE', None)  # harness 启动独立会话，不嵌套当前交互客户端。
         env.update(self.a.get('env') or {})  # 中心按角色下发的附加环境（如 Master 的飞书 CLI），只含路径不含秘密。
         env.update(CTHULHU_URL=self.sink.url, CTHULHU_AGENT=self.a['id'], CTHULHU_TOKEN=self.sink.token)
@@ -166,7 +169,8 @@ class CodexRuntime(ProcessRuntime):
 
     async def start(self):
         cfg = self.mcp()
-        argv = ['codex', '--yolo', '-c', 'mcp_servers.cthulhu.command=' + json.dumps(cfg['command']),
+        argv = ['codex', '--yolo', *proxy.codex_args(self.sink.proxy),
+                '-c', 'mcp_servers.cthulhu.command=' + json.dumps(cfg['command']),
                 '-c', 'mcp_servers.cthulhu.args=' + json.dumps(cfg['args']),
                 '-c', 'mcp_servers.cthulhu.env_vars=' + json.dumps(list(cfg['env'])),
                 # 仅本地 harness 工具由角色权限检查后直接执行；不修改其他 MCP 的审批。

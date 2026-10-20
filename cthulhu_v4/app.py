@@ -19,7 +19,7 @@ class App:
     def __init__(self, state, *, backend='demo', model=None, reasoning_effort=None, port=8767,
                  ws_host='127.0.0.1', ws_port=8770, public_url=None, galaxy_url=None,
                  tls_cert=None, tls_key=None, install_url=INSTALL_URL, local_capacity=4,
-                 feishu_cli=None, feishu_config=None, feishu_owner=None, **timing):
+                 feishu_cli=None, feishu_config=None, feishu_owner=None, model_proxy=None, git_proxy=None, **timing):
         self.state = Path(state).resolve()
         self.center = Center(self.state, backend, model, reasoning_effort=reasoning_effort, **timing)
         self.notice = self.center.configure_master(backend, model, reasoning_effort)
@@ -32,6 +32,7 @@ class App:
         self.tls_cert, self.tls_key = tls_cert, tls_key
         self.install_url = install_url
         self.local_capacity = local_capacity
+        self.model_proxy, self.git_proxy = model_proxy, git_proxy
         self.tasks = []
         if feishu_cli:
             from .feishu import Feishu
@@ -66,7 +67,8 @@ class App:
         loop = asyncio.get_running_loop()
         c = self.center
         # 本机节点：与远端节点同一实现，只是链路在进程内。
-        self.node = Node(self.state / 'local-node', capacity=self.local_capacity, protected=[self.state])
+        self.node = Node(self.state / 'local-node', capacity=self.local_capacity, protected=[self.state],
+                         model_proxy=self.model_proxy)
         self.node.link = LocalLink(c.hub, self.node)
         c.hub.attach(LOCAL, self.node.link)
         self.bridge = Bridge(self.node, loop); self.bridge.start()
@@ -80,7 +82,7 @@ class App:
         self.web = Web(self, loop, self.port); self.web.start()
         (self.state / 'center.json').write_text(json.dumps({'port': self.web.port, 'ws_port': self.ws_actual_port}))
         from .deploy import Deployer
-        self.deployer = self.center.deployer = Deployer(self)
+        self.deployer = self.center.deployer = Deployer(self, proxy=self.git_proxy)
         self.tasks = [asyncio.create_task(self.node.run()), asyncio.create_task(self.scheduler()),
                       asyncio.create_task(self.deployer.watch())]
         if c.feishu:

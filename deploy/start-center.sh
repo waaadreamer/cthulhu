@@ -6,4 +6,5 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 exec .venv/bin/python -m cthulhu_v4 center \
   --state .state --port 8767 --ws-port 8770 \
   --public-url https://47.115.202.248:8001/v4 \
-  --backend codex --model gpt-6-astra --reasoning-effort medium
+  --backend codex --model gpt-6-astra --reasoning-effort medium \
+  --model-proxy http://127.0.0.1:7897 --git-proxy http://127.0.0.1:7897

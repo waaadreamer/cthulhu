@@ -33,6 +33,7 @@ class Turn:
         self.agent = job['agent']
         self.token = secrets.token_urlsafe(32)  # 每回合的本机 MCP token；节点凭证绝不交给模型子进程。
         self.url = node.bridge_url
+        self.proxy = node.model_proxy
 
     def native(self, kind, payload):
         self.node.queue(self.job['id'], 'native:' + kind, payload)
@@ -55,11 +56,13 @@ class Turn:
 
 
 class Node:
-    def __init__(self, state_dir, *, capacity=2, backends=None, link=None, protected=(), app=None, managed=False):
+    def __init__(self, state_dir, *, capacity=2, backends=None, link=None, protected=(), app=None, managed=False,
+                 model_proxy=None):
         self.state_dir = Path(state_dir).resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.store = Store(self.state_dir / 'node.db')
         self.capacity = capacity
+        self.model_proxy = model_proxy
         # 网页可以打开节点上的文件，但凭证与状态目录除外（含 node.json 里的节点 token）。
         self.protected = [Path(p).resolve() for p in (self.state_dir, *protected)]
         self.reads = set()

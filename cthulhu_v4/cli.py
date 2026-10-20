@@ -51,6 +51,7 @@ async def run_center(args):
                   heartbeat=args.heartbeat, review_interval=args.review_interval,
                   question_timeout=args.question_timeout,
                   feishu_cli=args.feishu_cli, feishu_config=args.feishu_config, feishu_owner=args.feishu_owner,
+                  model_proxy=args.model_proxy, git_proxy=args.git_proxy,
                   **({'install_url': args.install_url} if args.install_url else {}))
     except ValueError as e:
         raise SystemExit(str(e))
@@ -142,7 +143,8 @@ async def run_node(args):
         update.reexec(app)
     lock = lock_dir(base / 'state', 'node.lock')
     try:
-        node = Node(base / 'state', capacity=args.capacity, protected=[base], app=app, managed=managed)
+        node = Node(base / 'state', capacity=args.capacity, protected=[base], app=app, managed=managed,
+                    model_proxy=args.model_proxy or config.get('model_proxy'))
     except RuntimeError as e:
         raise SystemExit(str(e))
     node.link = RemoteLink(config['center'], config['node'], token=config['token'], pin=config.get('pin'),
@@ -194,6 +196,8 @@ def main(argv=None):
     c.add_argument('--heartbeat', type=int, default=60)
     c.add_argument('--review-interval', type=int, default=600)
     c.add_argument('--question-timeout', type=int, default=300)
+    c.add_argument('--model-proxy', help='模型 CLI 访问模型服务的代理，如 http://127.0.0.1:7897；agent 运行的命令不经过它')
+    c.add_argument('--git-proxy', help='中心检查/拉取 GitHub 更新时使用的代理')
     c.add_argument('--feishu-cli', help='lark-cli 可执行文件；指定后中心订阅飞书消息并交给 Master')
     c.add_argument('--feishu-config', help='lark-cli 凭据目录（默认 <state>/feishu/lark-cli）')
     c.add_argument('--feishu-owner', help='主人的飞书 open_id（ou_…）；其他发送者按非主人处理')
@@ -205,6 +209,7 @@ def main(argv=None):
     nsub = n.add_subparsers(dest='node_cmd', required=True)
     j = nsub.add_parser('join'); j.add_argument('invite'); j.add_argument('--home')
     r = nsub.add_parser('run'); r.add_argument('--home'); r.add_argument('--capacity', type=int, default=2)
+    r.add_argument('--model-proxy', help='该节点上模型 CLI 的代理；也可写在 node.json 的 model_proxy')
     st = nsub.add_parser('status'); st.add_argument('--home')
 
     args = p.parse_args(argv)

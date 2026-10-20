@@ -17,6 +17,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from .proxy import git_env, strip
 from .update import shape
 from .util import LOCAL, ROOT
 
@@ -25,8 +26,8 @@ TEST_TIMEOUT = 600
 DRAIN_TIMEOUT = 1800
 
 
-def git(*args, cwd, timeout=60):
-    out = subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, text=True, timeout=timeout)
+def git(*args, cwd, timeout=60, env=None):
+    out = subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, text=True, timeout=timeout, env=env)
     if out.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} 失败：{(out.stderr or out.stdout).strip()[-500:]}")
     return out.stdout.strip()
@@ -35,8 +36,9 @@ def git(*args, cwd, timeout=60):
 class Deployer:
     CHECK_EVERY = 300
 
-    def __init__(self, app, root=ROOT, exit_after=None):
+    def __init__(self, app, root=ROOT, exit_after=None, proxy=None):
         self.app, self.root = app, Path(root)
+        self.env = git_env(proxy)  # 只有访问 GitHub 的 git 命令用代理
         self.state = {'phase': 'idle'}
         self.task = None
         self.available = None   # 后台定期检查的结果，网页据此提示“有新版本”
@@ -53,7 +55,7 @@ class Deployer:
         self.app.center.hold_local = value
 
     def git(self, *args, timeout=60):
-        return git(*args, cwd=self.root, timeout=timeout)
+        return git(*args, cwd=self.root, timeout=timeout, env=self.env)
 
     async def watch(self):
         """后台定期看远端有没有新提交，只读：不会自动部署。"""
@@ -135,7 +137,7 @@ class Deployer:
             src = tmp / 'src'
             if shape(src) != shape(self.root):
                 raise RuntimeError('新版本的依赖或命令入口有变化，需要人工安装后重启')
-            env = {k: v for k, v in os.environ.items() if not k.startswith('CTHULHU_')} | {'PYTHONPATH': str(src)}
+            env = {k: v for k, v in strip(os.environ).items() if not k.startswith('CTHULHU_')} | {'PYTHONPATH': str(src)}
             out = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests'], cwd=src, env=env,
                                  capture_output=True, text=True, timeout=TEST_TIMEOUT)
             tail = (out.stderr or out.stdout).strip().splitlines()[-1:] or ['']
