@@ -102,7 +102,7 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
                    event('om_group_plain', chat_type='group', text='大家好'),
                    event('om_group_other', chat_type='group', mentions=[ALICE], text='@爱丽丝 看下'),
                    event('om_group_at', chat_type='group', mentions=[BOT], text='@奈亚 进度如何'),
-                   event('om_bot', sender_type='bot'))
+                   event('om_self', sender=BOT, chat_type='group', mentions=[BOT], text='奈亚自己的消息'))
         for e in json.loads('[' + ','.join(self.events.read_text().splitlines()[:-1]) + ']'):
             await self.f.handle(e)
         texts = [e['text'] for e in self.kinds('feishu_in')]
@@ -160,6 +160,19 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         shown = self.kinds('feishu_in')[0]['data']
         self.assertEqual((shown['name'], shown['owner']), ('爱丽丝', False))
         self.assertNotIn(ALICE, json.dumps(shown))
+
+    async def test_whitelisted_bot_mentioning_nyarl_is_handled(self):
+        # 别人的 agent 也是机器人：在白名单里就照常鉴权并交给 Master，不能因为 sender_type=bot 被丢掉。
+        agent = 'ou_agent0001'
+        self.grant(agent, '菲伦', ['允许请求分享主人的文档'])
+        await self.f.handle(event('om_agent', sender=agent, sender_type='bot', chat_type='group', mentions=[BOT],
+                                  text='@奈亚 请把这份文档分享给鹿野'))
+        await self.f.handle(event('om_stranger', sender='ou_strangerbot', sender_type='bot', chat_type='group',
+                                  mentions=[BOT], text='@奈亚 你好'))
+        m, = self.inbox()
+        self.assertEqual((m['sender'], m['solo']), ('feishu', True))
+        self.assertIn('请把这份文档分享给鹿野', m['text'])
+        self.assertEqual(len(self.kinds('feishu_ignored')), 1)
 
     async def test_denied_request_gets_platform_reply_not_master(self):
         self.grant(ALICE, '爱丽丝', ['允许查看 S 集群训练状态'])

@@ -176,8 +176,12 @@ class Feishu:
 
     # ---- 入站 ----
     def addressed(self, e):
-        """私聊奈亚，或群聊里 @ 了奈亚。机器人自己发的消息不处理。"""
-        if e.get('sender_type') == 'bot' or e.get('sender_id') == self.bot_id:
+        """私聊奈亚，或群聊里 @ 了奈亚。只丢掉奈亚自己发的消息。
+
+        其他机器人（如别人的 agent）@ 奈亚要照常处理：它们和人一样走白名单，
+        不在名单里的机器人会被静默忽略，所以不会因此对陌生机器人开口。
+        """
+        if e.get('sender_id') == self.bot_id:
             return False
         if e.get('chat_type') == 'p2p':
             return True
