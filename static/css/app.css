@@ -84,6 +84,7 @@ body.drawer-open #app { grid-template-columns: var(--nav) minmax(0, 1fr) var(--d
 .sec-t .caret { color: var(--ink-3); font-size: 14px; line-height: 1; transition: transform .15s; transform: rotate(90deg); }
 .sec[data-collapsed] .sec-t .caret { transform: none; }
 .sec[data-collapsed] > .tasks, .sec[data-collapsed] > .nodes { display: none; }
+.acl { padding: 5px 10px; font-size: 13px; } .acl ul { margin: 2px 0 0; padding-left: 18px; color: var(--ink-2); font-size: 12px; }
 .sec-h h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink-2); }
 .count { color: var(--ink-3); font-weight: 400; margin-left: 4px; }
 .tasks, .nodes { padding: 0 8px; display: flex; flex-direction: column; gap: 2px; }
@@ -387,3 +388,12 @@ dialog input:disabled { opacity: .5; }
   .me { max-width: 90%; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* 飞书：他人来信与发往飞书的原文 */
+.fs-in, .fs-out { max-width: 82%; padding: 9px 14px; border-radius: 12px; border: 1px solid var(--line-2); }
+.fs-in { align-self: flex-start; background: var(--s1); }
+.fs-out { align-self: flex-end; background: color-mix(in srgb, var(--info) 7%, transparent); }
+.fs-out.bad { border-color: var(--bad); }
+.fs-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-2); margin-bottom: 4px; }
+.fs-m { font-size: 12px; color: var(--ink-3); margin-top: 4px; overflow-wrap: anywhere; }
+.fs-out.bad .fs-m { color: var(--bad); }

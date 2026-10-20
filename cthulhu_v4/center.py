@@ -196,13 +196,6 @@ class Center(Messages, Questions, Tasks, Review):
                visible=True)
 
     # ---- 查询 ----
-    def agent_env(self, aid):
-        """派发时随回合下发的附加环境。只给 Master：飞书机器人凭据代表主人的对外身份，
-        执行者需要对外联系时经 Master 转达，而不是各自持有发送能力。"""
-        if aid == 'master' and self.feishu:
-            return {'env': self.feishu.env()}
-        return {}
-
     def task_id(self, agent):
         return next((t['id'] for t in self.store.all('task') if t['agent'] == agent), None)
 
@@ -265,6 +258,22 @@ class Center(Messages, Questions, Tasks, Review):
                             data={'arguments': args, 'result': result})
             if dedupe:
                 self.store.put('rpc', {'id': dedupe, 'result': result})
+        return result
+
+    def feishu_tool(self, job, name, args, dedupe):
+        """Master 的飞书工具。不经过 tool() 的同步事务：lark-cli 调用要等外部网络，不能在事务里 await。"""
+        if job['agent'] != 'master':
+            raise ValueError('该角色没有此工具')
+        if not self.feishu:
+            raise ValueError('飞书未启用')
+        if name == 'feishu':
+            return self.feishu.call(job, args, dedupe)
+        with self.store.atomic():
+            prior = self.store.find('rpc', dedupe)
+            if prior:
+                return prior['result']
+            result = self.feishu.acl(job, args)
+            self.store.put('rpc', {'id': dedupe, 'result': result})
         return result
 
     def memory(self, actor, p):

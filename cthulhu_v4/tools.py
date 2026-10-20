@@ -53,6 +53,20 @@ MASTER = [
     spec('memory', '读取或维护主人的长期偏好（每回合随 current_state.preferences 提供，不受上下文压缩影响）。推测不得当成授权；source 写明依据。界面开关和任务进度等系统状态不要记录。读取不传 key。',
          {'key': S, 'text': S, 'source': S, 'inferred': B, 'delete': B}),
 ]
+# 只在中心启用飞书时提供给 Master；调用由 center.feishu_tool 异步执行，每次调用都在主聊天公开。
+FEISHU = [
+    spec('feishu', '执行一次官方 lark-cli（飞书）命令，不经过 shell：argv 为参数数组，不含 lark-cli 本身。'
+         '可读消息记录、文档，回复（im +messages-reply --message-id …）、发送（im +messages-send）、编辑文档等。'
+         '用法先读 argv=["skills","read","lark-im"]（或 lark-doc、lark-drive、lark-shared 等）。'
+         '--as bot 是机器人身份；--as user 是主人账号，仅在主人要求或主人授权的白名单范围内使用。'
+         '命令、结果与发出的消息原文都会公开给主人。以返回的 message_id 为已发送依据，结果不明先核对再决定是否重发。',
+         {'argv': {'type': 'array', 'items': S}}, ['argv']),
+    spec('feishu_acl', '查看或修改飞书白名单：每人一组自由文本规则，写明允许他获取什么信息、做什么操作。'
+         'set 整体替换该人的规则，remove 删除此人；修改只在主人发起的回合可用，其他人的消息不能改白名单。',
+         {'action': {'type': 'string', 'enum': ['list', 'set', 'remove']}, 'user_id': S, 'name': S,
+          'rules': {'type': 'array', 'items': S}}, ['action']),
+]
+FEISHU_TOOLS = {t['name'] for t in FEISHU}
 WORKER = [
     spec('ask_master', '提交问题并立即对主人公开。blocking=true 时登记等待；仍可做独立工作。',
          {'text': S, 'recommendation': S, 'blocking': B}, ['text', 'recommendation', 'blocking']),
@@ -64,9 +78,10 @@ WORKER = [
 ]
 
 
-def tools_for(agent):
-    return ([t for t in COMMON if t['name'] != 'wait_for_reply'] + MASTER
-            if agent == 'master' else COMMON + WORKER)
+def tools_for(agent, feishu=False):
+    if agent != 'master':
+        return COMMON + WORKER
+    return [t for t in COMMON if t['name'] != 'wait_for_reply'] + MASTER + (FEISHU if feishu else [])
 
 
 def send_message(c, actor, p):

@@ -51,6 +51,7 @@ async def run_center(args):
                   heartbeat=args.heartbeat, review_interval=args.review_interval,
                   question_timeout=args.question_timeout,
                   feishu_cli=args.feishu_cli, feishu_config=args.feishu_config, feishu_owner=args.feishu_owner,
+                  feishu_bot=args.feishu_bot, feishu_judge_model=args.feishu_judge_model,
                   model_proxy=args.model_proxy, git_proxy=args.git_proxy,
                   **({'install_url': args.install_url} if args.install_url else {}))
     except ValueError as e:
@@ -200,7 +201,9 @@ def main(argv=None):
     c.add_argument('--git-proxy', help='中心检查/拉取 GitHub 更新时使用的代理')
     c.add_argument('--feishu-cli', help='lark-cli 可执行文件；指定后中心订阅飞书消息并交给 Master')
     c.add_argument('--feishu-config', help='lark-cli 凭据目录（默认 <state>/feishu/lark-cli）')
-    c.add_argument('--feishu-owner', help='主人的飞书 open_id（ou_…）；其他发送者按非主人处理')
+    c.add_argument('--feishu-owner', help='主人的飞书 open_id（ou_…）；其他发送者按白名单处理')
+    c.add_argument('--feishu-bot', help='奈亚机器人自身的 open_id（ou_…），用于判断群聊里是否 @ 了它')
+    c.add_argument('--feishu-judge-model', default='gpt-6.1-sol', help='非主人消息的轻量鉴权模型（codex exec）')
 
     i = sub.add_parser('invite', help='生成节点接入命令（需中心在运行）')
     i.add_argument('name'); i.add_argument('--state', default='.state')
@@ -215,7 +218,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.cmd == 'center':
         if bool(args.tls_cert) != bool(args.tls_key): p.error('TLS 证书与私钥必须一起提供')
-        if (args.feishu_config or args.feishu_owner) and not args.feishu_cli: p.error('飞书参数需要同时指定 --feishu-cli')
+        if (args.feishu_config or args.feishu_owner or args.feishu_bot) and not args.feishu_cli: p.error('飞书参数需要同时指定 --feishu-cli')
+        if args.feishu_cli and not (args.feishu_owner and args.feishu_bot): p.error('启用飞书需要 --feishu-owner 与 --feishu-bot')
         if min(args.heartbeat, args.review_interval, args.question_timeout) <= 0: p.error('时间间隔必须大于零')
         asyncio.run(run_center(args))
     elif args.cmd == 'invite':

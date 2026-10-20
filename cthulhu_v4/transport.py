@@ -4,6 +4,7 @@
 节点不需要任何入站端口，也不需要共享文件系统。
 """
 import asyncio
+import inspect
 import base64
 import hashlib
 import json
@@ -51,7 +52,8 @@ class LocalLink:
         self.hub, self.node = hub, node
 
     async def request(self, body):
-        return self.hub.request(LOCAL, body)
+        result = self.hub.request(LOCAL, body)
+        return await result if inspect.isawaitable(result) else result
 
     def wake(self):
         if self.node:
@@ -173,7 +175,8 @@ def make_handler(center):
             center.store.emit('node_online', f'节点 {node} 已连接', data={'node': node, 'at': time.time()})
             async for raw in ws:
                 try:
-                    response = {'result': hub.request(node, json.loads(raw))}
+                    result = hub.request(node, json.loads(raw))
+                    response = {'result': await result if inspect.isawaitable(result) else result}
                 except Exception as e:
                     response = {'error': str(e)}
                 await ws.send(json.dumps(response, ensure_ascii=False))

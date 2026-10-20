@@ -9,10 +9,10 @@ const LINES = {
   interrupted: '已打断', urgent: '加急', runtime_error: '运行失败', master_attention: 'Master 已暂停',
   master_config: '配置', master_control: 'Master', node_joined: '节点', memory: '偏好', deadline: 'DDL 调整',
   recovery: '恢复', recovery_exhausted: '续办已暂停', orphan_process: '旧进程',
-  question_delegated: '交给 Master', deploy: '更新', deploy_failed: '更新失败', feishu_in: '飞书', feishu_error: '飞书异常', node_update: '节点更新', node_updated: '节点更新', node_update_failed: '更新失败', settings: '设置', agent_config: '模型', node_config: '节点',
+  question_delegated: '交给 Master', deploy: '更新', deploy_failed: '更新失败', feishu_ignored: '飞书·忽略', feishu_denied: '飞书·拒绝', feishu_call: '飞书操作', feishu_acl: '飞书权限', feishu_error: '飞书异常', node_update: '节点更新', node_updated: '节点更新', node_update_failed: '更新失败', settings: '设置', agent_config: '模型', node_config: '节点',
 };
 const LEVEL = { deploy_failed: 'error', task_failed: 'error', review_returned: 'warn', review_requested: 'ask', completed: 'ok', node_joined: 'ok', node_attention: 'error', runtime_error: 'error', master_attention: 'error',
-  orphan_process: 'error', feishu_error: 'error', node_update_failed: 'error', node_updated: 'ok', recovery_exhausted: 'error', overdue: 'warn', interrupted: 'warn', urgent: 'warn', question_timeout: 'warn',
+  orphan_process: 'error', feishu_error: 'error', feishu_denied: 'warn', feishu_ignored: 'info', node_update_failed: 'error', node_updated: 'ok', recovery_exhausted: 'error', overdue: 'warn', interrupted: 'warn', urgent: 'warn', question_timeout: 'warn',
   question: 'ask', ask_owner: 'ask' };
 
 class Process {
@@ -69,10 +69,26 @@ export class Chat {
       return;
     }
     if (e.kind === 'feishu_in') {
-      // 飞书原文按来源展示：主人的消息和网页输入同侧，其他人的消息只作为一行动态。
+      // 主人的飞书消息和网页输入同侧；其他人的消息单独一侧并标出名字（不显示 open_id）。
+      const where = d.chat_type === 'group' ? `群聊 ${d.chat_name || ''} @奈亚` : '私聊';
+      const tag = el('span', { class: 'tag', text: '飞书 · ' + where });
       if (d.owner) this.root.append(el('div', { class: 'me' }, el('div', { class: 'me-b' }, markdown(e.text)),
-        el('div', { class: 'me-m' }, el('span', { class: 'tag', text: '飞书' }), el('time', { text: clock(e.at) }))));
-      else this.line(e);
+        el('div', { class: 'me-m' }, tag, el('time', { text: clock(e.at) }))));
+      else this.root.append(el('div', { class: 'fs-in' },
+        el('div', { class: 'fs-h' }, el('strong', { text: d.name || '未知用户' }), tag, el('time', { text: clock(e.at) })),
+        el('div', { class: 'fs-b' }, markdown(e.text)),
+        d.reason ? el('div', { class: 'fs-m', text: '鉴权通过：' + d.reason }) : null));
+      return;
+    }
+    if (e.kind === 'feishu_out') {
+      // Master（或系统的拒绝回复）发到飞书的原文，连同平台回执一起展示。
+      const state = d.ok ? `已发送 · ${d.message_id}` : '发送失败' + (d.error ? '：' + d.error : '');
+      this.root.append(el('div', { class: 'fs-out' + (d.ok ? '' : ' bad') },
+        el('div', { class: 'fs-h' }, el('strong', { text: (e.actor === 'system' ? '系统' : 'Master') + ' → 飞书' }),
+          el('span', { class: 'tag', text: d.target || '' }), el('span', { class: 'tag', text: d.as === 'user' ? '以主人身份' : '以奈亚身份' }),
+          el('time', { text: clock(e.at) })),
+        el('div', { class: 'fs-b' }, markdown(e.text || '（非文本内容）')),
+        el('div', { class: 'fs-m', text: state })));
       return;
     }
     if ((e.kind === 'chat' || e.kind === 'review') && e.actor === 'master') {
@@ -93,7 +109,8 @@ export class Chat {
     if (e.kind === 'instruction') text = `→ ${title || who(e.target)}：${e.text}（已入队）`;
     else if (e.kind === 'question') text = `${title || who(e.actor)}：${e.text}`;
     else if (e.kind === 'answer') text = `${who(e.actor)}：${e.text}`;
-    else if (e.kind === 'feishu_in') text = `${e.data?.sender_id || '未知发送者'}：${e.text}`;
+    else if (e.kind === 'feishu_ignored' || e.kind === 'feishu_denied') text = `${e.data?.name || '未知用户'}：${e.text}（${e.data?.reason || ''}）`;
+    else if (e.kind === 'feishu_call') text = `${e.data?.state === 'ok' ? '' : e.data?.state === 'unknown' ? '结果未知 · ' : '失败 · '}lark-cli ${e.text}`;
     else if (['completed', 'review_requested', 'task_failed', 'task_reopened', 'review_returned'].includes(e.kind)) text = `${title || ''}${title ? ' — ' : ''}${e.text}`;
     const row = el('div', { class: 'event ' + (LEVEL[e.kind] || 'info') },
       el('span', { class: 'event-k', text: LINES[e.kind] }), el('span', { class: 'event-t' }, rich(text, { node: e.task ? this.taskNode(e.task) : null })), el('time', { text: clock(e.at) }));

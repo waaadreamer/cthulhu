@@ -7,4 +7,6 @@ exec .venv/bin/python -m cthulhu_v4 center \
   --state .state --port 8767 --ws-port 8770 \
   --public-url https://47.115.202.248:8001/v4 \
   --backend codex --model gpt-6-astra --reasoning-effort medium \
-  --model-proxy http://127.0.0.1:7897 --git-proxy http://127.0.0.1:7897
+  --model-proxy http://127.0.0.1:7897 --git-proxy http://127.0.0.1:7897 \
+  --feishu-cli /opt/cthulhu-feishu/node_modules/@larksuite/cli/bin/lark-cli \
+  --feishu-owner ou_659dca076021f9a06fb3b9bc6ae56e49 --feishu-bot ou_8c7f5811726da050454b2c4ebd2b6784

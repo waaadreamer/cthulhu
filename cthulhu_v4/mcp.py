@@ -15,7 +15,7 @@ def request(path, data=None):
         data=json.dumps(data).encode() if data is not None else None,
         headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + os.environ['CTHULHU_TOKEN']})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=160) as r:
             result = json.load(r)
     except urllib.error.HTTPError as e:
         # 让模型看到版本冲突/权限等业务错误，不只看到不透明的 HTTP 400。

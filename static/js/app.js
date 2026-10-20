@@ -34,7 +34,7 @@ async function poll() {
     snap = r.unchanged ? { ...snap, now: r.now } : r;
     fileCtx.nodes = snap.nodes.map(n => n.id);
     chat.demo = snap.agents.find(a => a.id === 'master')?.backend === 'demo';
-    renderSide(); renderQuestions(); renderMaster();
+    renderSide(); renderFeishu(); renderQuestions(); renderMaster();
     const stick = nearBottom($('#chat'));
     if (!chatPager.started) { await chatPager.start(); chatCursor = Math.max(chatCursor, chatPager.highwater); }
     chatCursor = await follow('view=conversation' + (chat.demo ? '&harness=1' : ''), chatCursor, e => chat.apply(e));
@@ -189,6 +189,18 @@ function renderSide() {
       el('span', { class: 'muted' + (n.update ? ' upd ' + n.update.state : ''), text: updateLabel(n) ||
         (n.online ? (n.backends || []).filter(b => b !== 'demo').join(' ') || 'demo' : '离线') })));
   }
+}
+
+// 飞书白名单只读展示：修改通过对 Master 说话完成（只有主人的回合能改）。
+function renderFeishu() {
+  const f = snap.feishu, sec = $('#feishu-sec');
+  sec.hidden = !f; if (!f) return;
+  const acl = f.acl || [];
+  $('#acl-count').textContent = acl.length || '';
+  $('#acl-count').title = f.state === 'running' ? '订阅中' : `订阅状态：${f.state}${f.error ? '，' + f.error : ''}`;
+  $('#acl').replaceChildren(...(acl.length ? acl.map(a => el('div', { class: 'acl' }, el('strong', { text: a.name }),
+    el('ul', {}, ...a.rules.map(r => el('li', { text: r }))))) :
+    [el('div', { class: 'acl muted', text: '暂无。对 Master 说「允许某人做什么」即可添加；不在名单里的人奈亚不回复。' })]));
 }
 
 function renderMaster() {

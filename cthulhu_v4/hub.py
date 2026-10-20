@@ -10,6 +10,7 @@ import re
 import secrets
 
 from .util import LEASE, LOCAL, PROTOCOL, TERMINAL
+from .tools import FEISHU_TOOLS
 
 
 class Hub:
@@ -210,7 +211,7 @@ class Hub:
                 m = batch[0]
                 t = c.task_for(a['id'])
                 j = {'id': c.uid('turn'), 'node': node, 'agent': a['id'], 'message': m['id'], 'messages': [x['id'] for x in batch],
-                     'state': 'running', 'until': c.clock() + LEASE, 'started': c.clock(), 'agent_spec': a | c.agent_env(a['id']),
+                     'state': 'running', 'until': c.clock() + LEASE, 'started': c.clock(), 'agent_spec': a, 'feishu': a['id'] == 'master' and bool(c.feishu),
                      'task': t, 'prompt': c.prompt(a['id'], batch)}
                 s.put('lease', j)
                 c.set_messages(j['messages'], 'running')
@@ -227,8 +228,12 @@ class Hub:
     def tool(self, node, body):
         job = self.valid_job(node, body['job'])
         # MCP 写请求带稳定 call_id；响应丢失后重试同一调用，返回原结果而不重复提交副作用。
-        return self.c.tool(job['agent'], body['name'], body.get('arguments') or {},
-                           dedupe=job['id'] + ':' + str(body['call_id']))
+        dedupe = job['id'] + ':' + str(body['call_id'])
+        if body['name'] in FEISHU_TOOLS:
+            # 飞书工具要知道本回合的来源（白名单只能在主人的回合里改），lark-cli 调用是异步子进程；
+            # 返回协程，由链路 await，不在同步事务里等外部网络。
+            return self.c.feishu_tool(job, body['name'], body.get('arguments') or {}, dedupe)
+        return self.c.tool(job['agent'], body['name'], body.get('arguments') or {}, dedupe=dedupe)
 
     def request(self, node, body):
         op = body.get('op')

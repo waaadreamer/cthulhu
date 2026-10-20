@@ -27,7 +27,7 @@ class Bridge:
                     length = int(self.headers.get('Content-Length', '0'))
                     body = json.loads(self.rfile.read(length)) if length else {}
                     future = asyncio.run_coroutine_threadsafe(bridge.route(self.command, self.path, token, body), bridge.loop)
-                    status, value = 200, future.result(timeout=60)
+                    status, value = 200, future.result(timeout=150)
                 except PermissionError as e: status, value = 401, {'error': str(e)}
                 except Exception as e: status, value = 400, {'error': str(e)}
                 raw = json.dumps(value, ensure_ascii=False).encode()
@@ -46,7 +46,7 @@ class Bridge:
         if not turn:
             raise PermissionError('无效或过期的本机回合 token')
         if method == 'GET' and path == '/internal/tools':
-            return {'tools': tools_for(turn.agent)}
+            return {'tools': tools_for(turn.agent, turn.job.get('feishu', False))}
         if method == 'POST' and path == '/internal/call':
             return await self.node.call_tool(turn.job, body['name'], body.get('arguments') or {})
         raise PermissionError('节点只提供本机 MCP 桥')

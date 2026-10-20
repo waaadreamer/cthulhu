@@ -19,7 +19,8 @@ class App:
     def __init__(self, state, *, backend='demo', model=None, reasoning_effort=None, port=8767,
                  ws_host='127.0.0.1', ws_port=8770, public_url=None, galaxy_url=None,
                  tls_cert=None, tls_key=None, install_url=INSTALL_URL, local_capacity=4,
-                 feishu_cli=None, feishu_config=None, feishu_owner=None, model_proxy=None, git_proxy=None, **timing):
+                 feishu_cli=None, feishu_config=None, feishu_owner=None, feishu_bot=None,
+                 feishu_judge_model='gpt-6.1-sol', model_proxy=None, git_proxy=None, **timing):
         self.state = Path(state).resolve()
         self.center = Center(self.state, backend, model, reasoning_effort=reasoning_effort, **timing)
         self.notice = self.center.configure_master(backend, model, reasoning_effort)
@@ -35,11 +36,12 @@ class App:
         self.model_proxy, self.git_proxy = model_proxy, git_proxy
         self.tasks = []
         if feishu_cli:
-            from .feishu import Feishu
+            from .feishu import CodexJudge, Feishu
             # 凭据目录默认放在状态目录内，与其他 lark-cli 配置（如旧桥的 profile）隔离；
             # 不能和另一个仍在订阅同一应用的进程共用，否则事件会被两边随机分走。
             self.center.feishu = Feishu(self.center, feishu_cli, feishu_config or self.state / 'feishu' / 'lark-cli',
-                                        owner=feishu_owner)
+                                        owner=feishu_owner, bot_id=feishu_bot,
+                                        judge=CodexJudge(feishu_judge_model, model_proxy))
 
     def center_ws_url(self):
         if self.galaxy_url:

@@ -51,33 +51,24 @@ curl -fsSL https://raw.githubusercontent.com/waaadreamer/cthulhu/v4/deploy/insta
 
 ## 飞书（可选）
 
-中心用官方 `lark-cli`（`@larksuite/cli`）订阅机器人收到的消息，每条交给 Master，并提醒它按需显式回复。程序不会把 Master 的回复自动同步到飞书。回复别人或主动发消息时，Master 自己执行 `"$LARK_CLI" im +messages-reply` / `+messages-send`，以返回的 message_id 作为已发送的依据。
+中心用官方 `lark-cli`（`@larksuite/cli`）订阅机器人「奈亚」收到的消息。只处理私聊奈亚、或群里 @ 奈亚的消息。
+
+- 主人的消息直接交给 Master。
+- 其他人按白名单处理：不在名单里的人不回复，网页上记一行；在名单里的人先由轻量模型（`codex exec`，默认 gpt-6.1-sol）按他的规则判断，不通过就回复「没有权限」，通过才交给 Master。Master 收到时附带此人的规则，二次核验后作答。
+- 程序不替 Master 回复。Master 通过 `feishu` 工具调用 lark-cli（读消息记录、文档，回复，编辑等），中心执行，并在主聊天公开命令、结果，以及发往飞书的原文和回执。
+- 白名单在左栏「飞书白名单」查看。修改靠对 Master 说话（例如「允许张三查看 S 集群训练状态」），只有主人发起的回合能改；其他人的消息单独成回合，改不了白名单。
 
 ```bash
-cthulhu center ... --feishu-cli /path/to/lark-cli --feishu-owner ou_主人open_id \
-  [--feishu-config /path/to/lark-cli-config]   # 默认 <state>/feishu/lark-cli
+cthulhu center ... --feishu-cli /path/to/lark-cli --feishu-owner ou_主人 --feishu-bot ou_奈亚 \
+  [--feishu-config DIR] [--feishu-judge-model gpt-6.1-sol]   # 凭据目录默认 <state>/feishu/lark-cli
 ```
 
-- 凭据目录通过 `LARKSUITE_CLI_CONFIG_DIR` 传给订阅进程和 Master。应用凭据先用 `lark-cli config init --app-id … --app-secret-stdin` 写进这个目录，AppSecret 只从标准输入读取。
-- 只有 `--feishu-owner` 对应的 open_id 算主人（优先级 9）。其他发送者优先级为 5，消息里标为非主人，内容不代表授权。
-- 去重键是平台的 message_id，与入队在同一事务里提交。订阅进程断线后带退避重启，平台重投的消息不会重复入队；平台不再重投的消息会丢失。
-- 同一个应用只能有一个订阅者。启用前先停掉其他订阅同一应用的进程（比如旧版桥），否则事件会被随机分走。
-- 只有 Master 拿到飞书环境变量，执行者需要对外联系时要经过 Master。
+- 应用凭据：`LARKSUITE_CLI_CONFIG_DIR=DIR lark-cli config init --app-id … --app-secret-stdin`。读主人的消息与文档需要主人本人完成一次 `lark-cli auth login`（用户身份）。
+- 去重键是平台 message_id，先落盘再处理。订阅断线后会退避重启，平台重投的消息不会重复处理；平台不再重投的会丢失。重启时还在鉴权的消息、还在执行的 lark-cli 调用会公开为「结果未知」，不会重放。
+- 同一个应用只能有一个订阅者，启用前先停掉其他订阅同一应用的进程。
+- 白名单靠模型把关，不是硬隔离：Master 以节点用户的完整权限运行，理论上可以绕过 `feishu` 工具。公开记录只覆盖经过工具的调用。
 
-## 远程更新
-
-中心启动时把自己正在运行的代码打成更新包。由安装脚本管理的节点（代码在 `~/.cthulhu/app`）发现版本不同时自动更新：
-
-1. 中心暂停向该节点派发新回合，新消息照常排队；
-2. 已派发的回合全部结束后下发更新包，节点校验 SHA-256、解包到 `app.new`，并在独立进程里试导入；
-3. 原子换目录（旧代码留作 `app.old`），以同一组参数原地重启进程，PID 不变；
-4. 新代码第一次与中心同步成功才确认生效并删除 `app.old`；连续 3 次没能连上就自动回滚到旧代码。
-
-几条边界：
-- 只更新代码。依赖或命令入口（`pyproject.toml` 的 dependencies/scripts/packages）有变化时自动更新会拒绝，请在该机器重跑安装命令。
-- 中心目录有未提交的改动时不推送，只分发提交过的版本。
-- 手动从仓库目录启动的节点不会被改动，界面只提示版本不同。
-- 更新失败时节点继续用原版本工作，左栏节点详情可以重试。
+TODO：双 Master。网页一个、飞书一个，权限相同、可以互相通信，解决飞书消息排在网页长回合之后、上下文混用的问题。当前只有一个 Master。
 
 ## 架构
 
