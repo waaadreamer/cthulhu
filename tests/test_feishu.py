@@ -184,19 +184,25 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply[reply.index('--message-id') + 1], 'om_a')
         # 拒绝回复先 @ 对方并附理由；网页展示 @名字，不露 open_id。
         self.assertEqual(reply[reply.index('--text') + 1],
-                         f'<at user_id="{ALICE}">爱丽丝</at> {DENY_TEXT}：请求访问主人私信，超出白名单')
+                         f'<at user_id="{ALICE}">爱丽丝</at> {DENY_TEXT}。原因：请求访问主人私信，超出白名单')
         out, = self.kinds('feishu_out')
         self.assertEqual((out['actor'], out['text'], out['data']['ok']),
-                         ('system', f'@爱丽丝 {DENY_TEXT}：请求访问主人私信，超出白名单', True))
+                         ('system', f'@爱丽丝 {DENY_TEXT}。原因：请求访问主人私信，超出白名单', True))
         self.assertEqual(self.kinds('feishu_denied')[0]['data']['reason'], '请求访问主人私信，超出白名单')
 
-    async def test_judge_failure_neither_admits_nor_replies(self):
+    async def test_judge_failure_is_not_admitted_and_sender_is_told_why(self):
         self.grant(ALICE, '爱丽丝', ['允许查看 S 集群训练状态'])
-        self.judge.verdict = {'error': '鉴权超时'}
+        self.judge.verdict = {'error': '鉴权输出无法解析：<模型原始输出>', 'public': '初筛结果无法解析'}
         await self.f.handle(event('om_a', sender=ALICE, text='S 集群呢'))
         self.assertEqual(self.inbox(), [])
-        self.assertFalse(any(a[:2] == ['im', '+messages-reply'] for a in self.calls()))
-        self.assertTrue(self.kinds('feishu_denied')[0]['data']['error'])
+        reply, = [a for a in self.calls() if a[:2] == ['im', '+messages-reply']]
+        text = reply[reply.index('--text') + 1]
+        # 告诉对方是系统故障、请求未处理，不说成“没有权限”，也不外泄模型原始输出；完整错误只在网页。
+        self.assertTrue(text.startswith(f'<at user_id="{ALICE}">'))
+        self.assertIn('初筛结果无法解析', text)
+        self.assertNotIn('模型原始输出', text)
+        self.assertNotIn(DENY_TEXT, text)
+        self.assertIn('模型原始输出', self.kinds('feishu_denied')[0]['data']['reason'])
 
     async def test_interrupted_judging_is_reported_on_restart_not_replayed(self):
         gate = asyncio.Event()
