@@ -75,7 +75,8 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.keyboard.type('续');
     assert.equal(await qa.inputValue(), '继续');
     await page.locator('#questions .btn.primary').click();
-    await page.locator('#timeline .card.result').waitFor();
+    await page.locator('#timeline .card.result.pending').waitFor();      // 执行者只是申请结束
+    await page.locator('#timeline .card.result:not(.pending)').waitFor(); // 模拟 Master 审核通过
     await page.locator('#d-state').getByText('已完成').waitFor();
     const taskHash = await page.evaluate(() => location.hash);
     // 工具与命令默认折叠
@@ -87,7 +88,7 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     // Esc 关闭、hash 直达
     const hash = await page.evaluate(() => location.hash); assert(hash.startsWith('#task='));
     await page.keyboard.press('Escape'); assert(await page.locator('#drawer').isHidden());
-    await page.goto(url + '/' + hash); await page.locator('#timeline .card.result').waitFor();
+    await page.goto(url + '/' + hash); await page.locator('#timeline .card.result:not(.pending)').first().waitFor();
     // 归档：从列表收起到“已归档”，取消归档后回来。
     await page.locator('#d-controls').getByText('归档', { exact: true }).click();
     await page.locator('#drawer').waitFor({ state: 'hidden' });
@@ -107,6 +108,11 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     assert(await page.locator('#nodes').isHidden()); assert(await page.locator('#tasks').isHidden());
     await page.locator('[data-sec=nodes] .sec-t').click(); await page.locator('[data-sec=tasks] .sec-t').click();
     assert(await page.locator('#nodes').isVisible()); assert(await page.locator('#tasks').isVisible());
+    // 已结束的任务可以重新打开，回到原执行者。
+    page.once('dialog', d => d.accept('补一份说明'));
+    await page.locator('#d-controls').getByText('重新打开').click();
+    await page.locator('#d-state').getByText('进行中').waitFor();
+    await page.locator('#timeline').getByText('重新打开：补一份说明').waitFor();
     // 添加节点命令
     await page.locator('#add-node').click(); await page.locator('#invite-form [name=name]').fill('gpu1');
     await page.locator('#invite-form .btn.primary').click(); await page.locator('#invite-cmd').getByText('curl -fsSL', { exact: false }).waitFor();

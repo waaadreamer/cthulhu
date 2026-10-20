@@ -113,6 +113,10 @@ class Web:
                 return c.set_master_decides(body.get('master_decides'))
             if path == '/api/memory':
                 return c.memory('owner', body)
+            if path == '/api/task/close':
+                return c.close_task(body, actor='owner')
+            if path == '/api/task/reopen':
+                return c.reopen_task(body, actor='owner')
             if path == '/api/task/archive':
                 return c.archive_task(body)
             if path == '/api/control':

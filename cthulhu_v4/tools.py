@@ -8,7 +8,7 @@ READ_ONLY = {'list_tasks', 'read_task_events', 'list_questions', 'read_messages'
 def spec(name, description, props=None, required=()):
     return {'name': name, 'description': description,
             'annotations': {'readOnlyHint': name in READ_ONLY,
-                            'destructiveHint': name in {'control_task', 'memory'}, 'openWorldHint': False},
+                            'destructiveHint': name in {'control_task', 'memory', 'close_task'}, 'openWorldHint': False},
             'inputSchema': {'type': 'object', 'properties': props or {},
                             'required': list(required), 'additionalProperties': False}}
 
@@ -41,6 +41,11 @@ MASTER = [
     spec('control_task', '暂停/恢复/取消；暂停会中断原生进程，恢复前应检查外部作业。',
          {'task_id': S, 'action': {'type': 'string', 'enum': ['pause', 'resume', 'cancel']}, 'reason': S},
          ['task_id', 'action', 'reason']),
+    spec('close_task', "审核执行者的结束申请并关闭任务：status='success' 表示核验通过（只能用于待审核任务），'fail' 表示判定未达成。"
+         '不合格但还能补救时不要关闭，直接 send_message 让执行者继续。reason 写明核验依据。',
+         {'task_id': S, 'status': {'type': 'string', 'enum': ['success', 'fail']}, 'reason': S}, ['task_id', 'status', 'reason']),
+    spec('reopen_task', '重新打开已结束（完成/失败/取消）的任务，由原执行者在原会话里继续；reason 写清要补做什么。可选新 deadline。',
+         {'task_id': S, 'reason': S, 'deadline': S}, ['task_id', 'reason']),
     spec('set_deadline', '修改期限并公开理由；必须符合主人授权，不可偷偷延期。',
          {'task_id': S, 'deadline': S, 'reason': S}, ['task_id', 'deadline', 'reason']),
     spec('finish_review', '先 list_tasks 再读取增量并提交报告；无新增信息返回 skipped，不补发重复报告。记录事件阅读位置。',
@@ -51,7 +56,8 @@ MASTER = [
 WORKER = [
     spec('ask_master', '提交问题并立即对主人公开。blocking=true 时登记等待；仍可做独立工作。',
          {'text': S, 'recommendation': S, 'blocking': B}, ['text', 'recommendation', 'blocking']),
-    spec('finish_task', '只有实际交付并验证后才能完成，证据为路径/命令结果/结论。',
+    spec('finish_task', '申请结束任务：提交实际结果与可验证证据（路径/命令结果/结论），等待 master 审核，审核通过前任务不算完成。'
+         '被退回时按意见继续，然后再次申请。',
          {'result': S, 'evidence': S}, ['result', 'evidence']),
     spec('wait_until', '等待外部作业，记录原因和句柄；到时唤醒核验，不自动认定作业结束。',
          {'reason': S, 'seconds': I, 'operation': S}, ['reason', 'seconds', 'operation']),
@@ -89,6 +95,8 @@ HANDLERS = {
     'set_deadline': lambda c, a, p: c.set_deadline(a, p),
     'memory': lambda c, a, p: c.memory(a, p),
     'finish_task': lambda c, a, p: c.finish_task(a, p),
+    'close_task': lambda c, a, p: c.close_task(p),
+    'reopen_task': lambda c, a, p: c.reopen_task(p),
     'wait_for_reply': lambda c, a, p: c.wait(a, 'wait_for_reply', p),
     'wait_until': lambda c, a, p: c.wait(a, 'wait_until', p),
 }

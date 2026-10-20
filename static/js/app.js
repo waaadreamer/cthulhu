@@ -5,8 +5,8 @@ import { Model } from './model.js';
 import { View, Live } from './render.js';
 import { Chat } from './chat.js';
 
-const STATE = { running: '进行中', waiting: '等待', paused: '已暂停', completed: '已完成', cancelled: '已取消' };
-const DONE = new Set(['completed', 'cancelled']);
+const STATE = { running: '进行中', waiting: '等待', paused: '已暂停', review: '待审核', completed: '已完成', failed: '未达成', cancelled: '已取消' };
+const DONE = new Set(['completed', 'failed', 'cancelled']);
 let snap = null, chatCursor = 0, polling = false, drawer = null, priority = 9, sentAt = null;
 
 const chat = new Chat($('#chat'), { openTask: id => openTask(id), taskTitle: id => snap?.tasks.find(t => t.id === id)?.title,
@@ -278,7 +278,15 @@ class Drawer {
       el('span', { class: 'mono', title: '工作目录：原生 CLI 从这里读取 AGENTS.md / CLAUDE.md', text: a.cwd }),
       a.session ? el('span', { class: 'mono', title: '原生会话 ' + a.session, text: a.session.slice(0, 8) }) : null);
     const ctl = $('#d-controls'); ctl.replaceChildren();
-    if (!DONE.has(t.state)) for (const action of t.state === 'paused' ? ['resume', 'cancel'] : ['pause', 'cancel'])
+    const btn = (text, cls, fn) => ctl.append(el('button', { type: 'button', class: 'btn' + (cls ? ' ' + cls : ''), text, onclick: fn }));
+    // 待审核：主人也可以直接给结论；“退回”就是给执行者发一条意见，任务回到进行中。
+    if (t.state === 'review') {
+      btn('通过', 'primary', () => act(() => api('api/task/close', { task_id: t.id, status: 'success', reason: '主人审核通过' })));
+      btn('退回', '', () => { const r = prompt('退回意见（发给执行者，任务回到进行中）'); r?.trim() && act(() => api('api/chat', { to: t.agent, text: r.trim(), priority: 9 })); });
+      btn('判定未达成', 'danger', () => { const r = prompt('未达成的原因'); r?.trim() && act(() => api('api/task/close', { task_id: t.id, status: 'fail', reason: r.trim() })); });
+    }
+    if (DONE.has(t.state)) btn('重新打开', '', () => { const r = prompt('要补做什么？（交给原执行者，在原会话里继续）'); r?.trim() && act(() => api('api/task/reopen', { task_id: t.id, reason: r.trim() })); });
+    if (!DONE.has(t.state) && t.state !== 'review') for (const action of t.state === 'paused' ? ['resume', 'cancel'] : ['pause', 'cancel'])
       ctl.append(el('button', { type: 'button', class: 'btn' + (action === 'cancel' ? ' danger' : ''), text: { pause: '暂停', resume: '恢复', cancel: '取消' }[action],
         onclick: () => (action !== 'cancel' || confirm('取消任务？已有文件与外部作业不会回滚。')) &&
           act(() => api('api/control', { task_id: t.id, action, reason: '主人通过页面操作' })) }));

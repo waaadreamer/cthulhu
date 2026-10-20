@@ -149,8 +149,49 @@ class CoreTests(unittest.TestCase):
         queued = [m for m in self.c.store.all('message') if m['target'] == 'master' and m['state'] == 'queued']
         self.assertFalse(any(m['text'].startswith('进度') for m in queued))
         self.assertEqual(sum(m['state'] == 'superseded' for m in self.c.store.all('message')), 4)
-        done = next(m for m in queued if '完成，请核验' in m['text'])
-        self.assertIn('4 条未读进度消息已被本通知取代', done['text'])
+        done = next(m for m in queued if '申请结束' in m['text'])
+        self.assertIn('4 条未读进度消息已被本申请取代', done['text'])
+
+    def test_finish_is_a_request_and_master_reviews(self):
+        t = self.create(); self.clear_messages()
+        self.c.tool(t['agent'], 'send_message', {'to': 'master', 'text': '普通进度'})
+        self.c.tool(t['agent'], 'finish_task', {'result': '做完了', 'evidence': 'pytest 通过'})
+        self.assertEqual(self.c.store.get('task', t['id'])['state'], 'review')     # 申请≠完成
+        req = next(m for m in self.c.store.all('message') if m.get('key') == 'close:' + t['id'])
+        self.assertTrue(req['solo'])
+        self.assertEqual(self.c.next_batch('master'), [req])                      # 单独成回合，不与汇报合并
+        # 审核期间不算意外空闲：不续办。
+        self.now += 10000; self.c.tick()
+        self.assertFalse(any((m.get('key') or '').startswith('recover:') for m in self.c.store.all('message')))
+        # 退回：Master 发消息给执行者 → 回到进行中，旧申请作废。
+        self.c.tool('master', 'send_message', {'to': t['agent'], 'text': '缺少 README 更新，补上再申请'})
+        t2 = self.c.store.get('task', t['id'])
+        self.assertEqual((t2['state'], t2['returns'][0]['round']), ('running', 1))
+        self.assertEqual(self.c.store.get('message', req['id'])['state'], 'superseded')
+        with self.assertRaisesRegex(ValueError, '尚未申请'):
+            self.c.tool('master', 'close_task', {'task_id': t['id'], 'status': 'success', 'reason': 'ok'})
+        # 第二次申请 → 通过。
+        self.c.tool(t['agent'], 'finish_task', {'result': '补上了', 'evidence': 'README 已更新'})
+        self.c.tool('master', 'close_task', {'task_id': t['id'], 'status': 'success', 'reason': '核对 README 与测试'})
+        t3 = self.c.store.get('task', t['id'])
+        self.assertEqual((t3['state'], t3['result'], t3['verdict']['status'], t3['review_round']), ('completed', '补上了', 'success', 2))
+        self.assertTrue(any(e['kind'] == 'completed' and e['data'].get('reviewed') for e in self.c.store.events(limit=500)))
+
+    def test_fail_and_reopen_continue_with_the_same_worker(self):
+        t = self.create(); self.c.save_session(t['agent'], 'native-1')
+        self.c.tool('master', 'close_task', {'task_id': t['id'], 'status': 'fail', 'reason': '无法获取权限'})
+        self.assertEqual(self.c.store.get('task', t['id'])['state'], 'failed')
+        with self.assertRaisesRegex(ValueError, 'reopen_task'):
+            self.c.tool('master', 'close_task', {'task_id': t['id'], 'status': 'fail', 'reason': 'again'})
+        with self.assertRaises(ValueError):      # 已结束的任务不能再收执行消息之外的状态改动
+            self.c.tool('master', 'reopen_task', {'task_id': t['id'], 'reason': ''})
+        self.c.tool('master', 'reopen_task', {'task_id': t['id'], 'reason': '权限已开通，继续完成', 'deadline': '2099-02-01T00:00:00+00:00'})
+        t2 = self.c.store.get('task', t['id']); a = self.c.store.get('agent', t['agent'])
+        self.assertEqual((t2['state'], a['session'], a['paused']), ('running', 'native-1', False))   # 原执行者、原会话
+        self.assertEqual(t2['history'][0]['state'], 'failed')
+        self.assertTrue(any(m['target'] == t['agent'] and m['state'] == 'queued' and '重新打开' in m['text'] for m in self.c.store.all('message')))
+        with self.assertRaisesRegex(ValueError, '尚未结束'):
+            self.c.tool('master', 'reopen_task', {'task_id': t['id'], 'reason': 'x'})
 
     def test_owner_late_correction_is_preserved(self):
         t = self.create(); q = self.question(t)

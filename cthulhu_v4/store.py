@@ -122,6 +122,7 @@ class Store:
                 actor = 'owner'
                 OR kind IN ('task_created', 'control', 'deadline', 'completed',
                     'question', 'answer', 'ask_owner', 'question_timeout', 'question_delegated', 'overdue',
+                    'review_requested', 'review_returned', 'task_failed', 'task_reopened',
                     'recovery', 'recovery_exhausted', 'node_attention', 'runtime_error',
                     'orphan_process', 'interrupted', 'instruction', 'turn_failed', 'agent_config')
                 OR (actor NOT IN ('master', 'system', 'owner') AND (

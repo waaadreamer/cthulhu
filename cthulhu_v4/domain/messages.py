@@ -5,7 +5,7 @@ BATCH_CHARS = 60000
 
 
 class Messages:
-    def enqueue(self, sender, target, text, priority=5, *, reply_to=None, key=None, copy=False):
+    def enqueue(self, sender, target, text, priority=5, *, reply_to=None, key=None, copy=False, solo=False):
         """copy=True：程序为已公开事件（提问、回答、完成）生成的路由副本，界面不再重复展示。"""
         s = self.store
         s.get('agent', target)
@@ -29,7 +29,7 @@ class Messages:
             if original['sender'] != target or original['target'] != sender:
                 raise ValueError('reply_to 必须对应双方之间的来信')
         m = {'id': self.uid('m'), 'sender': sender, 'target': target, 'text': text, 'priority': priority,
-             'state': 'queued', 'at': self.clock(), 'reply_to': reply_to, 'key': key, 'copy': copy}
+             'state': 'queued', 'at': self.clock(), 'reply_to': reply_to, 'key': key, 'copy': copy, 'solo': solo}
         s.put('message', m)
         s.emit('message', text, actor=sender, target=target, task=self.task_id(target), data=m,
                visible=sender == 'owner' and target == 'master' and not copy)
@@ -39,6 +39,9 @@ class Messages:
             self.stop_turn(target, 'priority10')
             s.emit('urgent', '优先级 10：已请求打断当前回合，等待停止确认后处理新消息。',
                    actor=sender, target=target, task=self.task_id(target), visible=True)
+        if task and task['state'] == 'review' and sender in ('master', 'owner'):
+            # 审核期间 Master/主人给执行者发消息 = 退回继续做：任务回到进行中，申请记录留档。
+            self.return_review(task, sender, text)
         if reply_to and task and task.get('wait', {}).get('message_id') == reply_to:
             self.clear_wait(task)
         self.wake(target)
@@ -65,11 +68,12 @@ class Messages:
         执行者仍是一条一回合：它只有一个任务，来信很少，逐条处理更利于核对 reply_to。
         """
         first = self.next_message(aid)
-        if not first or aid != 'master' or first.get('key') == 'review':
+        # 审核请求、结束申请等 solo 消息单独成回合：它们需要 Master 专门核验，不能淹没在一批进度里。
+        if not first or aid != 'master' or first.get('key') == 'review' or first.get('solo'):
             return [first] if first else []
         batch, size = [first], len(first['text'])
         for m in sorted((m for m in self.store.all('message') if m['target'] == aid and m['state'] == 'queued'
-                         and m['id'] != first['id'] and m.get('key') != 'review'),
+                         and m['id'] != first['id'] and m.get('key') != 'review' and not m.get('solo')),
                         key=lambda m: (-m['priority'], m['at'])):
             # 单回合输入有上限：剩下的留到下一回合，不截断任何一条来信。
             if len(batch) >= BATCH_COUNT or size + len(m['text']) > BATCH_CHARS:

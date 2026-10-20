@@ -4,14 +4,14 @@ import { Model } from './model.js';
 import { View, Live, render, who, elapsed } from './render.js';
 
 const LINES = {
-  task_created: '新任务', instruction: '已下达', completed: '任务完成', question: '提问', ask_owner: '需要你决定',
+  task_created: '新任务', instruction: '已下达', completed: '审核通过', review_requested: '申请结束', task_failed: '未达成', review_returned: '退回', task_reopened: '重新打开', question: '提问', ask_owner: '需要你决定',
   answer: '回答', question_timeout: '提问超时', control: '控制', overdue: '超出期限', node_attention: '节点异常',
   interrupted: '已打断', urgent: '加急', runtime_error: '运行失败', master_attention: 'Master 已暂停',
   master_config: '配置', master_control: 'Master', node_joined: '节点', memory: '偏好', deadline: 'DDL 调整',
   recovery: '恢复', recovery_exhausted: '续办已暂停', orphan_process: '旧进程',
   question_delegated: '交给 Master', feishu_in: '飞书', feishu_error: '飞书异常', node_update: '节点更新', node_updated: '节点更新', node_update_failed: '更新失败', settings: '设置', agent_config: '模型', node_config: '节点',
 };
-const LEVEL = { completed: 'ok', node_joined: 'ok', node_attention: 'error', runtime_error: 'error', master_attention: 'error',
+const LEVEL = { task_failed: 'error', review_returned: 'warn', review_requested: 'ask', completed: 'ok', node_joined: 'ok', node_attention: 'error', runtime_error: 'error', master_attention: 'error',
   orphan_process: 'error', feishu_error: 'error', node_update_failed: 'error', node_updated: 'ok', recovery_exhausted: 'error', overdue: 'warn', interrupted: 'warn', urgent: 'warn', question_timeout: 'warn',
   question: 'ask', ask_owner: 'ask' };
 
@@ -94,7 +94,7 @@ export class Chat {
     else if (e.kind === 'question') text = `${title || who(e.actor)}：${e.text}`;
     else if (e.kind === 'answer') text = `${who(e.actor)}：${e.text}`;
     else if (e.kind === 'feishu_in') text = `${e.data?.sender_id || '未知发送者'}：${e.text}`;
-    else if (e.kind === 'completed') text = `${title || ''}${title ? ' — ' : ''}${e.text}`;
+    else if (['completed', 'review_requested', 'task_failed', 'task_reopened', 'review_returned'].includes(e.kind)) text = `${title || ''}${title ? ' — ' : ''}${e.text}`;
     const row = el('div', { class: 'event ' + (LEVEL[e.kind] || 'info') },
       el('span', { class: 'event-k', text: LINES[e.kind] }), el('span', { class: 'event-t' }, rich(text, { node: e.task ? this.taskNode(e.task) : null })), el('time', { text: clock(e.at) }));
     if (e.task) row.append(el('button', { class: 'link', type: 'button', text: '过程 ›', onclick: () => this.openTask(e.task) }));

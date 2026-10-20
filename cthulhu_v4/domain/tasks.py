@@ -78,7 +78,7 @@ class Tasks:
             if self.hub.busy(a['id']):
                 raise ValueError('上一个回合正在结束，请等待节点确认或租约到期后恢复')
             a.update(paused=False, status='idle', failures=0, idle_at=self.clock())
-            task.update(state='waiting' if task.get('wait') else 'running', recoveries=0)
+            task.update(state='review' if task.get('claim') else 'waiting' if task.get('wait') else 'running', recoveries=0)
             s.put('agent', a); s.put('task', task)
             self.enqueue('master', a['id'], '恢复任务。先核验已有产物、旧进程和外部作业，避免重复执行。', 9)
         elif action in {'pause', 'cancel'}:
@@ -118,19 +118,104 @@ class Tasks:
         return t
 
     def finish_task(self, actor, p):
+        """执行者申请结束任务。任务进入 review，等 Master 审核；审核前不算完成。
+
+        申请单独发给 Master（solo），不与其他汇报合并。再次申请会覆盖上一份申请内容。
+        """
         s = self.store
         t = self.active_task(actor)
         if not str(p.get('evidence', '')).strip():
-            raise ValueError('完成必须附证据')
-        t.update(state='completed', result=p['result'], evidence=p['evidence'], wait={},
-                 completed_at=self.clock())
+            raise ValueError('申请结束必须附证据')
+        claim = {'result': p['result'], 'evidence': p['evidence'], 'at': self.clock(), 'round': t.get('review_round', 0) + 1}
+        t.update(state='review', claim=claim, review_round=claim['round'], wait={})
         s.put('task', t)
         self.close_questions(t['id'])
-        s.emit('completed', p['result'], actor=actor, task=t['id'], data={'evidence': p['evidence']}, visible=True)
+        s.emit('review_requested', p['result'], actor=actor, task=t['id'], data=claim, visible=True)
         stale = self.supersede_progress(actor)
-        note = f"\n（该执行者另有 {stale} 条未读进度消息已被本通知取代，需要细节用 read_task_events。）" if stale else ''
-        self.enqueue(actor, 'master', f"任务 {t['id']} 完成，请核验并告诉主人：{p['result']}\n证据：{p['evidence']}{note}", 5, copy=True)
+        note = f"\n（该执行者另有 {stale} 条未读进度消息已被本申请取代，需要细节用 read_task_events。）" if stale else ''
+        self.enqueue(actor, 'master',
+                     f"任务 {t['id']} 申请结束（第 {claim['round']} 次），请审核。"
+                     f"通过用 close_task(status='success')；未达成可 send_message 让执行者继续，或 close_task(status='fail')。\n"
+                     f"结果：{p['result']}\n证据：{p['evidence']}{note}", 7, copy=True, solo=True, key='close:' + t['id'])
         self.cancel_queued(actor)
+        return t
+
+    def return_review(self, t, by, text):
+        s = self.store
+        paused = s.get('agent', t['agent'])['paused']
+        t.update(state='paused' if paused else 'running', recoveries=0)
+        t.setdefault('returns', []).append({'by': by, 'at': self.clock(), 'round': t.get('review_round'), 'text': text[:500]})
+        t.pop('claim', None)
+        s.put('task', t)
+        # 尚未处理的结束申请已过时：不再让 Master 为它单独审一回合。
+        for m in s.all('message'):
+            if m.get('key') == 'close:' + t['id'] and m['state'] == 'queued':
+                m['state'] = 'superseded'; s.put('message', m)
+        s.emit('review_returned', text, actor=by, target=t['agent'], task=t['id'], visible=True)
+
+    def close_task(self, p, actor='master'):
+        """审核结论：success 只能针对待审核的申请；fail 可以在任何未结束状态下判定。"""
+        s = self.store
+        t = s.get('task', p['task_id'])
+        status, reason = p['status'], str(p.get('reason', '')).strip()
+        if status not in ('success', 'fail'):
+            raise ValueError("status 应为 success 或 fail")
+        if not reason:
+            raise ValueError('必须写明审核理由')
+        if t['state'] in TERMINAL:
+            raise ValueError('任务已结束；需要继续请用 reopen_task')
+        if status == 'success' and t['state'] != 'review':
+            raise ValueError('执行者尚未申请结束，不能判定成功；可 send_message 询问进展')
+        claim = t.get('claim') or {}
+        t.update(state='completed' if status == 'success' else 'failed', wait={}, completed_at=self.clock(),
+                 verdict={'status': status, 'reason': reason, 'by': actor, 'at': self.clock()})
+        if claim:
+            t.update(result=claim['result'], evidence=claim['evidence'])
+        s.put('task', t)
+        a = s.get('agent', t['agent'])
+        self.close_questions(t['id'])
+        self.cancel_queued(a['id'])
+        self.supersede_progress(a['id'])
+        self.stop_turn(a['id'], 'closed')
+        for m in s.all('message'):
+            if m.get('key') == 'close:' + t['id'] and m['state'] == 'queued':
+                m['state'] = 'superseded'; s.put('message', m)
+        if status == 'success':
+            s.emit('completed', claim.get('result') or reason, actor=actor, task=t['id'],
+                   data={'evidence': claim.get('evidence'), 'reason': reason, 'reviewed': True}, visible=True)
+        else:
+            s.emit('task_failed', reason, actor=actor, task=t['id'], data={'claim': claim}, visible=True)
+        return t
+
+    def reopen_task(self, p, actor='master'):
+        """重新打开已结束的任务，由原执行者在原生会话里继续：它记得之前做过什么，比新开任务省去交接。"""
+        s = self.store
+        t = s.get('task', p['task_id'])
+        reason = str(p.get('reason', '')).strip()
+        if t['state'] not in TERMINAL:
+            raise ValueError('任务尚未结束，直接 send_message 给执行者即可')
+        if not reason:
+            raise ValueError('必须写明重新打开的原因与要补做的内容')
+        a = s.get('agent', t['agent'])
+        node = s.find('node', a.get('node') or LOCAL)
+        if not node:
+            raise ValueError(f"任务所在节点 {a.get('node')} 已不存在，请新建任务")
+        if self.hub.busy(a['id']):
+            raise ValueError('原回合仍在结束，请稍后再试')
+        previous = t['state']
+        t.setdefault('history', []).append({'state': previous, 'verdict': t.get('verdict'), 'result': t.get('result'),
+                                            'closed_at': t.get('completed_at'), 'reopened_at': self.clock(), 'reason': reason})
+        t.update(state='running', wait={}, recoveries=0, archived=False)
+        for k in ('claim', 'verdict', 'completed_at'):
+            t.pop(k, None)
+        if p.get('deadline'):
+            t.update(deadline=deadline(p['deadline']), overdue_notified=False)
+        s.put('task', t)
+        a.update(paused=False, status='idle', failures=0, idle_at=self.clock())
+        s.put('agent', a)
+        s.emit('task_reopened', reason, actor=actor, task=t['id'], data={'previous': previous}, visible=True)
+        self.enqueue(actor, a['id'], f'任务重新打开（之前为 {previous}）。原因与要补做的内容：{reason}\n'
+                                     '先核对已有产物和外部状态，避免重复执行；完成后再次 finish_task 申请结束。', 9)
         return t
 
     def wait(self, actor, name, p):
@@ -174,6 +259,8 @@ class Tasks:
                 t['overdue_notified'] = True; s.put('task', t)
                 s.emit('overdue', f"任务超出 DDL：{t['title']}", task=t['id'], visible=True)
                 self.enqueue('system', 'master', f"任务 {t['id']} 超出 DDL，请评估并公开决定。", 8)
+            if t['state'] == 'review':
+                continue  # 等 Master 审核：执行者已停下，不是意外空闲，不发续办；超期提醒照常在上面发出
             wait = t.get('wait', {})
             if wait:
                 if wait.get('until', float('inf')) <= now:

@@ -318,6 +318,10 @@ class DemoRuntime:
         sink.native('demo', {'text': '模拟模式：正在处理输入，不调用模型或执行命令。'})
         await asyncio.sleep(0.15)
         if aid == 'master':
+            if (message.get('key') or '').startswith('close:'):
+                await sink.tool('close_task', {'task_id': message['key'][6:], 'status': 'success',
+                                               'reason': '[模拟] 已核对执行者提交的证据'})
+                return '[模拟 Master] 已审核通过。'
             if message.get('key') == 'review':
                 tasks = (await sink.tool('list_tasks', {}))['tasks']
                 await sink.tool('finish_review', {

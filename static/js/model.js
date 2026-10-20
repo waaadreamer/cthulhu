@@ -129,7 +129,11 @@ export class Model {
       case 'harness_tool':
         if (this.harnessTools) this.put(k, e, { type: 'tool', name: e.text, input: d.arguments, output: d.result, status: 'completed' });
         return;
-      case 'completed': this.put(k, e, { type: 'result', text: e.text, evidence: d.evidence }); return;
+      case 'review_requested': this.put(k, e, { type: 'result', pending: true, text: e.text, evidence: d.evidence, round: d.round }); return;
+      case 'completed': this.put(k, e, { type: 'result', text: e.text, evidence: d.evidence, reason: d.reason }); return;
+      case 'task_failed': this.put(k, e, { type: 'notice', level: 'error', text: '判定未达成：' + e.text }); return;
+      case 'review_returned': this.put(k, e, { type: 'notice', level: 'warn', text: '审核退回：' + e.text }); return;
+      case 'task_reopened': this.put(k, e, { type: 'notice', level: 'info', text: '重新打开：' + e.text }); return;
       case 'reply': if (!this.hasText(e.text)) this.put(k, e, { type: 'text', text: e.text }); return;
       case 'question': this.put(k, e, { type: 'question', text: e.text, recommendation: d.recommendation, blocking: d.blocking }); return;
       case 'answer': this.put(k, e, { type: 'notice', level: 'ok', text: `${e.actor === 'owner' ? '你' : 'Master'}的回答：${e.text}` }); return;

@@ -4,7 +4,8 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TERMINAL = {'completed', 'cancelled'}
+# review（待审核）不是终态：执行者已申请结束，等 Master 审核；failed 是 Master 判定未达成。
+TERMINAL = {'completed', 'failed', 'cancelled'}
 # 中心与节点的协议版本。不一致直接拒绝连接并提示重跑安装命令；
 # 不在旧适配器上“尽量兼容”，避免旧节点用错误的权限策略启动原生会话。
 PROTOCOL = 2

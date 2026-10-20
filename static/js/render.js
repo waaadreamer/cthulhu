@@ -93,7 +93,9 @@ export function render(b, ctx = {}) {
         files.map(f => el('div', { class: 'file' }, el('div', { class: 'file-h' }, f.path?.startsWith('/') && ctx.node ? fileLink(ctx.node, f.path, f.path) : f.path), diff(f.diff))));
     }
     case 'result':
-      return el('section', { class: 'card result' }, el('div', { class: 'card-k', text: '任务结果' }), md(b.text),
+      // 执行者的申请与 Master 的通过是两张卡：申请只是待审核，不能显示成已完成。
+      return el('section', { class: 'card result' + (b.pending ? ' pending' : '') },
+        el('div', { class: 'card-k', text: b.pending ? `申请结束${b.round > 1 ? `（第 ${b.round} 次）` : ''}，待审核` : '审核通过' + (b.reason ? '：' + b.reason : '') }), md(b.text),
         b.evidence ? el('details', { class: 'evidence', open: true }, el('summary', { text: '证据' }), md(b.evidence)) : null);
     case 'question':
       return el('section', { class: 'card question' }, el('div', { class: 'card-k', text: b.blocking ? '提问，等待回答' : '提问' }),

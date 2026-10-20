@@ -99,7 +99,11 @@ class GalaxyTests(unittest.IsolatedAsyncioTestCase):
         for q in self.c.store.all('question'):
             with self.c.store.atomic():
                 self.c.answer('owner', {'question_id': q['id'], 'version': q['version'], 'answer': '继续'})
-        await self.wait(lambda: all(t['state'] == 'completed' for t in self.c.store.all('task')))
+        # 执行者只是申请结束；这里没有运行 Master，由测试代为审核通过。
+        await self.wait(lambda: all(t['state'] == 'review' for t in self.c.store.all('task')))
+        for t in self.c.store.all('task'):
+            self.c.tool('master', 'close_task', {'task_id': t['id'], 'status': 'success', 'reason': '测试审核'})
+        self.assertTrue(all(t['state'] == 'completed' for t in self.c.store.all('task')))
         for aid, session in sessions.items():
             self.assertEqual(self.c.store.get('agent', aid)['session'], session)
         self.assertNotIn('token', self.hub.nodes()[0])
