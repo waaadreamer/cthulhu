@@ -113,6 +113,14 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.locator('#d-controls').getByText('重新打开').click();
     await page.locator('#d-state').getByText('进行中').waitFor();
     await page.locator('#timeline').getByText('重新打开：补一份说明').waitFor();
+    // 监控：打开对话框，看到流量面板（统计卡、24 根小时柱、表格），截图检查布局。
+    await page.locator('#monitor-open').click();
+    await page.locator('#monitor-body .panel .stat').first().waitFor();
+    assert.equal(await page.locator('#monitor-body .traffic-svg .hour').count(), 24);
+    await page.locator('#monitor-body .traffic-svg .hour').last().hover();
+    await page.locator('.traffic-tip:not([hidden])').waitFor();
+    await page.screenshot({ path: path.join(root, 'preview-monitor.png') });
+    await page.locator('#monitor-close').click();
     // 添加节点命令
     await page.locator('#add-node').click(); await page.locator('#invite-form [name=name]').fill('gpu1');
     await page.locator('#invite-form .btn.primary').click(); await page.locator('#invite-cmd').getByText('curl -fsSL', { exact: false }).waitFor();

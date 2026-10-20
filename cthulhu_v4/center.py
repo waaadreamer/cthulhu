@@ -39,6 +39,7 @@ class Center(Messages, Questions, Tasks, Review):
         self.files = FileService(self)
         self.release = None  # 由 App 设置为中心正在运行的代码包；没有时不发起远程更新
         self.deployer = None   # 由 App 挂载：网页一键更新中心
+        self.monitor = None    # 由 App 挂载：监控面板（流量等）
         self.hold_local = False  # 中心准备重启时为 True：不再向中心机节点派发新回合
         s = self.store
         with s.atomic():

@@ -1,6 +1,7 @@
 // 页面主控：轮询状态与事件，左栏任务/节点，中间 Master 会话，右侧抽屉展示某个 old_one 的完整过程。
 import { $, el, api, auth, toast, markdown, stamp, span, fileCtx } from './dom.js';
 import { initViewer, fileFromHash } from './viewer.js';
+import { initMonitor } from './monitor.js';
 import { Model } from './model.js';
 import { View, Live } from './render.js';
 import { Chat } from './chat.js';
@@ -524,6 +525,7 @@ const fromHash = () => {
   if (fileFromHash()) return;
   const id = location.hash.match(/task=([\w-]+)/)?.[1]; if (id) openTask(id);
 };
+initMonitor();
 initViewer({ returnHash: () => (drawer ? '#task=' + drawer.task : '') });
 addEventListener('hashchange', fromHash);
 setPriority(9);

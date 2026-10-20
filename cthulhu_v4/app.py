@@ -83,8 +83,10 @@ class App:
         (self.state / 'center.json').write_text(json.dumps({'port': self.web.port, 'ws_port': self.ws_actual_port}))
         from .deploy import Deployer
         self.deployer = self.center.deployer = Deployer(self, proxy=self.git_proxy)
+        from .monitor import Monitor
+        self.monitor = self.center.monitor = Monitor(self.center)
         self.tasks = [asyncio.create_task(self.node.run()), asyncio.create_task(self.scheduler()),
-                      asyncio.create_task(self.deployer.watch())]
+                      asyncio.create_task(self.deployer.watch()), asyncio.create_task(self.monitor.run())]
         if c.feishu:
             self.tasks.append(asyncio.create_task(c.feishu.run()))
 

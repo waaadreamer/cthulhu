@@ -83,7 +83,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('127.0.0.1', env['NO_PROXY'])                           # 本机 MCP 桥直连
             sink.proxy = None
             env = CodexRuntime(sink, agent).env()
-            self.assertFalse(any(k in env for k in proxy.VARS))                   # 不配代理就不走代理
+            self.assertEqual(env['HTTPS_PROXY'], 'http://leaked:1')               # 未显式配置：保持节点原环境
         self.assertIn('shell_environment_policy.exclude=["*proxy*", "*PROXY*"]', ' '.join(proxy.codex_args('http://p:1')))
         self.assertEqual(proxy.codex_args(None), [])
         g = proxy.git_env('http://127.0.0.1:7897')

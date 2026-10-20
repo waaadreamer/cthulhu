@@ -99,6 +99,8 @@ class Web:
                 return {'events': events, 'more': len(events) >= limit, 'highwater': c.store.highwater()}
             if path == '/api/file':
                 return await c.files.read(q('ref'), refresh=q('refresh') == '1')
+            if path == '/api/monitor':
+                return c.monitor.panels()
             if path == '/api/deploy':
                 c.deployer.available = await asyncio.to_thread(c.deployer.check)
                 return c.deployer.status()

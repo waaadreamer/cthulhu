@@ -5,8 +5,9 @@
 - 中心检查 GitHub 更新时按需走代理。
 - 中心与节点之间的 WebSocket、网页、本机 MCP 桥一律直连。
 
-代理只通过显式参数配置（--model-proxy / --git-proxy），不读取进程继承的 *_PROXY：
-那样任何从外层环境漏进来的代理都会被“自动”用上，又回到全进程走代理的状态。
+显式配置了代理（--model-proxy / --git-proxy / node.json 的 model_proxy）时才隔离：子进程去掉继承的
+*_PROXY，只给模型 CLI 加上指定代理。没有显式配置时保持原环境不变——远端节点可能正依赖自己 shell
+里的代理访问模型服务，静默剥离会让它们连不上。
 """
 import json
 import os
@@ -20,6 +21,13 @@ CODEX_EXCLUDE = ['*proxy*', '*PROXY*']
 def strip(env):
     """去掉继承来的代理变量，返回新字典。"""
     return {k: v for k, v in env.items() if k not in VARS and k.lower() != 'no_proxy'}
+
+
+def model_env(env, url):
+    """模型 CLI 进程的环境。url 为 None：原样继承（不改变未配置节点的既有行为）。"""
+    if not url:
+        return dict(env)
+    return strip(env) | proxy_env(url)
 
 
 def proxy_env(url):

@@ -312,6 +312,46 @@ dialog.viewer:not([open]) { display: none; }
 .pick-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .pick-row .btn { text-decoration: none; }
 
+/* ---------- 监控 ---------- */
+dialog.monitor { width: min(860px, 94vw); max-height: 88vh; padding: 0; display: flex; flex-direction: column; }
+dialog.monitor:not([open]) { display: none; }
+dialog.monitor .viewer-head h2 { flex: 1; margin: 0; }
+.monitor-body { overflow: auto; padding: 16px 20px 22px; display: flex; flex-direction: column; gap: 16px; }
+.panel { background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+.panel-h { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.panel-h h3 { margin: 0; font: 600 15px/1.3 var(--sans); }
+.panel-h .muted { font-size: 12px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.stat { background: var(--s1); border-radius: 10px; padding: 10px 14px; }
+.stat-l { font-size: 12px; color: var(--ink-2); }
+.stat-v { font: 600 22px/1.3 var(--sans); color: var(--ink); margin-top: 2px; }
+.stat.primary .stat-v { font-size: 26px; }
+.stat-s { font-size: 12px; color: var(--ink-3); }
+.chart-h { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 12.5px; color: var(--ink-2); margin-bottom: 4px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; }
+.legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; }
+/* 与 monitor.js 的 OUT / IN 一致；两色在 #1a1d26 上已校验。 */
+.key.out { background: #7783fe; } .key.in { background: #656878; }
+.traffic-chart { position: relative; }
+.traffic-svg { width: 100%; height: auto; display: block; overflow: visible; }
+.traffic-svg .tick { fill: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.traffic-svg .hit { fill: transparent; }
+.traffic-svg .hour { outline: none; }
+.traffic-svg .hour.on .hit, .traffic-svg .hour:focus-visible .hit { fill: color-mix(in srgb, var(--ink) 6%, transparent); }
+.traffic-tip { position: absolute; top: 0; transform: translateX(-50%); background: var(--s2); border: 1px solid var(--line-2); border-radius: 8px;
+  padding: 7px 10px; font-size: 12px; pointer-events: none; box-shadow: var(--shadow); white-space: nowrap; }
+.tip-h { color: var(--ink-2); margin-bottom: 3px; }
+.tip-r { display: flex; align-items: center; gap: 6px; }
+.tip-r .key { width: 10px; height: 2px; border-radius: 1px; }
+.tip-r strong { color: var(--ink); font-weight: 600; min-width: 64px; }
+.traffic-table { margin-top: 10px; font-size: 12.5px; }
+.traffic-table summary { cursor: pointer; color: var(--ink-3); }
+.traffic-table table { width: 100%; border-collapse: collapse; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.traffic-table th, .traffic-table td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--line); }
+.traffic-table th:first-child, .traffic-table td:first-child { text-align: left; }
+.panel .note { font-size: 12px; margin: 8px 0 0; }
+
 /* ---------- 登录与对话框 ---------- */
 #login { position: fixed; inset: 0; display: grid; place-items: center; z-index: 10; background: var(--bg); }
 .login-card { width: min(380px, 90vw); text-align: center; display: flex; flex-direction: column; gap: 12px; }
