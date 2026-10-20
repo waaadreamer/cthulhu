@@ -19,7 +19,7 @@ class Scripted:
     async def run(self, text):
         body = json.loads(text.split('\n', 1)[1])
         # Master 一回合可能收到一批来信；替身以第一条为准，批次本身由专门的测试覆盖。
-        value = (body.get('message') or body['messages'][0])['text']
+        value = (body.get('message') or (body.get('owner_messages') or body['agent_messages'])[0])['text']
         Scripted.seen.append(value)
         if value in Scripted.gates: await Scripted.gates[value].wait()
         if value == 'boom': raise RuntimeError('broken')
@@ -88,7 +88,10 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
                 ids.append(self.c.enqueue('owner', 'master', '主人', 9)['id'])
             await self.h.settle()
         self.assertEqual(len(prompts), 1)
-        self.assertEqual([m['text'] for m in prompts[0]['messages']][:2], ['主人', '来信 0'])  # 优先级在前
+        # 主人的消息单独成组，不与 agent/系统来信混在一起。
+        self.assertEqual([m['text'] for m in prompts[0]['owner_messages']], ['主人'])
+        self.assertEqual([m['text'] for m in prompts[0]['agent_messages']], [f'来信 {i}' for i in range(5)])
+        self.assertIn('owner_messages 是主人的话', prompts[0]['note'])
         self.assertTrue(all(self.c.store.get('message', i)['state'] == 'handled' for i in ids))
 
     async def test_review_covered_while_queued_never_dispatches(self):

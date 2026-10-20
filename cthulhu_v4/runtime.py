@@ -297,7 +297,7 @@ class DemoRuntime:
             self.a['session'] = 'demo-' + aid
             sink.session(self.a['session'])
         payload = json.loads(text.split('\n', 1)[1])
-        message = payload.get('message') or payload['messages'][0]
+        message = payload.get('message') or (payload.get('owner_messages') or payload['agent_messages'])[0]
         task = payload['current_state']['task']
         sink.native('demo', {'text': '模拟模式：正在处理输入，不调用模型或执行命令。'})
         await asyncio.sleep(0.15)
