@@ -221,8 +221,14 @@ class Center(Messages, Questions, Tasks, Review):
             if j['state'] == 'running':
                 pending.setdefault(j['agent'], {'queued': 0})['since'] = j.get('started')
                 pending[j['agent']]['stopping'] = bool(j.get('stop_reason'))
-        return {'agents': s.all('agent'), 'nodes': self.hub.nodes(), 'tasks': s.all('task'),
-                'questions': s.all('question'), 'memories': s.all('memory'), 'pending': pending,
+        # 网页每秒轮询一次：只带界面用到的字段。任务证据、结果、问题历史等正文按需从事件里读取。
+        task_keys = ('id', 'agent', 'title', 'node', 'state', 'deadline', 'created_at', 'completed_at', 'archived', 'review_round')
+        tasks = [{k: t[k] for k in task_keys if k in t} for t in s.all('task')]
+        questions = [{k: v for k, v in q.items() if k != 'history'} for q in s.all('question')]
+        # 节点的 seen/ack 每次同步（每秒）都会变，界面不用；带上它们会让快照每秒都“变化”，etag 失效。
+        nodes = [{k: v for k, v in n.items() if k not in ('seen', 'ack')} for n in self.hub.nodes()]
+        return {'agents': s.all('agent'), 'nodes': nodes, 'tasks': tasks,
+                'questions': questions, 'pending': pending,
                 'prefs': {'master_decides': self.master_decides()},
                 'feishu': self.feishu.status() if self.feishu else None,
                 'release': self.release.public() if self.release else None,

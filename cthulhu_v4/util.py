@@ -37,3 +37,14 @@ def process_identity(pid):
 def process_alive(record):
     return bool(record and record.get('pid_identity')
                 and process_identity(record.get('pid')) == record['pid_identity'])
+
+
+def cut(value, budget, items=50):
+    """递归截断长字符串与长列表，保留结构并注明原长度，便于读者知道“这里本来有什么”。"""
+    if isinstance(value, str):
+        return value if len(value) <= budget else value[:budget] + f'…[截断，共 {len(value)} 字符]'
+    if isinstance(value, list):
+        return [cut(v, budget, items) for v in value[:items]] + ([f'…[另有 {len(value) - items} 项]'] if len(value) > items else [])
+    if isinstance(value, dict):
+        return {k: cut(v, budget, items) for k, v in value.items()}
+    return value

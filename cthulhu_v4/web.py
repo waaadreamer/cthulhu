@@ -4,12 +4,16 @@
 拒绝未声明的跨站 Origin，避免本地服务被任意网页调用。单用户，不做多租户鉴权。
 """
 import asyncio
+import gzip
+import hashlib
 import json
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from .util import ROOT
+from .util import ROOT, cut
+
+UI_TEXT, UI_FIELD = 20000, 8000
 
 STATIC = ROOT / 'static'
 MIME = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
@@ -61,8 +65,15 @@ class Web:
 
             def respond(self, status, value, content_type='application/json; charset=utf-8'):
                 raw = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
+                # 自己压缩文本响应：反向代理默认只压缩 HTML，JSON 原样外发，而出站流量计费。
+                gz = len(raw) > 1024 and 'gzip' in self.headers.get('Accept-Encoding', '') and content_type.startswith(('application/json', 'text/'))
+                if gz:
+                    raw = gzip.compress(raw, 6)
                 self.send_response(status)
                 self.send_header('Content-Type', content_type)
+                if gz:
+                    self.send_header('Content-Encoding', 'gzip')
+                self.send_header('Vary', 'Accept-Encoding')
                 self.send_header('Content-Length', str(len(raw)))
                 self.send_header('Cache-Control', 'no-store')
                 self.send_header('X-Content-Type-Options', 'nosniff')
@@ -87,15 +98,23 @@ class Web:
         q = lambda k, d=None: query.get(k, [d])[0]
         if method == 'GET':
             if path == '/api/state':
-                return c.snapshot()
+                # 状态没变就不重发：客户端带上次的 etag，只回 now（倒计时用）。now 不参与 etag。
+                snap = c.snapshot()
+                now = snap.pop('now')
+                etag = hashlib.sha1(json.dumps(snap, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+                if q('etag') == etag:
+                    return {'unchanged': True, 'etag': etag, 'now': now}
+                return snap | {'etag': etag, 'now': now}
             if path == '/api/events':
                 # 两种读法：before 向前翻历史（不含流式增量）；after 跟随最新（含增量以便流式显示）。
                 # highwater 与查询在同一线程读取：客户端以它作为跟随游标，被过滤掉的事件不会重复拉取。
                 limit = int(q('limit', 200))
                 before = q('before')
                 events = c.store.events(after=int(q('after', 0)), limit=limit, agent=q('agent'),
-                                        conversation=q('view') == 'conversation', ui=True,
+                                        conversation=q('view') == 'conversation', ui=True, harness=q('harness') == '1',
                                         before=None if before is None else int(before), compact=before is not None)
+                # 单个字段过长时截断（注明原长度）：一条大工具输出不能让一页事件变成几 MB。完整内容仍在库里。
+                events = [e | {'text': cut(e['text'], UI_TEXT), 'data': cut(e['data'], UI_FIELD, 200)} for e in events]
                 return {'events': events, 'more': len(events) >= limit, 'highwater': c.store.highwater()}
             if path == '/api/file':
                 return await c.files.read(q('ref'), refresh=q('refresh') == '1')

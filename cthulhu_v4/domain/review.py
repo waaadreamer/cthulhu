@@ -1,5 +1,5 @@
 """十分钟增量审核：只有新信息才唤醒 Master，审核自身输出不构成下一轮的理由。"""
-from ..util import TERMINAL
+from ..util import TERMINAL, cut
 
 
 class Review:
@@ -66,17 +66,6 @@ class Review:
 FIELD = 1500
 
 
-def cut(value, budget=FIELD):
-    """递归截断字符串，保留结构，便于模型读懂“这里本来有什么”。"""
-    if isinstance(value, str):
-        return value if len(value) <= budget else value[:budget] + f'…[截断，共 {len(value)} 字符]'
-    if isinstance(value, list):
-        return [cut(v, budget) for v in value[:50]] + ([f'…[另有 {len(value) - 50} 项]'] if len(value) > 50 else [])
-    if isinstance(value, dict):
-        return {k: cut(v, budget) for k, v in value.items()}
-    return value
-
-
 def slim(e):
     data = e['data']
     if e['kind'] == 'message':
@@ -84,4 +73,4 @@ def slim(e):
     elif e['kind'] == 'harness_tool':
         data = {'arguments': data.get('arguments'), 'result': data.get('result')}
     return {'seq': e['seq'], 'at': e['at'], 'actor': e['actor'], 'target': e['target'], 'kind': e['kind'],
-            'text': cut(e['text'], 4000), 'data': cut(data)}
+            'text': cut(e['text'], 4000), 'data': cut(data, FIELD)}

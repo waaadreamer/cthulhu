@@ -67,13 +67,15 @@ class Store:
         return cur.lastrowid
 
     def events(self, after=0, limit=200, task=None, agent=None, visible=False, conversation=False,
-               before=None, ui=False, compact=False):
+               before=None, ui=False, compact=False, harness=True):
         """按 seq 读取事件。
 
         before：向前翻页（返回 seq < before 的最新 limit 条，仍按升序）；before<=0 表示从最新开始。
         ui：只返回界面会展示的事件。遥测（token 用量、限速、握手、hook 生命周期）和包装后的路由输入
             体积大却从不展示，不必传给浏览器。工具 read_task_events 不用这个过滤，保持原始全集。
         compact：去掉流式增量。历史回合的完整文字/输出都在 item/completed 与 assistant 事件里。
+        harness=False：去掉 harness_tool（工具调用的中心侧记录）。真实后端的工具调用已在原生事件里展示，
+            网页只在 demo 后端需要它；结果正文往往很大。
         """
         clauses, args = [], []
         if before is None:
@@ -92,6 +94,8 @@ class Store:
         if ui:
             clauses.append(f"(kind NOT LIKE 'native:%' OR kind IN ({','.join('?' * len(UI_NATIVE))}))"); args.extend(UI_NATIVE)
             clauses.append("NOT (kind IN ('native:item/started','native:item/completed') AND json_extract(data,'$.item.type')='userMessage')")
+        if not harness:
+            clauses.append("kind != 'harness_tool'")
         if compact:
             clauses.append(f"kind NOT IN ({','.join('?' * len(DELTAS))})"); args.extend(DELTAS)
         args.append(max(1, min(int(limit), 500)))

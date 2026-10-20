@@ -29,13 +29,15 @@ async function poll() {
   if (polling || !auth.token) return;
   polling = true;
   try {
-    snap = await api('api/state');
+    // 状态没变时服务端只回 now：保留上次的快照，只更新倒计时用的时间。
+    const r = await api('api/state' + (snap?.etag ? '?etag=' + snap.etag : ''));
+    snap = r.unchanged ? { ...snap, now: r.now } : r;
     fileCtx.nodes = snap.nodes.map(n => n.id);
     chat.demo = snap.agents.find(a => a.id === 'master')?.backend === 'demo';
     renderSide(); renderQuestions(); renderMaster();
     const stick = nearBottom($('#chat'));
     if (!chatPager.started) { await chatPager.start(); chatCursor = Math.max(chatCursor, chatPager.highwater); }
-    chatCursor = await follow('view=conversation', chatCursor, e => chat.apply(e));
+    chatCursor = await follow('view=conversation' + (chat.demo ? '&harness=1' : ''), chatCursor, e => chat.apply(e));
     chat.flush();
     // 刚发送、中心还没登记时也立即给出反馈，避免“发了没反应”。
     const info = liveInfo('master', chat.running()) || (sentAt && Date.now() - sentAt < 5000 ? { phase: 'wait', text: '已发送' } : null);
@@ -53,6 +55,9 @@ async function poll() {
 }
 const nearBottom = n => n.scrollHeight - n.scrollTop - n.clientHeight < 120;
 const scrollEnd = n => (n.scrollTop = n.scrollHeight);
+
+// demo 后端没有原生工具事件，界面用中心的 harness_tool 记录代替；真实后端不必下载这些（结果正文往往很大）。
+const DEMO_HARNESS = () => snap?.agents.find(a => a.id === 'master')?.backend === 'demo';
 
 // ---- 分页 ----
 // 历史按页向前加载，只在滚到顶部时取更早的一页；之后只跟随增量，不把整段历史传给浏览器。
@@ -78,7 +83,9 @@ class Pager {
     this.io.observe(this.sentinel);
   }
   async page() {
-    const r = await api(`api/events?${this.query}&before=${this.before}&limit=${PAGE}`);
+    // query 可以是函数：主会话的分页器在页面加载时创建，那时还不知道后端是不是 demo。
+    const q = typeof this.query === 'function' ? this.query() : this.query;
+    const r = await api(`api/events?${q}&before=${this.before}&limit=${PAGE}`);
     let events = r.events;
     if (r.more) {
       const i = events.findIndex(e => e.kind === 'dispatch' && e.target === this.agent);
@@ -111,7 +118,7 @@ class Pager {
 }
 
 // 主会话分页：更早的页面用一个临时 Chat 渲染，再整体插到最前面。
-const chatPager = new Pager($('#chat'), 'view=conversation', 'master', (events, older) => {
+const chatPager = new Pager($('#chat'), () => 'view=conversation' + (DEMO_HARNESS() ? '&harness=1' : ''), 'master', (events, older) => {
   if (!older) { for (const e of events) chat.apply(e); chat.flush(); return; }
   const tmp = el('div'), part = new Chat(tmp, chat.opts); part.demo = chat.demo;
   for (const e of events) part.apply(e); part.flush();
@@ -260,7 +267,8 @@ class Drawer {
     this.ctx = { node: t.node };
     this.view = new View($('#timeline'), this.model, this.ctx);
     this.live = new Live($('#timeline'));
-    this.pager = new Pager($('#timeline'), 'agent=' + encodeURIComponent(this.agent), this.agent, (events, older) => {
+    this.query = 'agent=' + encodeURIComponent(this.agent) + (this.harness ? '&harness=1' : '');
+    this.pager = new Pager($('#timeline'), this.query, this.agent, (events, older) => {
       if (!older) { for (const e of events) this.model.apply(e); this.view.update(); return; }
       const tmp = el('div'), m = new Model(this.agent, 'drawer', { harnessTools: this.harness }), v = new View(tmp, m, this.ctx);
       for (const e of events) m.apply(e); v.update();
@@ -307,7 +315,7 @@ class Drawer {
     const tl = $('#timeline'), first = !this.pager.started, stick = first || nearBottom(tl);
     if (first) { await this.pager.start(); this.cursor = this.pager.highwater; }
     if (drawer !== this) return;
-    this.cursor = await follow('agent=' + encodeURIComponent(this.agent), this.cursor, e => this.model.apply(e));
+    this.cursor = await follow(this.query, this.cursor, e => this.model.apply(e));
     if (drawer !== this) return;
     this.view.update();
     tl.querySelector(':scope > p.muted')?.remove();
