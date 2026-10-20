@@ -9,6 +9,8 @@ for line in sys.stdin:
     if backend == 'codex':
         method = f.get('method')
         if method == 'initialize': send({'id': f['id'], 'result': {}})
+        elif method == 'thread/resume' and f['params'].get('threadId') == 'hang':
+            pass  # 模拟恢复超慢：不回执
         elif method in {'thread/start', 'thread/resume'}:
             assert f['params']['sandbox'] == 'danger-full-access'
             assert f['params']['approvalPolicy'] == 'never'

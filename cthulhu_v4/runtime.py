@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import sys
+import time
 import uuid
 
 from .util import ROOT, process_identity
@@ -140,16 +141,28 @@ class CodexRuntime(ProcessRuntime):
         self.pending, self.serial, self.final = {}, 0, []
         self.session = agent['session']
 
+    # 恢复长会话时 Codex 要读完整段历史：Master 的会话文件到 50MB 时 thread/resume 实测要 30–57 秒，
+    # 统一 60 秒上限会让 Master 在恢复阶段超时失败。其他请求仍然很快，保持较短的上限。
+    TIMEOUTS = {'thread/resume': 300, 'thread/start': 120}
+    DEFAULT_TIMEOUT = 60
+
     async def request(self, method, params):
         self.serial += 1
         ident = self.serial
         fut = asyncio.get_running_loop().create_future()
         self.pending[ident] = fut
+        limit = self.TIMEOUTS.get(method, self.DEFAULT_TIMEOUT)
+        started = time.monotonic()
         try:
             await self.write({'id': ident, 'method': method, 'params': params})
-            return await asyncio.wait_for(fut, 60)
+            return await asyncio.wait_for(fut, limit)
+        except asyncio.TimeoutError:
+            # TimeoutError 的 str() 是空字符串，原样上报时界面只显示一条空白的“运行失败”。
+            raise RuntimeError(f'Codex {method} 超过 {limit} 秒未响应（会话越长恢复越慢）') from None
         finally:
             self.pending.pop(ident, None)
+            if method == 'thread/resume':
+                self.sink.native('resume_timing', {'seconds': round(time.monotonic() - started, 1)})
 
     async def start(self):
         cfg = self.mcp()

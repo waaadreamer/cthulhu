@@ -55,6 +55,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_claude_protocol_and_resume(self): await self.check_backend('claude')
     async def test_codex_explicit_model_and_effort_survive_resume(self): await self.check_backend('codex', configured=True)
 
+    async def test_resume_timeout_reports_which_step_timed_out(self):
+        from cthulhu_v4.runtime import CodexRuntime
+        sink = FakeSink()
+        agent = {'id': 'master', 'backend': 'codex', 'cwd': str(Path.cwd()), 'session': 'hang', 'model': None, 'reasoning_effort': None}
+        original = asyncio.create_subprocess_exec
+        async def spawn(*argv, **kwargs):
+            return await original(sys.executable, str(Path(__file__).with_name('fake_native.py')), 'codex', **kwargs)
+        with patch('asyncio.create_subprocess_exec', spawn), patch.dict(CodexRuntime.TIMEOUTS, {'thread/resume': 0.5}):
+            rt = CodexRuntime(sink, agent)
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'thread/resume 超过 0.5 秒未响应'):
+                    await rt.run('x')
+            finally:
+                await rt.close()
+        self.assertIn('resume_timing', sink.events)
+        self.assertGreaterEqual(CodexRuntime.TIMEOUTS['thread/resume'], 300)
+
     async def test_lines_reader_handles_lines_over_asyncio_limit(self):
         from cthulhu_v4.runtime import lines, bounded
         reader = asyncio.StreamReader()

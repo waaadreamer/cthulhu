@@ -175,7 +175,8 @@ class Node:
         except asyncio.CancelledError:
             outcome, error = 'stopped', '中心要求停止、租约到期或节点关闭；须核验已有副作用'
         except Exception as e:
-            error = str(e)
+            # 有些异常没有文字（如超时），至少带上类型名，界面不能出现空白的失败原因。
+            error = str(e) or type(e).__name__
         finally:
             # 每轮结束关闭进程，下一轮用原生 session ID 恢复；MCP token 随回合失效。
             if runtime:
