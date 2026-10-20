@@ -213,7 +213,7 @@ class Feishu:
         with s.atomic():
             if s.find('feishu_in', mid):
                 return None
-            rec = {'id': mid, 'state': 'checking', 'sender_id': str(e.get('sender_id') or ''),
+            rec = {'id': mid, 'state': 'checking', 'sender_id': str(e.get('sender_id') or ''), 'bot': e.get('sender_type') == 'bot',
                    'chat_id': str(e.get('chat_id') or ''), 'chat_type': str(e.get('chat_type') or ''),
                    'thread_id': str(e.get('thread_id') or ''), 'at': self.c.clock()}
             s.put('feishu_in', rec)
@@ -279,8 +279,14 @@ class Feishu:
                     f"此人的白名单：{json.dumps(rules, ensure_ascii=False)}\n轻量鉴权：通过（{reason}）\n"
                     '请逐项核验：白名单内有的就办、就答；没有的逐项回复不在他的权限内，不要因此拒绝整条；不能修改白名单。')
         mention = at(rec['sender_id'], rec['name'])
+        if rec.get('bot'):
+            # 两个 agent 互相 @ 会无限对话下去：只有需要对方继续回应时才 @ 它。
+            how = ('发送者是 agent（机器人）。只有需要它继续回应或处理时才在开头 @ 它；'
+                   '确认、收尾、单向告知不要 @，否则双方会互相 @ 无限对话。需要 @ 时这样写：')
+        else:
+            how = '回复开头先 @ 对方，例如：'
         body = (f"{head}\n消息 ID {rec['id']}；会话 {rec['chat_id']}\n---\n{text}\n---\n"
-                '程序不会替你回复飞书，你的最终回复只出现在网页。需要回复时调用 feishu 工具，回复开头先 @ 对方，例如 '
+                '程序不会替你回复飞书，你的最终回复只出现在网页。需要回复时调用 feishu 工具。' + how
                 + json.dumps({'argv': ['im', '+messages-reply', '--as', 'bot', '--message-id', rec['id'],
                                        '--markdown', mention + ' <回复>']}, ensure_ascii=False))
         with s.atomic():
@@ -294,8 +300,9 @@ class Feishu:
         return m
 
     async def reply(self, rec, message, kind):
-        # 程序层回复同样先 @ 对方：群里尤其是别人的 agent，不被 @ 就不知道有人回复了它。原因与网页上展示的一致。
-        text = f"{at(rec['sender_id'], rec.get('name'))} {message}"
+        # 程序层回复是终点，不需要对方再回：真人照常 @，agent 不 @，避免两个 agent 互相 @ 无限对话。
+        # 原因与网页上展示的一致。
+        text = message if rec.get('bot') else f"{at(rec['sender_id'], rec.get('name'))} {message}"
         argv = ['im', '+messages-reply', '--as', 'bot', '--message-id', rec['id'], '--text', text,
                 '--idempotency-key', (kind + '-' + rec['id'])[:50]]
         code, out, err = await self.run_cli(argv, timeout=30)
