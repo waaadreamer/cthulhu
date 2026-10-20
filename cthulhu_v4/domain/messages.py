@@ -1,5 +1,8 @@
 """消息队列：先落盘再执行；优先级只排序，10 是显式打断。"""
 
+BATCH_COUNT = 30
+BATCH_CHARS = 60000
+
 
 class Messages:
     def enqueue(self, sender, target, text, priority=5, *, reply_to=None, key=None, copy=False):
@@ -52,6 +55,41 @@ class Messages:
                 continue
             return m
         return None
+
+    def next_batch(self, aid):
+        """Master 一个回合处理队列里的全部普通来信（按优先级与时间排序），而不是一条一个回合。
+
+        执行者汇报很密时，一条一回合会让队列越积越长：每个 Master 回合都要读完整上下文，
+        处理速度追不上来信速度，任务结束后还在逐条回应过时的进度。合并后 Master 一次看全，
+        也能直接忽略已被后续消息覆盖的内容。审核请求单独成回合（它有自己的读取流程）。
+        执行者仍是一条一回合：它只有一个任务，来信很少，逐条处理更利于核对 reply_to。
+        """
+        first = self.next_message(aid)
+        if not first or aid != 'master' or first.get('key') == 'review':
+            return [first] if first else []
+        batch, size = [first], len(first['text'])
+        for m in sorted((m for m in self.store.all('message') if m['target'] == aid and m['state'] == 'queued'
+                         and m['id'] != first['id'] and m.get('key') != 'review'),
+                        key=lambda m: (-m['priority'], m['at'])):
+            # 单回合输入有上限：剩下的留到下一回合，不截断任何一条来信。
+            if len(batch) >= BATCH_COUNT or size + len(m['text']) > BATCH_CHARS:
+                break
+            batch.append(m); size += len(m['text'])
+        return batch
+
+    def set_messages(self, ids, state):
+        for mid in ids:
+            self.set_message(mid, state)
+
+    def supersede_progress(self, aid):
+        """任务结束时，执行者此前发给 Master 而尚未读到的普通进度消息不再需要逐条处理：
+        完成通知（或取消记录）与 read_task_events 已覆盖它们。标记为 superseded 而不是删除，可回查。
+        提问、完成等程序生成的消息（copy=True）不受影响。"""
+        n = 0
+        for m in self.store.all('message'):
+            if m['sender'] == aid and m['target'] == 'master' and m['state'] == 'queued' and not m.get('copy'):
+                m['state'] = 'superseded'; self.store.put('message', m); n += 1
+        return n
 
     def has_queued(self, aid):
         return any(m['target'] == aid and m['state'] == 'queued' for m in self.store.all('message'))

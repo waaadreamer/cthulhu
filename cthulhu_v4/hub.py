@@ -93,7 +93,7 @@ class Hub:
         """结果未知：暂停任务、报备 Master。已执行的外部操作可能存在，不能自动重放。"""
         s = self.c.store
         j['state'] = 'unknown'; s.put('lease', j)
-        self.c.set_message(j['message'], 'unknown')
+        self.c.set_messages(j.get('messages') or [j['message']], 'unknown')
         a = s.get('agent', j['agent']); a.update(paused=True, status='paused'); s.put('agent', a)
         t = self.c.task_for(a['id'])
         if t and t['state'] not in TERMINAL:
@@ -118,13 +118,13 @@ class Hub:
             return  # 迟到结果只作为 remote_result 留档，绝不据此重新激活任务。
         if outcome == 'stopped' and j.get('stop_reason'):
             j['state'] = 'interrupted'; s.put('lease', j)
-            c.set_message(j['message'], 'unknown')
+            c.set_messages(j.get('messages') or [j['message']], 'unknown')
             a = s.get('agent', aid); a.update(status='paused' if a['paused'] else 'idle', idle_at=c.clock()); s.put('agent', a)
             s.emit('interrupted', '节点已确认停止旧回合；已有文件与外部作业不会自动回滚。',
                    target=aid, task=c.task_id(aid), visible=True)
         elif outcome == 'completed':
             j['state'] = 'done'; s.put('lease', j)
-            c.set_message(j['message'], 'handled')
+            c.set_messages(j.get('messages') or [j['message']], 'handled')
             a = s.get('agent', aid)
             a.update(status='paused' if a['paused'] else 'idle', idle_at=c.clock(), failures=0); s.put('agent', a)
             if data.get('result'):
@@ -132,7 +132,7 @@ class Hub:
                        task=c.task_id(aid), visible=aid == 'master')
         elif outcome == 'failed':
             j['state'] = 'failed'; s.put('lease', j)
-            c.set_message(j['message'], 'failed')
+            c.set_messages(j.get('messages') or [j['message']], 'failed')
             a = s.get('agent', aid); a['failures'] = a.get('failures', 0) + 1
             a.update(status='idle', idle_at=c.clock())
             s.emit('runtime_error', data.get('error', ''), target=aid, task=c.task_id(aid), visible=True)
@@ -202,18 +202,19 @@ class Hub:
                     continue
                 if a['backend'] not in n['backends']:
                     continue
-                m = c.next_message(a['id'])
-                if not m:
+                batch = c.next_batch(a['id'])
+                if not batch:
                     continue
+                m = batch[0]
                 t = c.task_for(a['id'])
-                j = {'id': c.uid('turn'), 'node': node, 'agent': a['id'], 'message': m['id'],
+                j = {'id': c.uid('turn'), 'node': node, 'agent': a['id'], 'message': m['id'], 'messages': [x['id'] for x in batch],
                      'state': 'running', 'until': c.clock() + LEASE, 'started': c.clock(), 'agent_spec': a | c.agent_env(a['id']),
-                     'task': t, 'prompt': c.prompt(a['id'], m)}
+                     'task': t, 'prompt': c.prompt(a['id'], batch)}
                 s.put('lease', j)
-                m['state'] = 'running'; s.put('message', m)
+                c.set_messages(j['messages'], 'running')
                 a['status'] = 'running'; s.put('agent', a)
                 s.emit('dispatch', '已派发至节点 ' + node, target=a['id'], task=t and t['id'],
-                       data={'job': j['id'], 'node': node, 'message_id': m['id']})
+                       data={'job': j['id'], 'node': node, 'message_id': m['id'], 'message_ids': j['messages']})
                 jobs.append(j); free -= 1
             # 文件读取请求不是业务状态，不进事务、不落盘；随同步响应捎给节点即可。
             reply = {'ack': n['ack'], 'lease_seconds': LEASE, 'jobs': jobs, 'files': c.files.requests_for(node)}

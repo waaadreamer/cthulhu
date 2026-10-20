@@ -17,7 +17,9 @@ class Scripted:
     def __init__(self, sink, agent): self.sink = sink
 
     async def run(self, text):
-        value = json.loads(text.split('\n', 1)[1])['message']['text']
+        body = json.loads(text.split('\n', 1)[1])
+        # Master 一回合可能收到一批来信；替身以第一条为准，批次本身由专门的测试覆盖。
+        value = (body.get('message') or body['messages'][0])['text']
         Scripted.seen.append(value)
         if value in Scripted.gates: await Scripted.gates[value].wait()
         if value == 'boom': raise RuntimeError('broken')
@@ -51,18 +53,22 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(e['kind'] == 'harness_tool' and e['text'] == 'finish_task' for e in self.c.store.events(limit=500)))
 
     async def test_one_active_turn_per_agent_and_priority_order(self):
+        # 执行者仍是一条一回合：同一时间只有一个活动回合，按优先级取消息。
         Scripted.gates['high'] = asyncio.Event()
         with self.scripted():
+            t = self.c.tool('master', 'create_task', task_args(self.path))
             with self.c.store.atomic():
-                self.c.enqueue('system', 'master', 'low', 1)
-                self.c.enqueue('owner', 'master', 'high', 9)
+                for m in self.c.store.all('message'):
+                    if m['target'] == t['agent']: m['state'] = 'handled'; self.c.store.put('message', m)
+                self.c.enqueue('master', t['agent'], 'low', 1)
+                self.c.enqueue('master', t['agent'], 'high', 9)
             await self.h.sync(3)
             self.assertEqual(Scripted.seen, ['high'])
-            self.assertEqual(len(self.h.node.active), 1)
+            self.assertEqual(sum(j['agent'] == t['agent'] and j['state'] == 'running' for j in self.c.store.all('lease')), 1)
             Scripted.gates['high'].set()
-            await self.h.settle()
-        self.assertEqual(Scripted.seen, ['high', 'low'])
-        self.assertTrue(any(e['kind'] == 'chat' and e['text'] == 'done:high' for e in self.c.store.events()))
+            await self.h.settle(lambda: 'low' in Scripted.seen and not self.c.hub.busy(t['agent']))
+        self.assertEqual([v for v in Scripted.seen if v in ('high', 'low')], ['high', 'low'])
+        self.assertTrue(any(e['kind'] == 'reply' and e['text'] == 'done:high' for e in self.c.store.events(limit=500)))
 
     async def test_runtime_failure_marks_failed_and_pauses_master(self):
         with self.scripted():
@@ -70,6 +76,20 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             await self.h.settle()
         self.assertEqual(self.c.store.get('message', m['id'])['state'], 'failed')
         self.assertTrue(self.c.store.get('agent', 'master')['paused'])
+
+    async def test_master_gets_queued_messages_in_one_turn(self):
+        prompts = []
+        class Capture(Scripted):
+            async def run(inner, text):
+                prompts.append(json.loads(text.split('\n', 1)[1])); return 'ok'
+        with patch.object(node_module, 'make_runtime', lambda sink, a: Capture(sink, a)):
+            with self.c.store.atomic():
+                ids = [self.c.enqueue('system', 'master', f'来信 {i}', 5)['id'] for i in range(5)]
+                ids.append(self.c.enqueue('owner', 'master', '主人', 9)['id'])
+            await self.h.settle()
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual([m['text'] for m in prompts[0]['messages']][:2], ['主人', '来信 0'])  # 优先级在前
+        self.assertTrue(all(self.c.store.get('message', i)['state'] == 'handled' for i in ids))
 
     async def test_review_covered_while_queued_never_dispatches(self):
         with self.scripted():

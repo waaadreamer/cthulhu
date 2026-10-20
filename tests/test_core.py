@@ -139,6 +139,19 @@ class CoreTests(unittest.TestCase):
         left = [m for m in self.c.store.all('message') if m['target'] == 'master' and m['state'] == 'queued' and '运行失败' in m['text']]
         self.assertEqual(len(left), 1)
 
+    def test_finished_task_supersedes_unread_progress_to_master(self):
+        t = self.create(); self.clear_messages()
+        for i in range(4):
+            self.c.tool(t['agent'], 'send_message', {'to': 'master', 'text': f'进度 {i}'})
+        q = self.question(t)
+        with self.c.store.atomic(): self.c.answer('owner', dict(question_id=q['id'], version=1, answer='继续'))
+        self.c.tool(t['agent'], 'finish_task', {'result': '完成', 'evidence': '证据'})
+        queued = [m for m in self.c.store.all('message') if m['target'] == 'master' and m['state'] == 'queued']
+        self.assertFalse(any(m['text'].startswith('进度') for m in queued))
+        self.assertEqual(sum(m['state'] == 'superseded' for m in self.c.store.all('message')), 4)
+        done = next(m for m in queued if '完成，请核验' in m['text'])
+        self.assertIn('4 条未读进度消息已被本通知取代', done['text'])
+
     def test_owner_late_correction_is_preserved(self):
         t = self.create(); q = self.question(t)
         self.c.tool('master', 'answer_question', dict(question_id=q['id'], version=1, answer='A'))

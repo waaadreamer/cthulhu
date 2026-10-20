@@ -89,6 +89,8 @@ class Tasks:
                 self.close_questions(task['id'])
             s.put('agent', a); s.put('task', task)
             self.cancel_queued(a['id'])
+            if action == 'cancel':
+                self.supersede_progress(a['id'])
             # 控制信号独立于消息优先级；停止当前进程，但保留原生 session 以便恢复。
             self.stop_turn(a['id'], action)
         else:
@@ -125,7 +127,9 @@ class Tasks:
         s.put('task', t)
         self.close_questions(t['id'])
         s.emit('completed', p['result'], actor=actor, task=t['id'], data={'evidence': p['evidence']}, visible=True)
-        self.enqueue(actor, 'master', f"任务 {t['id']} 完成，请核验并告诉主人：{p['result']}\n证据：{p['evidence']}", 5, copy=True)
+        stale = self.supersede_progress(actor)
+        note = f"\n（该执行者另有 {stale} 条未读进度消息已被本通知取代，需要细节用 read_task_events。）" if stale else ''
+        self.enqueue(actor, 'master', f"任务 {t['id']} 完成，请核验并告诉主人：{p['result']}\n证据：{p['evidence']}{note}", 5, copy=True)
         self.cancel_queued(actor)
         return t
 
