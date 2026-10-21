@@ -72,8 +72,8 @@ class Center(Messages, Questions, Tasks, Review):
                     a.pop(k, None)
                 a.setdefault('node', LOCAL); a['node'] = a['node'] or LOCAL
                 s.put('agent', a)
-        leased = {mid for j in s.all('lease') if j['state'] == 'running' for mid in j.get('messages') or [j['message']]}
-        for m in s.all('message'):
+        leased = {mid for j in s.where('lease', 'running') if j['state'] == 'running' for mid in j.get('messages') or [j['message']]}
+        for m in s.where('message', 'running'):
             if m['state'] == 'running' and m['id'] not in leased:
                 # 没有租约票据的 inflight 消息来自首版本机执行路径：结果未知，不能直接重放。
                 m['state'] = 'unknown'; s.put('message', m)
@@ -82,7 +82,7 @@ class Center(Messages, Questions, Tasks, Review):
                 s.emit('recovery', '服务重启：上次回合结果未知，续办前须核验已有操作。',
                        target=a['id'], task=self.task_id(a['id']), visible=True)
                 self.enqueue('system', a['id'], '上次服务退出，回合结果未知。用 read_messages 核对未完成输入，先检查原会话、文件和外部作业，再接续未完成工作。', 8)
-        for j in s.all('lease'):
+        for j in s.where('lease', 'running'):
             if j['state'] == 'running':
                 # 中心停机期间节点无法续租；给节点一个租约周期来报告真实结局，
                 # 而不是一启动就把所有回合判成 unknown 并暂停。
@@ -94,7 +94,7 @@ class Center(Messages, Questions, Tasks, Review):
                 self.supersede_progress(t['agent'])
         # 清理旧版本留下的重复失败通知：同一执行者只保留最新一条，其余标记 cancelled（不删除，可回查）。
         latest = {}
-        for m in s.all('message'):
+        for m in s.where('message', 'queued'):
             if m['state'] == 'queued' and m['target'] == 'master' and m['sender'] == 'system' and ' 运行失败' in m['text']:
                 aid = m['text'].split(' ', 1)[0]
                 if aid in latest:
@@ -207,10 +207,10 @@ class Center(Messages, Questions, Tasks, Review):
         s = self.store
         # pending 让界面在模型产生第一条输出之前就能显示“排队/启动中”，而不是一片空白。
         pending = {}
-        for m in s.all('message'):
+        for m in s.where('message', 'queued'):
             if m['state'] == 'queued':
                 pending.setdefault(m['target'], {'queued': 0, 'since': None})['queued'] += 1
-        for j in s.all('lease'):
+        for j in s.where('lease', 'running'):
             if j['state'] == 'running':
                 pending.setdefault(j['agent'], {'queued': 0})['since'] = j.get('started')
                 pending[j['agent']]['stopping'] = bool(j.get('stop_reason'))
@@ -326,7 +326,7 @@ class Center(Messages, Questions, Tasks, Review):
         s = self.store
         key = 'failure:' + aid
         text = lambda n: f"{aid} 运行失败（{n} 次未读）：{error}。原 session 保留，心跳将有限重试。"
-        m = next((m for m in s.all('message') if m.get('key') == key and m['state'] == 'queued'), None)
+        m = next((m for m in s.where('message', 'queued') if m.get('key') == key), None)
         if m:
             m['count'] = m.get('count', 1) + 1
             m.update(text=text(m['count']), at_last=self.clock())

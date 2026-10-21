@@ -32,6 +32,9 @@ class Store:
                 actor TEXT NOT NULL, target TEXT, task TEXT, kind TEXT NOT NULL,
                 text TEXT NOT NULL, data TEXT NOT NULL, visible INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS events_task ON events(task, seq);
+            -- 租约与消息只增不删，热路径只关心少数 running/queued 行；按状态建表达式索引，
+            -- 否则每次节点同步、网页轮询都要反序列化全部历史，事件循环被拖住、节点租约过期。
+            CREATE INDEX IF NOT EXISTS objects_state ON objects(kind, json_extract(data, '$.state'));
         ''')
 
     @contextmanager
@@ -59,6 +62,13 @@ class Store:
 
     def all(self, kind):
         return [json.loads(r[0]) for r in self.db.execute('SELECT data FROM objects WHERE kind=? ORDER BY rowid', (kind,))]
+
+    def where(self, kind, *states):
+        """按 state 取对象（走 objects_state 索引）；表达式须与索引定义完全一致才会命中。"""
+        marks = ','.join('?' * len(states))
+        return [json.loads(r[0]) for r in self.db.execute(
+            f"SELECT data FROM objects WHERE kind=? AND json_extract(data, '$.state') IN ({marks}) ORDER BY rowid",
+            (kind, *states))]
 
     def emit(self, kind, text='', *, actor='system', target=None, task=None, data=None, visible=False):
         cur = self.db.execute('INSERT INTO events(at,actor,target,task,kind,text,data,visible) VALUES(?,?,?,?,?,?,?,?)',

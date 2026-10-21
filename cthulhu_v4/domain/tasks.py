@@ -148,7 +148,7 @@ class Tasks:
         t.pop('claim', None)
         s.put('task', t)
         # 尚未处理的结束申请已过时：不再让 Master 为它单独审一回合。
-        for m in s.all('message'):
+        for m in s.where('message', 'queued'):
             if m.get('key') == 'close:' + t['id'] and m['state'] == 'queued':
                 m['state'] = 'superseded'; s.put('message', m)
         s.emit('review_returned', text, actor=by, target=t['agent'], task=t['id'], visible=True)
@@ -177,7 +177,7 @@ class Tasks:
         self.cancel_queued(a['id'])
         self.supersede_progress(a['id'])
         self.stop_turn(a['id'], 'closed')
-        for m in s.all('message'):
+        for m in s.where('message', 'queued'):
             if m.get('key') == 'close:' + t['id'] and m['state'] == 'queued':
                 m['state'] = 'superseded'; s.put('message', m)
         if status == 'success':

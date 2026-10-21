@@ -157,7 +157,7 @@ class Deployer:
     async def _drain(self):
         c, end = self.app.center, time.monotonic() + DRAIN_TIMEOUT
         while True:
-            busy = [j['agent'] for j in c.store.all('lease') if j['node'] == LOCAL and j['state'] == 'running']
+            busy = [j['agent'] for j in c.store.where('lease', 'running') if j['node'] == LOCAL]
             if not busy:
                 return
             self._set(waiting_for=busy)

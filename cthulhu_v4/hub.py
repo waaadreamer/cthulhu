@@ -33,11 +33,11 @@ class Hub:
         return ident in self.links
 
     def nodes(self):
-        out = []
+        out, running = [], self.c.store.where('lease', 'running')
         for n in self.c.store.all('node'):
             public = {k: v for k, v in n.items() if k != 'token'}
             public['online'] = self.online(n['id'])
-            public['running'] = sum(j['node'] == n['id'] and j['state'] == 'running' for j in self.c.store.all('lease'))
+            public['running'] = sum(j['node'] == n['id'] for j in running)
             out.append(public)
         return out
 
@@ -61,11 +61,11 @@ class Hub:
 
     # ---- 回合状态 ----
     def busy(self, aid):
-        return any(j['agent'] == aid and j['state'] == 'running' for j in self.c.store.all('lease'))
+        return any(j['agent'] == aid and j['state'] == 'running' for j in self.c.store.where('lease', 'running'))
 
     def stop(self, aid, reason):
         """撤销当前回合：此后它的工具写入被拒绝，节点下一次同步时停止进程。"""
-        for j in self.c.store.all('lease'):
+        for j in self.c.store.where('lease', 'running'):
             if j['agent'] == aid and j['state'] == 'running' and not j.get('stop_reason'):
                 j['stop_reason'] = reason; self.c.store.put('lease', j)
         self.wake(aid)
@@ -106,7 +106,7 @@ class Hub:
     def expire(self):
         now = self.c.clock()
         with self.c.store.atomic():
-            for j in self.c.store.all('lease'):
+            for j in self.c.store.where('lease', 'running'):
                 if j['state'] == 'running' and j['until'] <= now:
                     self.uncertain(j, f"节点 {j['node']} 回合租约到期：{j['agent']}，结果未知")
 
@@ -185,7 +185,7 @@ class Hub:
                 self.ingest(node, e); n['ack'] = e['seq']
             s.put('node', n)
             jobs, running = [], 0
-            for j in s.all('lease'):
+            for j in s.where('lease', 'running'):
                 if j['node'] != node or j['state'] != 'running':
                     continue
                 running += 1

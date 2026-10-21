@@ -13,7 +13,7 @@ class Messages:
         if task and task['state'] == 'cancelled':
             raise ValueError('任务已取消，不能继续投递执行消息')
         if key:
-            existing = next((m for m in s.all('message') if m.get('key') == key
+            existing = next((m for m in s.where('message', 'queued', 'running') if m.get('key') == key
                              and m['state'] in {'queued', 'running'}), None)
             if existing:
                 return existing
@@ -50,7 +50,7 @@ class Messages:
     def next_message(self, aid):
         """选出下一条待处理消息；排队期间已被覆盖的审核请求直接取消，避免空模型调用。"""
         s = self.store
-        pending = sorted((m for m in s.all('message') if m['target'] == aid and m['state'] == 'queued'),
+        pending = sorted((m for m in s.where('message', 'queued') if m['target'] == aid),
                          key=lambda m: (-m['priority'], m['at']))
         for m in pending:
             if aid == 'master' and m.get('key') == 'review' and not self.review_due():
@@ -72,7 +72,7 @@ class Messages:
         if not first or aid != 'master' or first.get('key') == 'review' or first.get('solo'):
             return [first] if first else []
         batch, size = [first], len(first['text'])
-        for m in sorted((m for m in self.store.all('message') if m['target'] == aid and m['state'] == 'queued'
+        for m in sorted((m for m in self.store.where('message', 'queued') if m['target'] == aid
                          and m['id'] != first['id'] and m.get('key') != 'review' and not m.get('solo')),
                         key=lambda m: (-m['priority'], m['at'])):
             # 单回合输入有上限：剩下的留到下一回合，不截断任何一条来信。
@@ -90,16 +90,16 @@ class Messages:
         完成通知（或取消记录）与 read_task_events 已覆盖它们。标记为 superseded 而不是删除，可回查。
         提问、完成等程序生成的消息（copy=True）不受影响。"""
         n = 0
-        for m in self.store.all('message'):
+        for m in self.store.where('message', 'queued'):
             if m['sender'] == aid and m['target'] == 'master' and m['state'] == 'queued' and not m.get('copy'):
                 m['state'] = 'superseded'; self.store.put('message', m); n += 1
         return n
 
     def has_queued(self, aid):
-        return any(m['target'] == aid and m['state'] == 'queued' for m in self.store.all('message'))
+        return any(m['target'] == aid for m in self.store.where('message', 'queued'))
 
     def cancel_queued(self, aid):
-        for m in self.store.all('message'):
+        for m in self.store.where('message', 'queued'):
             if m['target'] == aid and m['state'] == 'queued':
                 m['state'] = 'cancelled'; self.store.put('message', m)
 
