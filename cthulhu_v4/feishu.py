@@ -292,7 +292,8 @@ class Feishu:
         with s.atomic():
             # 非主人的消息单独成回合（solo）：不和主人的消息合并，Master 才能按这个人的权限作答，
             # 白名单写入也能据此判断“本回合是否来自主人”。copy=True：网页展示 feishu_in 原文，不显示包装文本。
-            m = self.c.enqueue('owner' if owner else 'feishu', 'master', body, 9 if owner else 5,
+            # 主人 9（与网页默认一致）；其他人 1：别人的消息排在主人和执行者来信之后，不打断主人平时的工作。
+            m = self.c.enqueue('owner' if owner else 'feishu', 'master', body, 9 if owner else 1,
                                copy=True, solo=not owner)
             rec.update(state='accepted', message=m['id']); s.put('feishu_in', rec)
             s.emit('feishu_in', text, actor='owner' if owner else 'feishu', target='master',

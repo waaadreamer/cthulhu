@@ -153,7 +153,7 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('测试群', where)
         m, = self.inbox()
         # 非主人的消息单独成回合，带着规则与鉴权理由，不能以主人身份进入。
-        self.assertEqual((m['sender'], m['priority'], m['solo']), ('feishu', 5, True))
+        self.assertEqual((m['sender'], m['priority'], m['solo']), ('feishu', 1, True))
         self.assertIn(json.dumps(rules, ensure_ascii=False), m['text'])
         self.assertIn('在白名单内', m['text'])
         self.assertIn('om_a', m['text'])
