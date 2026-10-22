@@ -189,12 +189,12 @@ class GalaxyTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(1.2)
         self.assertEqual(sum(e['kind'] == 'native:test/blocked' for e in self.c.store.events(limit=500)), 1)
         self.assertEqual(self.c.store.get('agent', t['agent'])['session'], original)
-        # 切断服务端口：节点按单调时钟在租约到期前停止真实进程。
+        # 切断服务端口：节点容忍失联约一分钟，之后按单调时钟在租约到期前停止真实进程。
         self.server.close(); await self.server.wait_closed()
         from cthulhu_v4.store import Store
         local = Store(self.path / 'home-alpha' / 'state' / 'node.db')
         try:
-            await self.wait(lambda: all(j['state'] == 'stopped' for j in local.all('execution')), seconds=30)
+            await self.wait(lambda: all(j['state'] == 'stopped' for j in local.all('execution')), seconds=75)
             self.assertIsNone(local.get('agent', t['agent']).get('pid'))
         finally: local.close()
 

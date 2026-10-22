@@ -20,7 +20,7 @@ from .files import FEATURE, MAX_BYTES, read_path
 from .runtime import make_runtime
 from .update import FEATURE as UPDATE_FEATURE, digest, install as install_release, mark as mark_update
 from .store import Store
-from .util import PROTOCOL, process_alive
+from .util import LEASE_MARGIN, PROTOCOL, process_alive
 
 VERSION = '4.1'
 
@@ -76,6 +76,8 @@ class Node:
         self.link = link             # 由传输层注入：request(body) → result
         self.bridge_url = ''         # 本机 MCP 桥（HTTP loopback）
         self.active, self.turns, self.expires = {}, {}, {}
+        self.grace = 0
+        self.stops = {}  # job id → 停止原因；CancelledError 本身不带原因，回报时须如实区分
         self.kick = asyncio.Event()
         self.closed = False
         settings = self.store.find('settings', 'node')
@@ -140,14 +142,16 @@ class Node:
             task = asyncio.create_task(self.serve_file(req))
             self.reads.add(task); task.add_done_callback(self.reads.discard)
         allowed = {j['id'] for j in result['jobs']}
+        # 失联容忍时长由中心下发的租约决定，报错文案用实际值，不写死。
+        self.grace = result['lease_seconds'] - LEASE_MARGIN
         for jid, task in list(self.active.items()):
             # 中心不再续租的回合（被打断、暂停、租约失效）立即停止进程。
             if jid not in allowed and not task.cancelling():
-                task.cancel()
+                self.stop(jid, task, '中心不再续租（已要求停止、暂停或租约在中心已失效）')
         for job in result['jobs']:
             jid = job['id']
             # 用请求发出时的单调时钟，扣除停止进程的余量，不依赖两机时钟一致。
-            self.expires[jid] = started + result['lease_seconds'] - 10
+            self.expires[jid] = started + result['lease_seconds'] - LEASE_MARGIN
             if jid in self.active or self.store.find('execution', jid):
                 continue
             if time.monotonic() >= self.expires[jid]:
@@ -176,7 +180,8 @@ class Node:
             result = await runtime.run(job['prompt'])
             outcome = 'completed'
         except asyncio.CancelledError:
-            outcome, error = 'stopped', '中心要求停止、租约到期或节点关闭；须核验已有副作用'
+            outcome = 'stopped'
+            error = self.stops.get(job['id'], '回合被取消') + '；须核验已有副作用'
         except Exception as e:
             # 有些异常没有文字（如超时），至少带上类型名，界面不能出现空白的失败原因。
             error = str(e) or type(e).__name__
@@ -188,7 +193,7 @@ class Node:
             with self.store.atomic():
                 self.store.put('execution', {'id': job['id'], 'state': 'stopped', 'agent': job['agent']})
                 self.queue(job['id'], 'finished', {'outcome': outcome, 'result': result, 'error': error})
-            self.active.pop(job['id'], None); self.turns.pop(job['id'], None)
+            self.active.pop(job['id'], None); self.turns.pop(job['id'], None); self.stops.pop(job['id'], None)
 
     async def call_tool(self, job, name, arguments):
         if time.monotonic() >= self.expires.get(job['id'], 0):
@@ -235,11 +240,16 @@ class Node:
                 return turn
         return None
 
+    def stop(self, jid, task, reason):
+        # 先记原因再取消：execute 的 finally 据此回报，中心与 Master 才知道是谁停的。
+        self.stops.setdefault(jid, reason)
+        task.cancel()
+
     async def watchdog(self):
         while not self.closed:
             for jid, task in list(self.active.items()):
                 if time.monotonic() >= self.expires.get(jid, 0) and not task.cancelling():
-                    task.cancel()
+                    self.stop(jid, task, f"与中心失联超过 {self.grace} 秒，本机租约到期")
             await asyncio.sleep(.25)
 
     async def run(self):
@@ -264,6 +274,6 @@ class Node:
     async def close(self):
         self.closed = True
         jobs = list(self.active.values())
-        for task in jobs:
-            if not task.cancelling(): task.cancel()
+        for jid, task in list(self.active.items()):
+            if not task.cancelling(): self.stop(jid, task, '节点进程关闭')
         await asyncio.gather(*jobs, return_exceptions=True)

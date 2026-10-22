@@ -10,7 +10,11 @@ TERMINAL = {'completed', 'failed', 'cancelled'}
 # 不在旧适配器上“尽量兼容”，避免旧节点用错误的权限策略启动原生会话。
 PROTOCOL = 2
 MAX_FRAME = 20 * 1024 * 1024
-LEASE = 30
+# 节点在租约到期前 LEASE_MARGIN 秒停止进程，所以节点能容忍与中心失联 LEASE - LEASE_MARGIN = 60 秒。
+# 为什么不更短：公网链路常有十几秒的抖动（读超时 15 秒 + 重连），30 秒租约曾因一次
+# 心跳没同步上就杀掉正在跑的回合；持续一分钟连不上才算真的失联。
+LEASE = 70
+LEASE_MARGIN = 10  # 节点提前停进程的余量：给原生进程退出与回报留时间
 LOCAL = 'local'
 
 

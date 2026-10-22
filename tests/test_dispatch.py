@@ -2,6 +2,7 @@
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -148,6 +149,40 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.c.store.get('task', t['id'])['state'], 'paused')
         self.assertTrue(any(e['kind'] == 'node_attention' for e in self.c.store.events(limit=500)))
         with self.assertRaises(PermissionError): self.c.hub.valid_job('local', job['id'])
+
+    async def test_brief_disconnect_keeps_turn_and_long_one_reports_why(self):
+        # 一次心跳没同步上不能杀回合：节点本地租约要留出一分钟失联容忍。
+        Scripted.gates['hang'] = asyncio.Event()
+        with self.scripted():
+            self.c.enqueue('owner', 'master', 'hang')
+            await self.h.sync(2)
+            node = self.h.node
+            jid = next(iter(node.active))
+            self.assertGreaterEqual(node.expires[jid] - time.monotonic(), 59)
+            real = node.link
+
+            class Down:
+                async def request(self, body): raise ConnectionError('断网')
+                def wake(self): pass
+            node.link = Down()
+            watchdog = asyncio.create_task(node.watchdog())
+            try:
+                for _ in range(3):
+                    with self.assertRaises(ConnectionError): await node.sync_once()
+                await asyncio.sleep(.3)
+                self.assertIn(jid, node.active)  # 短暂断线后回合仍在跑
+                # 模拟失联满一分钟：本机租约到期，停进程并如实说明原因。
+                node.expires[jid] = 0
+                for _ in range(40):
+                    if jid not in node.active: break
+                    await asyncio.sleep(.05)
+                self.assertNotIn(jid, node.active)
+            finally:
+                watchdog.cancel(); node.link = real
+            await self.h.sync(2)
+        attention = [e['text'] for e in self.c.store.events(limit=500) if e['kind'] == 'node_attention']
+        self.assertTrue(any('与中心失联超过 60 秒' in t for t in attention), attention)
+        self.assertFalse(any('中心要求停止' in t for t in attention))
 
     async def test_node_restart_reports_unknown_without_replay(self):
         import sqlite3
