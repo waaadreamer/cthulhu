@@ -44,6 +44,35 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         # 静态路径不能逃出 static 目录。
         self.assertNotIn(b'websockets', await asyncio.to_thread(self.call, '/../requirements.txt', token=''))
 
+    async def test_state_polls_return_small_deltas_that_rebuild_the_snapshot(self):
+        full = await asyncio.to_thread(self.call, '/api/state')
+        self.assertIn('agents', full)
+        same = await asyncio.to_thread(self.call, '/api/state?etag=' + full['etag'])
+        self.assertTrue(same['unchanged'])
+        with self.app.center.store.atomic():
+            self.app.center.set_node_defaults({'node': 'local', 'max_turns': 5})
+        r = await asyncio.to_thread(self.call, '/api/state?etag=' + full['etag'])
+        self.assertEqual(r['base'], full['etag'])
+        self.assertNotIn('agents', r['delta'])  # 没变的部分不重发
+        self.assertLess(len(json.dumps(r['delta'])), len(json.dumps(full)))
+        # 用前端真实的 applyDelta 还原，必须与此刻的全量快照一致。
+        fresh = await asyncio.to_thread(self.call, '/api/state')
+        rebuilt = await self.apply_js(full, r['delta'])
+        drop = lambda s: {k: v for k, v in s.items() if k not in ('etag', 'now')}
+        self.assertEqual(drop(rebuilt), drop(fresh))
+        # 不认识的 etag（如中心重启后）回全量。
+        self.assertIn('agents', await asyncio.to_thread(self.call, '/api/state?etag=unknown'))
+
+    async def apply_js(self, old, delta):
+        script = ("import { applyDelta } from %s; let t = ''; process.stdin.on('data', b => t += b);"
+                  "process.stdin.on('end', () => { const [o, d] = JSON.parse(t); process.stdout.write(JSON.stringify(applyDelta(o, d))); });"
+                  % json.dumps((ROOT / 'static' / 'js' / 'delta.js').as_uri()))
+        p = await asyncio.create_subprocess_exec('node', '--input-type=module', '-e', script, stdin=asyncio.subprocess.PIPE,
+                                                 stdout=asyncio.subprocess.PIPE)
+        out, _ = await p.communicate(json.dumps([old, delta]).encode())
+        self.assertEqual(p.returncode, 0)
+        return json.loads(out)
+
     async def test_invite_command_uses_public_galaxy_url(self):
         self.app.galaxy_url = 'ws://127.0.0.1:%d' % self.app.ws_actual_port
         result = await asyncio.to_thread(self.call, '/api/invite', {'name': 'gpu1'})

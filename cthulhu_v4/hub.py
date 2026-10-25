@@ -184,13 +184,18 @@ class Hub:
                 self.ingest(node, e); n['ack'] = e['seq']
             s.put('node', n)
             jobs, running = [], 0
+            # 节点已持有完整回合（prompt、agent_spec、task 可达数十 KB）时，续租只回 id。
+            # 为什么：心跳每秒一次，原先每次重发全文，是中心出站流量的大头。
+            # 旧节点不报 have，按原样拿全文，保持兼容。
+            have = set(body.get('have') or ())
             for j in s.where('lease', 'running'):
                 if j['node'] != node or j['state'] != 'running':
                     continue
                 running += 1
                 # 被要求停止的回合不再续租，也不发给节点；节点据此停止进程并回报 stopped。
                 if not j.get('stop_reason') and not s.get('agent', j['agent'])['paused']:
-                    j['until'] = c.clock() + LEASE; s.put('lease', j); jobs.append(j)
+                    j['until'] = c.clock() + LEASE; s.put('lease', j)
+                    jobs.append({'id': j['id']} if j['id'] in have else j)
             plan = c.update_plan(n, running)
             s.put('node', n)
             # 等待更新时不派发新回合：消息留在队列里，更新完成（或失败）后照常派发。

@@ -14,6 +14,37 @@ from urllib.parse import parse_qs, urlsplit
 from .util import ROOT, cut
 
 UI_TEXT, UI_FIELD = 20000, 8000
+SNAPSHOTS = 64  # 最近的快照按 etag 保留，用来给各标签页算增量；更旧的 etag 直接回全量
+_MISSING = object()
+
+
+def snapshot_delta(old, new):
+    """两份快照的差异。带 id 的对象列表按 id 只发变化的条目，字典按键，其余整体替换。
+
+    为什么：网页每秒轮询，原先任何变化都重发约 150KB 的全量快照，是中心出站流量的大头。
+    客户端用 static/js/delta.js 的 applyDelta 还原，测试保证两边结果一致。
+    """
+    out = {}
+    for k, v in new.items():
+        o = old.get(k, _MISSING)
+        if o == v:
+            continue
+        if isinstance(v, list) and isinstance(o, list) and all(isinstance(x, dict) and 'id' in x for x in v + o):
+            before = {x['id']: x for x in o}
+            d = {'set': [x for x in v if before.get(x['id']) != x]}
+            ids = [x['id'] for x in v]
+            if ids != [x['id'] for x in o]:
+                d['ids'] = ids  # 只在增删或顺序变化时才发 id 列表
+            out[k] = {'list': d}
+        elif isinstance(v, dict) and isinstance(o, dict):
+            out[k] = {'dict': {'set': {kk: vv for kk, vv in v.items() if o.get(kk, _MISSING) != vv},
+                               'del': [kk for kk in o if kk not in v]}}
+        else:
+            out[k] = {'value': v}
+    for k in old:
+        if k not in new:
+            out[k] = {'drop': True}
+    return out
 
 STATIC = ROOT / 'static'
 MIME = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
@@ -27,6 +58,7 @@ class Web:
         if not token_file.exists():
             token_file.write_text(secrets.token_urlsafe(32)); token_file.chmod(0o600)
         self.token = token_file.read_text().strip()
+        self.snapshots = {}  # etag → 快照；只在事件循环线程读写
         web = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -99,11 +131,19 @@ class Web:
         if method == 'GET':
             if path == '/api/state':
                 # 状态没变就不重发：客户端带上次的 etag，只回 now（倒计时用）。now 不参与 etag。
+                # 变了且还记得客户端那一版：只回增量；中心重启或版本太旧时才回全量。
                 snap = c.snapshot()
                 now = snap.pop('now')
                 etag = hashlib.sha1(json.dumps(snap, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
-                if q('etag') == etag:
+                base = q('etag')
+                if base == etag:
                     return {'unchanged': True, 'etag': etag, 'now': now}
+                self.snapshots.pop(etag, None); self.snapshots[etag] = snap
+                while len(self.snapshots) > SNAPSHOTS:
+                    self.snapshots.pop(next(iter(self.snapshots)))
+                old = self.snapshots.get(base) if base else None
+                if old is not None:
+                    return {'delta': snapshot_delta(old, snap), 'base': base, 'etag': etag, 'now': now}
                 return snap | {'etag': etag, 'now': now}
             if path == '/api/events':
                 # 两种读法：before 向前翻历史（不含流式增量）；after 跟随最新（含增量以便流式显示）。

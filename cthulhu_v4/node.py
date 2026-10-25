@@ -122,6 +122,8 @@ class Node:
         events = self.outbox()
         started = time.monotonic()
         result = await self.link.request({'op': 'sync', 'instance': self.instance, 'base': str(self.state_dir.parent),
+                                          # 已收到全文的回合：中心续租时只回 id，不再重发 prompt。
+                                          'have': list(self.expires),
                                           'backends': self.backends, 'version': VERSION,
                                           'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE], 'code': self.code,
                                           'managed': self.managed, 'events': events})
@@ -141,6 +143,10 @@ class Node:
             task = asyncio.create_task(self.serve_file(req))
             self.reads.add(task); task.add_done_callback(self.reads.discard)
         allowed = {j['id'] for j in result['jobs']}
+        # 已结束的回合不再算“已持有”，否则 have 会随历史无限增长。
+        for jid in list(self.expires):
+            if jid not in allowed and jid not in self.active:
+                self.expires.pop(jid, None)
         # 失联容忍时长由中心下发的租约决定，报错文案用实际值，不写死。
         self.grace = result['lease_seconds'] - LEASE_MARGIN
         for jid, task in list(self.active.items()):
@@ -153,6 +159,10 @@ class Node:
             self.expires[jid] = started + result['lease_seconds'] - LEASE_MARGIN
             if jid in self.active or self.store.find('execution', jid):
                 continue
+            if 'agent_spec' not in job:
+                # 中心以为本机已有全文（have 与本地状态不一致，理论上不会发生）：
+                # 不猜测内容，丢掉记录，下一次同步会收到全文。
+                self.expires.pop(jid, None); continue
             if time.monotonic() >= self.expires[jid]:
                 continue
             spec = dict(job['agent_spec'])
@@ -193,6 +203,7 @@ class Node:
                 self.store.put('execution', {'id': job['id'], 'state': 'stopped', 'agent': job['agent']})
                 self.queue(job['id'], 'finished', {'outcome': outcome, 'result': result, 'error': error})
             self.active.pop(job['id'], None); self.turns.pop(job['id'], None); self.stops.pop(job['id'], None)
+            self.expires.pop(job['id'], None)
 
     async def call_tool(self, job, name, arguments):
         if time.monotonic() >= self.expires.get(job['id'], 0):

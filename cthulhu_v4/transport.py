@@ -13,8 +13,17 @@ import time
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidURI
+from websockets.extensions.permessage_deflate import ClientPerMessageDeflateFactory, ServerPerMessageDeflateFactory
 
 from .util import LOCAL, MAX_FRAME, PROTOCOL
+
+
+# ---- 压缩 ----
+# websockets 默认的 permessage-deflate 窗口只有 4KB（12 bit），省内存但压缩率差。
+# 节点只有几个、出站流量计费，所以两端都用最大 32KB 窗口；旧节点协商时自动退回较小窗口。
+DEFLATE = dict(server_max_window_bits=15, client_max_window_bits=15, compress_settings={'memLevel': 8})
+DEFLATE_SERVER = lambda: ServerPerMessageDeflateFactory(**DEFLATE)
+DEFLATE_CLIENT = lambda: ClientPerMessageDeflateFactory(**DEFLATE)
 
 
 # ---- 邀请 blob ----
@@ -94,7 +103,7 @@ class RemoteLink:
     async def open(self, first):
         opts = {'ssl': self.ssl_context()} if self.url.startswith('wss:') else {}
         ws = await connect(self.url, max_size=MAX_FRAME, open_timeout=10, close_timeout=2,
-                           proxy=None, **opts)
+                           proxy=None, compression=None, extensions=[DEFLATE_CLIENT()], **opts)
         try:
             self.check_pin(ws)
             await ws.send(json.dumps(first))

@@ -5,6 +5,7 @@ import { initMonitor } from './monitor.js';
 import { Model } from './model.js';
 import { View, Live } from './render.js';
 import { Chat } from './chat.js';
+import { applyDelta } from './delta.js';
 
 const STATE = { running: '进行中', waiting: '等待', paused: '已暂停', review: '待审核', completed: '已完成', failed: '未达成', cancelled: '已取消' };
 const DONE = new Set(['completed', 'failed', 'cancelled']);
@@ -29,9 +30,13 @@ async function poll() {
   if (polling || !auth.token) return;
   polling = true;
   try {
-    // 状态没变时服务端只回 now：保留上次的快照，只更新倒计时用的时间。
-    const r = await api('api/state' + (snap?.etag ? '?etag=' + snap.etag : ''));
-    snap = r.unchanged ? { ...snap, now: r.now } : r;
+    // 状态没变时服务端只回 now；变了只回相对上一版的增量。base 固定为发请求时的快照：
+    // 请求期间 openTask 可能已换了 snap，增量必须套在它对应的那一版上。
+    const base = snap;
+    const r = await api('api/state' + (base?.etag ? '?etag=' + base.etag : ''));
+    if (r.unchanged) snap = { ...base, now: r.now };
+    else if (r.delta) snap = { ...applyDelta(base, r.delta), etag: r.etag, now: r.now };
+    else snap = r;
     fileCtx.nodes = snap.nodes.map(n => n.id);
     chat.demo = snap.agents.find(a => a.id === 'master')?.backend === 'demo';
     renderSide(); renderFeishu(); renderQuestions(); renderMaster();
@@ -589,4 +594,10 @@ initViewer({ returnHash: () => (drawer ? '#task=' + drawer.task : '') });
 addEventListener('hashchange', fromHash);
 setPriority(9);
 if (!auth.token) showLogin(); else poll().then(fromHash);
-setInterval(poll, 1000);
+// 标签页在后台时每 10 秒才同步一次：没人看的页面不必每秒拉状态。
+let lastPoll = 0;
+setInterval(() => {
+  if (document.hidden && Date.now() - lastPoll < 10000) return;
+  lastPoll = Date.now(); poll();
+}, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });

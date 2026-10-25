@@ -65,6 +65,7 @@ class App:
 
     async def start(self):
         from websockets.asyncio.server import serve
+        from .transport import DEFLATE_SERVER
         loop = asyncio.get_running_loop()
         c = self.center
         # 本机节点：与远端节点同一实现，只是链路在进程内。
@@ -78,7 +79,7 @@ class App:
             tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             tls.load_cert_chain(self.tls_cert, self.tls_key)
         self.ws = await serve(make_handler(c), self.ws_host, self.ws_port, ssl=tls,
-                              max_size=MAX_FRAME, origins=None)
+                              max_size=MAX_FRAME, origins=None, compression=None, extensions=[DEFLATE_SERVER()])
         self.ws_actual_port = self.ws.sockets[0].getsockname()[1]
         self.web = Web(self, loop, self.port); self.web.start()
         (self.state / 'center.json').write_text(json.dumps({'port': self.web.port, 'ws_port': self.ws_actual_port}))

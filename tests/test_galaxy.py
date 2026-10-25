@@ -181,6 +181,19 @@ class GalaxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.hub.sync('alpha', payload)['jobs']), 10)
         self.assertEqual(self.c.snapshot()['max_turns'], 8)
 
+    def test_renewal_sends_only_ids_for_jobs_the_node_holds(self):
+        # 心跳每秒一次：节点已有全文的回合，续租只回 id；没报 have 的旧节点仍拿全文。
+        with self.c.store.atomic(): self.hub.register('alpha')
+        self.c.create_task(task_args('alpha', '/remote/w'))
+        payload = {'instance': 'disk-alpha', 'backends': ['demo'], 'events': []}
+        first = self.hub.sync('alpha', payload)['jobs'][0]
+        self.assertIn('prompt', first)
+        self.assertIn('prompt', self.hub.sync('alpha', payload)['jobs'][0])
+        renewed = self.hub.sync('alpha', payload | {'have': [first['id']]})['jobs']
+        self.assertEqual(renewed, [{'id': first['id']}])
+        # 续租照样延长中心侧租约。
+        self.assertGreater(self.c.store.get('lease', first['id'])['until'], self.c.clock())
+
     async def test_websocket_auth_protocol_and_duplicate_rejection(self):
         p, home = await self.start_node('alpha')
         token = json.loads((home / 'node.json').read_text())['token']
