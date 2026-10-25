@@ -19,7 +19,7 @@ from .update import FEATURE as UPDATE_FEATURE
 from .hub import Hub
 from .store import Store
 from .tools import dispatch, tools_for
-from .util import LEASE, LOCAL, ROOT, TERMINAL, process_alive, uid
+from .util import LEASE, LOCAL, MAX_TURNS, ROOT, TERMINAL, process_alive, uid
 
 EFFORTS = {'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}
 AGENT_TEXT_LIMIT = 20000
@@ -38,6 +38,7 @@ class Center(Messages, Questions, Tasks, Review):
         self.feishu = None  # 由 App 按启动参数挂载；没有它时中心完全不接触飞书
         self.files = FileService(self)
         self.release = None  # 由 App 设置为中心正在运行的代码包；没有时不发起远程更新
+        self.install_url = None  # 由 App 设置：网页据此给出节点恢复命令
         self.deployer = None   # 由 App 挂载：网页一键更新中心
         self.monitor = None    # 由 App 挂载：监控面板（流量等）
         self.hold_local = False  # 中心准备重启时为 True：不再向中心机节点派发新回合
@@ -54,8 +55,11 @@ class Center(Messages, Questions, Tasks, Review):
         """启动修复，幂等。兼容首版状态目录：保留 session、节点 instance 与事件，不重放任何输入。"""
         s, now = self.store, self.clock()
         if not s.find('node', LOCAL):
-            s.put('node', {'id': LOCAL, 'token': None, 'seen': 0, 'ack': 0, 'instance': None,
-                           'capacity': 4, 'backends': []})
+            s.put('node', {'id': LOCAL, 'token': None, 'seen': 0, 'ack': 0, 'instance': None, 'backends': []})
+        for n in s.all('node'):
+            if 'capacity' in n:
+                # 旧版 capacity 是节点启动参数上报的（默认 2），不是主人的选择；去掉后改用 max_turns 默认值。
+                n.pop('capacity'); s.put('node', n)
         for a in s.all('agent'):
             if process_alive(a):
                 # 首版在中心本机直接启动原生进程；旧进程还活着时不能再启动第二份同一会话。
@@ -173,8 +177,15 @@ class Center(Messages, Questions, Tasks, Review):
                 raise ValueError('默认工作目录必须是该节点上存在的绝对路径')
             d['cwd'] = str(path)
         n['defaults'] = d
+        if p.get('max_turns') not in (None, ''):
+            try: limit = int(p['max_turns'])
+            except (TypeError, ValueError): limit = 0
+            if not 1 <= limit <= 32:
+                raise ValueError('同时运行的回合数应为 1..32')
+            n['max_turns'] = limit
         s.put('node', n)
-        label = '，'.join(f'{k}={v}' for k, v in d.items() if v) or '已清空'
+        label = '，'.join(f'{k}={v}' for k, v in d.items() if v) or '默认值已清空'
+        label += f"；同时运行 {n.get('max_turns') or MAX_TURNS} 个回合"
         s.emit('node_config', f"节点 {n['id']} 默认值：{label}", actor='owner', data={'node': n['id'], 'defaults': d}, visible=True)
         return {k: v for k, v in n.items() if k != 'token'}
 
@@ -226,6 +237,7 @@ class Center(Messages, Questions, Tasks, Review):
                 'feishu': self.feishu.status() if self.feishu else None,
                 'release': self.release.public() if self.release else None,
                 'deploy': self.deployer.status() if self.deployer else None,
+                'install_url': self.install_url, 'max_turns': MAX_TURNS,
                 'seq': s.highwater(), 'now': self.clock()}
 
     # ---- 与 hub 的连接点 ----

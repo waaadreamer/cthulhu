@@ -9,7 +9,7 @@
 import re
 import secrets
 
-from .util import LEASE, LOCAL, PROTOCOL, TERMINAL
+from .util import LEASE, LOCAL, MAX_TURNS, PROTOCOL, TERMINAL
 from .tools import FEISHU_TOOLS
 
 
@@ -25,7 +25,7 @@ class Hub:
         if self.c.store.find('node', name):
             raise ValueError(f'节点 {name} 已存在；升级请在原机器重跑安装命令，不能用新身份接管原会话')
         node = {'id': name, 'token': secrets.token_urlsafe(32), 'seen': 0, 'ack': 0,
-                'instance': None, 'capacity': 2, 'backends': []}
+                'instance': None, 'backends': []}
         self.c.store.put('node', node)
         return node
 
@@ -173,10 +173,9 @@ class Hub:
             if n['instance'] and n['instance'] != body['instance']:
                 raise PermissionError(f'节点 {node} 的状态目录已改变：请恢复原目录；不能用新目录接管原 session')
             n.update(instance=body['instance'], seen=c.clock(), version=body.get('version'),
-                     capacity=max(1, min(int(body.get('capacity', 1)), 32)),
                      backends=[b for b in body.get('backends', []) if b in {'demo', 'codex', 'claude'}],
                      host=body.get('host'), home=body.get('home'), features=list(body.get('features') or []),
-                     code=body.get('code'), managed=bool(body.get('managed')))
+                     code=body.get('code'), managed=bool(body.get('managed')), base=body.get('base'))
             for e in body.get('events', []):
                 if e['seq'] <= n['ack']:
                     continue
@@ -195,7 +194,8 @@ class Hub:
             plan = c.update_plan(n, running)
             s.put('node', n)
             # 等待更新时不派发新回合：消息留在队列里，更新完成（或失败）后照常派发。
-            free = 0 if plan in ('draining', 'ready') else n['capacity'] - running
+            # 主人调低上限时不打断已在跑的回合，只是暂不派发新的，直到 running 降到上限以下。
+            free = 0 if plan in ('draining', 'ready') else (n.get('max_turns') or MAX_TURNS) - running
             if node == LOCAL and c.hold_local:
                 free = 0  # 中心即将重启：本机节点不接新回合，等已派发的回合结束
             for a in s.all('agent'):

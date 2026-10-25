@@ -138,7 +138,11 @@ function liveInfo(aid, model) {
   }
   if (p?.queued) {
     const node = snap.nodes.find(n => n.id === (a.node || 'local'));
-    return node && !node.online ? { phase: 'wait', text: `排队中，节点 ${node.id} 离线` } : { phase: 'wait', text: '已收到，正在启动' };
+    if (node && !node.online) return { phase: 'wait', text: `排队中，节点 ${node.id} 离线` };
+    // 名额满时如实显示排队，不然看起来像卡在启动。
+    const limit = node && (node.max_turns || snap.max_turns);
+    if (limit && node.running >= limit) return { phase: 'wait', text: `排队中，节点 ${node.id} 已满 ${node.running}/${limit}` };
+    return { phase: 'wait', text: '已收到，正在启动' };
   }
   return null;
 }
@@ -476,7 +480,7 @@ function openNode(id) {
   const n = snap.nodes.find(n => n.id === id), f = $('#node-form'), d = n.defaults || {};
   f.dataset.node = id;
   $('#node-dialog-t').textContent = '节点 ' + id;
-  $('#node-info').textContent = [n.online ? '在线' : '离线', n.host, n.home && '用户目录 ' + n.home, updateLabel(n),
+  $('#node-info').textContent = [n.online ? '在线' : '离线', `运行 ${n.running || 0}/${n.max_turns || snap.max_turns}`, n.host, n.home && '用户目录 ' + n.home, updateLabel(n),
     n.update?.error && '原因：' + n.update.error,
     (n.backends || []).length && '可用后端 ' + n.backends.join(' ')].filter(Boolean).join('；');
   f.elements.backend.replaceChildren(el('option', { value: '', text: '同 Master' }),
@@ -484,9 +488,27 @@ function openNode(id) {
   f.elements.backend.value = d.backend || ''; f.elements.model.value = d.model || '';
   f.elements.reasoning_effort.value = d.reasoning_effort || ''; f.elements.cwd.value = d.cwd || '';
   f.elements.cwd.placeholder = (n.home || '/home/user') + '/project';
+  f.elements.max_turns.value = n.max_turns || snap.max_turns;
+  // 恢复命令不带邀请：安装脚本发现已有 node.json 就沿用原身份，只更新代码并重新拉起进程。
+  const cmd = recoverCommand(n);
+  $('#node-recover').hidden = $('#node-recover-copy').hidden = !cmd;
+  $('#node-recover-cmd').textContent = cmd || '';
+  $('#node-recover-copy').onclick = () => copyText($('#node-recover-cmd'), $('#node-recover-copy'), '复制恢复命令');
   $('#node-retry').hidden = n.update?.state !== 'failed';
   $('#node-retry').onclick = () => act(async () => { await api('api/node/update', { node: id }); $('#node-dialog').close(); });
   syncNodeForm(); dialog('#node-dialog');
+}
+function recoverCommand(n) {
+  if (n.id === 'local' || !snap.install_url) return '';
+  // 节点上报的是自己的状态根目录；不是默认的 ~/.cthulhu 时要带上 CTHULHU_HOME，否则脚本找不到原身份。
+  const std = n.home && n.home + '/.cthulhu';
+  const env = n.base && n.base !== std ? `CTHULHU_HOME=${n.base} ` : '';
+  return `curl -fsSL ${snap.install_url} | ${env}bash`;
+}
+async function copyText(box, button, label) {
+  try { await navigator.clipboard.writeText(box.textContent); button.textContent = '已复制'; }
+  catch { getSelection().selectAllChildren(box); }
+  setTimeout(() => (button.textContent = label), 1500);
 }
 function syncNodeForm() {
   const f = $('#node-form'), b = f.elements.backend.value;
@@ -498,7 +520,7 @@ $('#node-form').onsubmit = e => {
   e.preventDefault(); const f = e.target;
   act(async () => {
     await api('api/node', { node: f.dataset.node, backend: f.elements.backend.value, model: f.elements.model.value,
-      reasoning_effort: f.elements.reasoning_effort.value, cwd: f.elements.cwd.value });
+      reasoning_effort: f.elements.reasoning_effort.value, cwd: f.elements.cwd.value, max_turns: f.elements.max_turns.value });
     $('#node-dialog').close();
   });
 };
@@ -540,11 +562,7 @@ $('#invite-form').onsubmit = e => {
     $('#invite-exp').textContent = '有效期至 ' + stamp(r.expires) + '，只能用于一台机器。命令含一次性邀请，请按密码对待。';
   });
 };
-$('#invite-copy').onclick = async () => {
-  try { await navigator.clipboard.writeText($('#invite-cmd').textContent); $('#invite-copy').textContent = '已复制'; }
-  catch { getSelection().selectAllChildren($('#invite-cmd')); }
-  setTimeout(() => ($('#invite-copy').textContent = '复制'), 1500);
-};
+$('#invite-copy').onclick = () => copyText($('#invite-cmd'), $('#invite-copy'), '复制');
 
 // 左栏分区可折叠，状态记在本浏览器。折叠后标题仍显示数量，有新提问时任务区的数量照常更新。
 for (const sec of document.querySelectorAll('#nav .sec')) {

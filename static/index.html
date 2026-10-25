@@ -133,6 +133,12 @@
   <form id="node-form">
     <h2 id="node-dialog-t"></h2>
     <p id="node-info" class="muted"></p>
+    <div id="node-recover" hidden>
+      <p class="muted">节点进程没了（如容器重启）时，在该机器上用原用户执行；会保留原身份和会话，并更新到最新代码：</p>
+      <pre id="node-recover-cmd" class="cmd-box"></pre>
+      <p class="muted">若该机器的节点目录已丢失，原身份无法恢复，请用「节点 ＋」换个名字重新添加。</p>
+    </div>
+    <label>同时运行的回合数<input name="max_turns" type="number" min="1" max="32" required></label>
     <p class="muted">新任务没有指定时使用这些默认值，已有任务不受影响。</p>
     <div class="row">
       <label>默认后端<select name="backend"></select></label>
@@ -142,7 +148,7 @@
     <datalist id="node-models"></datalist>
     <label>默认工作目录<input name="cwd" autocomplete="off"></label>
     <p class="muted">原生 CLI 从工作目录读取 AGENTS.md / CLAUDE.md。留空时，每个任务必须自己填写目录。</p>
-    <div class="actions"><button id="node-retry" class="btn" type="button" hidden>重试更新</button><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>
+    <div class="actions"><button id="node-retry" class="btn" type="button" hidden>重试更新</button><button id="node-recover-copy" class="btn" type="button" hidden>复制恢复命令</button><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>
   </form>
 </dialog>
 

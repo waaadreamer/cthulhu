@@ -166,6 +166,21 @@ class GalaxyTests(unittest.IsolatedAsyncioTestCase):
         finally: other.store.close()
         with self.assertRaises(PermissionError): self.hub.sync('alpha', payload | {'instance': 'different-disk'})
 
+    def test_owner_sets_parallel_turns_per_node(self):
+        # 并行上限由主人在中心设置，默认 8；节点上报的旧 capacity 不再起作用。
+        with self.c.store.atomic(): self.hub.register('alpha')
+        for i in range(10):
+            self.c.create_task(task_args('alpha', '/remote/w' + str(i)))
+        payload = {'instance': 'disk-alpha', 'capacity': 2, 'backends': ['demo'], 'events': []}
+        self.assertEqual(len(self.hub.sync('alpha', payload)['jobs']), 8)
+        with self.assertRaises(ValueError): self.c.set_node_defaults({'node': 'alpha', 'max_turns': 0})
+        self.c.set_node_defaults({'node': 'alpha', 'max_turns': 3})
+        # 调低上限不打断已在跑的 8 个回合，只是不再派发新的。
+        self.assertEqual(len(self.hub.sync('alpha', payload)['jobs']), 8)
+        self.c.set_node_defaults({'node': 'alpha', 'max_turns': 10})
+        self.assertEqual(len(self.hub.sync('alpha', payload)['jobs']), 10)
+        self.assertEqual(self.c.snapshot()['max_turns'], 8)
+
     async def test_websocket_auth_protocol_and_duplicate_rejection(self):
         p, home = await self.start_node('alpha')
         token = json.loads((home / 'node.json').read_text())['token']

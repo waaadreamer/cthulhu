@@ -18,7 +18,7 @@ INSTALL_URL = 'https://raw.githubusercontent.com/waaadreamer/cthulhu/v4/deploy/i
 class App:
     def __init__(self, state, *, backend='demo', model=None, reasoning_effort=None, port=8767,
                  ws_host='127.0.0.1', ws_port=8770, public_url=None, galaxy_url=None,
-                 tls_cert=None, tls_key=None, install_url=INSTALL_URL, local_capacity=4,
+                 tls_cert=None, tls_key=None, install_url=INSTALL_URL,
                  feishu_cli=None, feishu_config=None, feishu_owner=None, feishu_bot=None,
                  feishu_judge_model='gpt-6.1-sol', model_proxy=None, git_proxy=None, **timing):
         self.state = Path(state).resolve()
@@ -31,8 +31,7 @@ class App:
         self.public_url = public_url.rstrip('/') if public_url else None
         self.galaxy_url = galaxy_url
         self.tls_cert, self.tls_key = tls_cert, tls_key
-        self.install_url = install_url
-        self.local_capacity = local_capacity
+        self.install_url = self.center.install_url = install_url
         self.model_proxy, self.git_proxy = model_proxy, git_proxy
         self.tasks = []
         if feishu_cli:
@@ -69,7 +68,7 @@ class App:
         loop = asyncio.get_running_loop()
         c = self.center
         # 本机节点：与远端节点同一实现，只是链路在进程内。
-        self.node = Node(self.state / 'local-node', capacity=self.local_capacity, protected=[self.state],
+        self.node = Node(self.state / 'local-node', protected=[self.state],
                          model_proxy=self.model_proxy)
         self.node.link = LocalLink(c.hub, self.node)
         c.hub.attach(LOCAL, self.node.link)

@@ -144,7 +144,7 @@ async def run_node(args):
         update.reexec(app)
     lock = lock_dir(base / 'state', 'node.lock')
     try:
-        node = Node(base / 'state', capacity=args.capacity, protected=[base], app=app, managed=managed,
+        node = Node(base / 'state', protected=[base], app=app, managed=managed,
                     model_proxy=args.model_proxy or config.get('model_proxy'))
     except RuntimeError as e:
         raise SystemExit(str(e))
@@ -211,7 +211,7 @@ def main(argv=None):
     n = sub.add_parser('node', help='执行节点')
     nsub = n.add_subparsers(dest='node_cmd', required=True)
     j = nsub.add_parser('join'); j.add_argument('invite'); j.add_argument('--home')
-    r = nsub.add_parser('run'); r.add_argument('--home'); r.add_argument('--capacity', type=int, default=2)
+    r = nsub.add_parser('run'); r.add_argument('--home'); r.add_argument('--capacity', type=int, help='已废弃：并行上限改在中心网页按节点设置；保留参数以兼容旧启动命令')
     r.add_argument('--model-proxy', help='该节点上模型 CLI 的代理；也可写在 node.json 的 model_proxy')
     st = nsub.add_parser('status'); st.add_argument('--home')
 
@@ -227,7 +227,6 @@ def main(argv=None):
     elif args.node_cmd == 'join':
         asyncio.run(join(args))
     elif args.node_cmd == 'run':
-        if not 1 <= args.capacity <= 32: p.error('capacity 必须为 1..32')
         asyncio.run(run_node(args))
     else:
         status(args)

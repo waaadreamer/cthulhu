@@ -56,12 +56,11 @@ class Turn:
 
 
 class Node:
-    def __init__(self, state_dir, *, capacity=2, backends=None, link=None, protected=(), app=None, managed=False,
+    def __init__(self, state_dir, *, backends=None, link=None, protected=(), app=None, managed=False,
                  model_proxy=None):
         self.state_dir = Path(state_dir).resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.store = Store(self.state_dir / 'node.db')
-        self.capacity = capacity
         self.model_proxy = model_proxy
         # 网页可以打开节点上的文件，但凭证与状态目录除外（含 node.json 里的节点 token）。
         self.protected = [Path(p).resolve() for p in (self.state_dir, *protected)]
@@ -122,7 +121,7 @@ class Node:
     async def sync_once(self):
         events = self.outbox()
         started = time.monotonic()
-        result = await self.link.request({'op': 'sync', 'instance': self.instance, 'capacity': self.capacity,
+        result = await self.link.request({'op': 'sync', 'instance': self.instance, 'base': str(self.state_dir.parent),
                                           'backends': self.backends, 'version': VERSION,
                                           'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE], 'code': self.code,
                                           'managed': self.managed, 'events': events})
