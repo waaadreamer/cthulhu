@@ -16,6 +16,7 @@ from .domain.review import Review
 from .domain.tasks import Tasks
 from .files import FileService
 from .update import FEATURE as UPDATE_FEATURE
+from .history import History
 from .hub import Hub
 from .store import Store
 from .tools import dispatch, tools_for
@@ -37,6 +38,8 @@ class Center(Messages, Questions, Tasks, Review):
         self.hub = Hub(self)
         self.feishu = None  # 由 App 按启动参数挂载；没有它时中心完全不接触飞书
         self.files = FileService(self)
+        # Master 的 cwd 就是状态目录，所以它可以直接 grep master-history/。
+        self.history = History(self.store, self.state_dir / 'master-history')
         self.release = None  # 由 App 设置为中心正在运行的代码包；没有时不发起远程更新
         self.install_url = None  # 由 App 设置：网页据此给出节点恢复命令
         self.deployer = None   # 由 App 挂载：网页一键更新中心
@@ -458,3 +461,6 @@ class Center(Messages, Questions, Tasks, Review):
             self.expire_questions(now)
             self.tick_tasks(now)
             self.tick_review(now)
+        # 导出放在事务外：它只读已提交的事件、只写本目录文件；失败不能拖垮任务与审核的定时检查。
+        try: self.history.sync()
+        except Exception as e: print('导出 Master 消息失败：' + str(e), flush=True)
