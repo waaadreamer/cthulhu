@@ -141,3 +141,13 @@ class PlanTests(unittest.TestCase):
         self.assertNotIn('update', r)
         with self.assertRaisesRegex(ValueError, '没有待下发'):
             self.c.hub.request('dev', {'op': 'release'})
+
+
+class PackagePatternTests(unittest.TestCase):
+    def test_package_files_match_rules_already_deployed_on_nodes(self):
+        """节点用旧版规则校验更新包；包里若有旧规则匹配不到的文件，摘要必然不一致，节点全部拒绝更新。"""
+        from cthulhu_v4.update import PATTERNS
+        deployed = ('pyproject.toml', 'requirements.txt', 'README.md', 'AGENTS.md', 'deploy/install.sh',
+                    'cthulhu_v4/**/*.py', 'skills/*.md', 'static/**/*')
+        self.assertEqual(PATTERNS, deployed)
+

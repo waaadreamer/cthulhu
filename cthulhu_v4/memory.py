@@ -2,7 +2,7 @@
 
 为什么不直接打开 Codex 原生 Memories：原生流程只读每个线程 rollout 的最后 8MB，
 而 Master 的 rollout 绝大部分是工具输出；它还只处理闲置线程，一直在用的 Master 线程永远轮不到。
-这里沿用 Codex 的两阶段提示词与产物格式（skills/memory/，Apache-2.0），
+这里沿用 Codex 的两阶段提示词与产物格式（skills/memory_*.md，Apache-2.0，见 skills/LICENSE-codex.md），
 输入换成 history.py 导出的干净消息原文：
 - 阶段 1：每段消息（按天、按大小切）单独抽取 raw_memory 与 rollout_summary；
 - 阶段 2：整合 agent 在记忆目录里按 git 基线的增量改写 MEMORY.md、memory_summary.md 与 skills/。
@@ -25,7 +25,12 @@ from . import proxy
 from .history import rows
 from .util import ROOT
 
-TEMPLATES = ROOT / 'skills' / 'memory'
+SKILLS = ROOT / 'skills'
+# 模板只能放在 skills/ 顶层的 .md：旧版节点按 skills/*.md 校验更新包，子目录会让它们算出不同的代码摘要。
+TEMPLATE = {k: SKILLS / f'memory_{k}.md' for k in ('stage_one_system', 'stage_one_input', 'consolidation')}
+SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['rollout_summary', 'rollout_slug', 'raw_memory'],
+          'properties': {'rollout_summary': {'type': 'string'}, 'rollout_slug': {'type': ['string', 'null']},
+                         'raw_memory': {'type': 'string'}}}
 WINDOW = (3, 6)            # 每天凌晨（中心本地时间）提炼并换会话；主人此时通常不用
 CHUNK_BYTES = 300_000      # 中文按 bytes/4 估 token 会严重低估；实测 330KB 一段在阶段 1 预算内
 PARALLEL = 4               # 阶段 1 同时运行的 codex exec 数
@@ -186,15 +191,16 @@ class Memory:
             raise RuntimeError(f'codex exec 退出码 {proc.returncode}：' + err.decode(errors='replace')[-300:])
 
     async def stage1(self, ch, model):
-        prompt = ((TEMPLATES / 'stage_one_input.md').read_text()
+        prompt = (TEMPLATE['stage_one_input'].read_text()
                   .replace('{{ rollout_path }}', f"{self.c.state_dir / 'master-history' / (ch['day'] + '.md')}（#{ch['first']}–#{ch['last']}）")
                   .replace('{{ rollout_cwd }}', str(self.c.state_dir))
                   .replace('{{ rollout_contents }}', ''.join(ch['parts'])))
         with tempfile.TemporaryDirectory() as d:
-            out = Path(d) / 'out.json'
+            out, schema = Path(d) / 'out.json', Path(d) / 'schema.json'
+            schema.write_text(json.dumps(SCHEMA))
             argv = self.exec_args(model) + ['-s', 'read-only',
-                '-c', 'model_instructions_file=' + json.dumps(str(TEMPLATES / 'stage_one_system.md')),
-                '--output-schema', str(TEMPLATES / 'stage_one_schema.json'), '-o', str(out), '-']
+                '-c', 'model_instructions_file=' + json.dumps(str(TEMPLATE['stage_one_system'])),
+                '--output-schema', str(schema), '-o', str(out), '-']
             await self.call(argv, prompt, d, STAGE1_TIMEOUT)
             result = json.loads(out.read_text())
         if not all(isinstance(result.get(k), str) for k in ('raw_memory', 'rollout_summary')):
@@ -281,7 +287,7 @@ class Memory:
             self.baseline(empty=True)
         diff = self.root / 'phase2_workspace_diff.md'
         self.write_diff()
-        prompt = ((TEMPLATES / 'consolidation.md').read_text()
+        prompt = (TEMPLATE['consolidation'].read_text()
                   .replace('{{ memory_root }}', str(self.root))
                   .replace('{{ phase2_workspace_diff_file }}', diff.name)
                   .replace('{{ memory_extensions_folder_structure }}', '')

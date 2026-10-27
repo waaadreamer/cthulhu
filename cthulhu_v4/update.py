@@ -25,8 +25,10 @@ from pathlib import Path
 
 FEATURE = 'update'
 # 进入更新包的文件。测试与状态目录不进包；安装脚本也要随包更新，重跑命令时用的是新脚本。
+# 节点用自己（旧版本）的 PATTERNS 对解包结果算摘要再与中心比对，所以这里不能扩大范围：
+# 新增匹配旧规则之外的文件，所有在线节点都会判定“与中心版本不一致”而拒绝更新。
 PATTERNS = ('pyproject.toml', 'requirements.txt', 'README.md', 'AGENTS.md', 'deploy/install.sh',
-            'cthulhu_v4/**/*.py', 'skills/**/*', 'static/**/*')
+            'cthulhu_v4/**/*.py', 'skills/*.md', 'static/**/*')
 MARKER = 'update.json'
 MAX_ATTEMPTS = 3
 

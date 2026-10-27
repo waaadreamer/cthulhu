@@ -154,8 +154,8 @@ class MemoryTests(unittest.TestCase):
         from cthulhu_v4.update import files
         from cthulhu_v4.util import ROOT
         shipped = files(ROOT)
-        for name in ('consolidation.md', 'stage_one_system.md', 'stage_one_input.md', 'stage_one_schema.json'):
-            self.assertIn('skills/memory/' + name, shipped)              # 节点与中心更新后才能找到模板
+        for name in ('consolidation', 'stage_one_system', 'stage_one_input'):
+            self.assertIn(f'skills/memory_{name}.md', shipped)           # 中心更新后才能找到模板
 
     def test_new_master_thread_gets_summary(self):
         self.assertEqual(read_path(self.tmp.name), '')
