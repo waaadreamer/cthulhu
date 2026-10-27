@@ -150,6 +150,13 @@ class MemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.m.seed(src, through, '/old')                            # 已有记忆：不覆盖
 
+    def test_templates_ship_in_update_package(self):
+        from cthulhu_v4.update import files
+        from cthulhu_v4.util import ROOT
+        shipped = files(ROOT)
+        for name in ('consolidation.md', 'stage_one_system.md', 'stage_one_input.md', 'stage_one_schema.json'):
+            self.assertIn('skills/memory/' + name, shipped)              # 节点与中心更新后才能找到模板
+
     def test_new_master_thread_gets_summary(self):
         self.assertEqual(read_path(self.tmp.name), '')
         self.say('偏好')

@@ -26,7 +26,7 @@ from pathlib import Path
 FEATURE = 'update'
 # 进入更新包的文件。测试与状态目录不进包；安装脚本也要随包更新，重跑命令时用的是新脚本。
 PATTERNS = ('pyproject.toml', 'requirements.txt', 'README.md', 'AGENTS.md', 'deploy/install.sh',
-            'cthulhu_v4/**/*.py', 'skills/*.md', 'static/**/*')
+            'cthulhu_v4/**/*.py', 'skills/**/*', 'static/**/*')
 MARKER = 'update.json'
 MAX_ATTEMPTS = 3
 
