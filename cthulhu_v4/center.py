@@ -209,6 +209,27 @@ class Center(Messages, Questions, Tasks, Review):
                task=self.task_id(a['id']), data={'previous': previous, 'current': {'backend': backend, 'model': model, 'reasoning_effort': effort}},
                visible=True)
 
+    def rotate_master(self, reason):
+        """在 Master 完全空闲时换新原生会话；返回是否已换。
+
+        只在没有运行中回合、没有排队输入时换：换在回合中途会让节点用新线程接着跑旧回合，
+        排队输入则会落到一个看不到前文的新线程里。旧会话 ID 留档，原生会话文件仍在节点上可回查；
+        epoch 加一让节点不再复用本机记着的旧会话指针。
+        """
+        s = self.store
+        with s.atomic():
+            a = s.get('agent', 'master')
+            if a['paused'] or a['status'] != 'idle' or not a.get('session') \
+                    or self.hub.busy('master') or self.has_queued('master'):
+                return False
+            a.setdefault('previous_sessions', []).append(
+                {k: a.get(k) for k in ('backend', 'model', 'reasoning_effort', 'session')} | {'at': self.clock(), 'reason': reason})
+            a.update(session=None, epoch=a.get('epoch', 0) + 1, failures=0)
+            s.put('agent', a)
+            s.emit('master_rotated', f"Master 换新原生会话（{reason}）；旧会话 {a['previous_sessions'][-1]['session']} 留档可回查",
+                   actor='system', target='master', visible=True)
+        return True
+
     # ---- 查询 ----
     def task_id(self, agent):
         return next((t['id'] for t in self.store.all('task') if t['agent'] == agent), None)

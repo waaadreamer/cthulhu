@@ -7,7 +7,7 @@ const LINES = {
   task_created: '新任务', instruction: '已下达', completed: '审核通过', review_requested: '申请结束', task_failed: '未达成', review_returned: '退回', task_reopened: '重新打开', question: '提问', ask_owner: '需要你决定',
   answer: '回答', question_timeout: '提问超时', control: '控制', overdue: '超出期限', node_attention: '节点异常',
   interrupted: '已打断', urgent: '加急', runtime_error: '运行失败', master_attention: 'Master 已暂停',
-  master_config: '配置', master_control: 'Master', node_joined: '节点', memory: '偏好', deadline: 'DDL 调整',
+  master_config: '配置', master_control: 'Master', node_joined: '节点', memory: '偏好', memory_digest: '记忆整理', master_rotated: '换新会话', deadline: 'DDL 调整',
   recovery: '恢复', recovery_exhausted: '续办已暂停', orphan_process: '旧进程',
   question_delegated: '交给 Master', deploy: '更新', deploy_failed: '更新失败', feishu_ignored: '飞书·忽略', feishu_denied: '飞书·拒绝', feishu_call: '飞书操作', feishu_acl: '飞书权限', feishu_error: '飞书异常', node_update: '节点更新', node_updated: '节点更新', node_update_failed: '更新失败', settings: '设置', agent_config: '模型', node_config: '节点',
 };

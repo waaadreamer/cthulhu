@@ -33,6 +33,14 @@ def entry(seq, at, kind, actor, target, task, text):
     return t.strftime('%Y-%m-%d'), head + '\n' + text.strip() + '\n\n'
 
 
+def rows(store, after, upto):
+    """(seq, at, day, 文本) 序列，按 seq 升序；过滤规则与日文件一致，记忆提炼也用它取原文。"""
+    for row in store.db.execute(QUERY, (after, upto)):
+        e = entry(*row)
+        if e:
+            yield row[0], row[1], e[0], e[1]
+
+
 class History:
     def __init__(self, store, root):
         self.store, self.root = store, Path(root)
@@ -65,10 +73,8 @@ class History:
                 break
             end = min(top, self.cursor + WINDOW)
             out = {}
-            for row in self.store.db.execute(QUERY, (self.cursor, end)):
-                e = entry(*row)
-                if e:
-                    out.setdefault(e[0], []).append(e[1])
+            for _, _, day, text in rows(self.store, self.cursor, end):
+                out.setdefault(day, []).append(text)
             for day, items in out.items():
                 path = self.root / f'{day}.md'
                 with open(path, 'a', encoding='utf-8') as f:

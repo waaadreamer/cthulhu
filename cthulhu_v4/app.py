@@ -91,6 +91,9 @@ class App:
                       asyncio.create_task(self.deployer.watch()), asyncio.create_task(self.monitor.run())]
         if c.feishu:
             self.tasks.append(asyncio.create_task(c.feishu.run()))
+        from .memory import Memory
+        self.memory = Memory(c, model_proxy=self.model_proxy)
+        self.tasks.append(asyncio.create_task(self.memory.run()))
 
     async def scheduler(self):
         c = self.center

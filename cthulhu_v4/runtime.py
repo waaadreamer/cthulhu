@@ -13,6 +13,7 @@ import time
 import uuid
 
 from . import proxy
+from .memory import read_path
 from .util import ROOT, process_identity
 
 
@@ -91,7 +92,11 @@ class ProcessRuntime:
 
     def instructions(self):
         role = 'master' if self.a['id'] == 'master' else 'old_one'
-        return (ROOT / 'skills' / (role + '.md')).read_text() + '\n你的 agent ID：' + self.a['id']
+        text = (ROOT / 'skills' / (role + '.md')).read_text() + '\n你的 agent ID：' + self.a['id']
+        if role == 'master':
+            # Master 的 cwd 是中心状态目录；每晚整理的记忆摘要随新线程的 developer 指令下发。
+            text += read_path(self.a['cwd'])
+        return text
 
     def mcp(self):
         return {'command': sys.executable, 'args': [str(ROOT / 'cthulhu_v4' / 'mcp.py')],
