@@ -106,6 +106,8 @@ console.log('test_model: files ok');
   assert.deepEqual(modelChoices(node, 'codex').map(m => m.id), ['gpt-a', 'gpt-b']);
   assert.equal(modelChoices(node, 'codex')[0].label, 'GPT-A（gpt-a）');
   assert.equal(modelChoices(node, 'claude')[0].label, 'opus（claude-opus-9-9）');
+  assert.deepEqual(modelChoices(node, 'claude')[0], { id: 'claude-opus-9-9', title: 'opus', sub: 'claude-opus-9-9', label: 'opus（claude-opus-9-9）', tag: '' });
+  assert.equal(modelChoices(node, 'codex')[1].sub, '');                                // 显示名就是 id：不重复显示
   assert.deepEqual(modelChoices(node, 'codex', 'old-model').map(m => m.id), ['old-model', 'gpt-a', 'gpt-b']);
   assert.deepEqual(modelChoices({}, 'codex').map(m => m.id), FALLBACK.codex);          // 节点未上报：内置列表
   assert.deepEqual(effortChoices(node, 'codex', 'gpt-a'), ['low', 'ultra']);

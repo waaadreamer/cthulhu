@@ -372,6 +372,26 @@ dialog .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 dialog p { margin: 0; }
 dialog input:disabled { opacity: .5; }
+dialog .chk { justify-content: flex-start; } dialog .chk input { width: auto; flex: none; margin: 0; }
+/* 模型选择：可滚动的卡片列表。名字在上、实际传给 CLI 的完整名在下（等宽），当前选中项用强调色描边。 */
+dialog .field { display: flex; flex-direction: column; gap: 6px; }
+dialog .field[hidden] { display: none; }
+.field-t { display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; color: var(--ink-2); }
+.field-note { margin-left: auto; font-size: 11.5px; color: var(--ink-3); }
+.pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; max-height: 300px; overflow: auto;
+        padding: 6px; background: var(--bg); border: 1px solid var(--line-2); border-radius: 11px; scrollbar-width: thin; }
+.pick-o { display: flex; flex-direction: column; gap: 1px; min-width: 0; text-align: left; cursor: pointer; padding: 7px 10px;
+          border: 1px solid transparent; border-radius: 8px; background: var(--s1); transition: background .12s, border-color .12s; }
+.pick-o:hover { background: var(--s2); }
+.pick-o:focus-visible { outline: none; border-color: var(--line-2); }
+.pick-o[aria-selected=true] { border-color: var(--live); background: color-mix(in srgb, var(--live) 12%, var(--s1)); }
+.pick-h { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pick-n { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-o[aria-selected=true] .pick-n { color: var(--live); font-weight: 600; }
+.pick-s { font: 11px/1.4 var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-tag { margin-left: auto; flex: none; font-size: 10.5px; padding: 0 6px; border-radius: 5px; background: var(--s3); color: var(--ink-2); }
+.pick-o.soft .pick-n { color: var(--ink-2); }
+.pick-custom { font-family: var(--mono); font-size: 12.5px; }
 .cmd-box { background: var(--bg); border: 1px solid color-mix(in srgb, var(--live) 35%, transparent); border-radius: 9px; padding: 11px 13px; white-space: pre-wrap; word-break: break-all; margin: 0; color: var(--live); }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--s2); border: 1px solid var(--bad); color: var(--ink); padding: 9px 18px; border-radius: 10px; z-index: 20; max-width: 90vw; box-shadow: var(--shadow); }
 

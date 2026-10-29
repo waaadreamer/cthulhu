@@ -3,13 +3,19 @@
 export const FALLBACK = { codex: ['gpt-6-astra', 'gpt-6.1-sol'], claude: ['fable', 'opus', 'sonnet', 'haiku'], demo: [] };
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
-// 返回 [{id, label}]：当前保存的模型即使不在目录里也保留，避免打开对话框时被静默改掉。
+// 返回 [{id, title, sub, label, tag}]：title 是好认的名字（显示名或别名），sub 是实际传给 CLI 的完整名。
+// 当前保存的模型即使不在目录里也保留，避免打开对话框时被静默改掉。
 export function modelChoices(node, backend, current) {
   const found = node?.models?.[backend]?.list;
   const out = found?.length
-    ? found.map(m => ({ id: m.id, label: m.alias ? `${m.alias}（${m.id}）` : (m.name && m.name !== m.id ? `${m.name}（${m.id}）` : m.id) }))
-    : (FALLBACK[backend] || []).map(id => ({ id, label: id }));
-  if (current && !out.some(m => m.id === current)) out.unshift({ id: current, label: current + '（当前，不在该节点目录中）' });
+    ? found.map(m => {
+        const title = m.alias || (m.name && m.name !== m.id ? m.name : m.id);
+        return { id: m.id, title, sub: title === m.id ? '' : m.id, label: title === m.id ? m.id : `${title}（${m.id}）`,
+                 tag: m.default ? 'CLI 默认' : '' };
+      })
+    : (FALLBACK[backend] || []).map(id => ({ id, title: id, sub: '', label: id, tag: '' }));
+  if (current && !out.some(m => m.id === current))
+    out.unshift({ id: current, title: current, sub: '当前设置，不在该节点目录中', label: current + '（当前，不在该节点目录中）', tag: '' });
   return out;
 }
 

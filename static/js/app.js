@@ -404,6 +404,28 @@ function fillEfforts(select, node, backend, model) {
   if (keep && !list.includes(keep)) select.append(el('option', { value: keep, text: keep + '（该模型不支持）' }));
   select.value = keep;
 }
+// 模型卡片列表：首项“CLI 默认”（空值），末项“自定义…”可填目录外的名字；选择写回表单里的隐藏 model 字段。
+// 目录里没有当前值时 modelChoices 已把它放在最前，所以打开对话框不会悄悄换掉现有设置。
+function fillPicker(box, hidden, custom, choices, onPick) {
+  const value = hidden.value, known = !value || choices.some(c => c.id === value);
+  const pick = (v, isCustom) => {
+    hidden.value = isCustom ? custom.value.trim() : v;
+    custom.hidden = !isCustom;
+    for (const o of box.children) o.setAttribute('aria-selected', String(isCustom ? o.dataset.custom === '1' : !o.dataset.custom && o.dataset.value === v));
+    if (isCustom) custom.focus();
+    onPick();
+  };
+  const card = (c, attrs = {}) => el('button', { type: 'button', role: 'option', class: 'pick-o' + (attrs.soft ? ' soft' : ''), 'data-value': c.id,
+      'data-custom': attrs.custom ? '1' : null, title: c.label || c.title, onclick: () => pick(c.id, !!attrs.custom) },
+    el('span', { class: 'pick-h' }, el('span', { class: 'pick-n', text: c.title }), c.tag ? el('span', { class: 'pick-tag', text: c.tag }) : null),
+    c.sub ? el('span', { class: 'pick-s', text: c.sub }) : null);
+  box.replaceChildren(card({ id: '', title: '留空', sub: '用 CLI 默认模型' }, { soft: true }),
+    ...choices.map(c => card(c)), card({ id: '', title: '自定义…', sub: '输入其他模型名' }, { soft: true, custom: true }));
+  custom.oninput = () => { hidden.value = custom.value.trim(); onPick(); };
+  if (!known) custom.value = value;
+  pick(known ? value : '', !known);
+  box.querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest' });
+}
 function modelLabel(a) {
   return [a.model || (a.backend === 'demo' ? '模拟' : '默认模型'), a.backend === 'codex' && a.reasoning_effort ? a.reasoning_effort : null,
           a.backend !== 'demo' ? a.backend : null].filter(Boolean).join('  ');
@@ -418,14 +440,22 @@ function openModel(aid) {
   f.elements.backend.value = a.backend; f.elements.model.value = a.model || '';
   f.elements.reasoning_effort.replaceChildren(el('option', { value: a.reasoning_effort || '', text: a.reasoning_effort || '默认' }));
   f.elements.reasoning_effort.value = a.reasoning_effort || '';
+  delete f.dataset.backend; $('#model-custom').value = '';
   syncModelForm(a);
   dialog('#model-dialog');
 }
 function syncModelForm(a = snap.agents.find(x => x.id === $('#model-form').dataset.agent)) {
   const f = $('#model-form'), b = f.elements.backend.value;
   const node = snap.nodes.find(n => n.id === (a.node || 'local'));
-  $('#model-list').replaceChildren(...modelChoices(node, b, b === a.backend ? a.model : null).map(m => el('option', { value: m.id, label: m.label })));
   $('#model-catalog').textContent = catalogNote(node, b);
+  if (b !== f.dataset.backend) {
+    // 只在换后端时重建卡片：选模型只更新推理强度，不重排列表、不丢滚动位置。
+    f.dataset.backend = b;
+    f.elements.model.value = b === a.backend ? (a.model || '') : '';   // 切回原后端时恢复已保存的模型
+    fillPicker($('#model-pick'), f.elements.model, $('#model-custom'), modelChoices(node, b, b === a.backend ? a.model : null),
+               () => fillEfforts(f.elements.reasoning_effort, node, f.elements.backend.value, f.elements.model.value));
+  }
+  $('#model-pick').closest('.field').hidden = b === 'demo';
   fillEfforts(f.elements.reasoning_effort, node, b, f.elements.model.value);
   f.elements.reasoning_effort.closest('label').hidden = b !== 'codex';
   const fresh = b !== a.backend;
@@ -434,7 +464,6 @@ function syncModelForm(a = snap.agents.find(x => x.id === $('#model-form').datas
     : a.session ? '沿用当前原生会话，下一回合起生效。' : '下一回合起生效。';
 }
 $('#model-form').elements.backend.onchange = () => syncModelForm();
-$('#model-form').elements.model.oninput = () => syncModelForm();
 $('#model-form').onsubmit = e => {
   e.preventDefault(); const f = e.target;
   act(async () => {
@@ -515,6 +544,7 @@ function openNode(id) {
   $('#node-recover-copy').onclick = () => copyText($('#node-recover-cmd'), $('#node-recover-copy'), '复制恢复命令');
   $('#node-retry').hidden = n.update?.state !== 'failed';
   $('#node-retry').onclick = () => act(async () => { await api('api/node/update', { node: id }); $('#node-dialog').close(); });
+  delete f.dataset.backend; $('#node-custom').value = '';
   syncNodeForm(); dialog('#node-dialog');
 }
 function recoverCommand(n) {
@@ -532,13 +562,19 @@ async function copyText(box, button, label) {
 function syncNodeForm() {
   const f = $('#node-form'), b = f.elements.backend.value;
   const n = snap.nodes.find(x => x.id === f.dataset.node), d = n?.defaults || {};
-  $('#node-models').replaceChildren(...modelChoices(n, b, b === d.backend ? d.model : null).map(m => el('option', { value: m.id, label: m.label })));
   $('#node-catalog').textContent = b ? catalogNote(n, b) : '';
+  if (b !== f.dataset.backend) {
+    f.dataset.backend = b;
+    f.elements.model.value = b === (d.backend || '') ? (d.model || '') : '';
+    fillPicker($('#node-pick'), f.elements.model, $('#node-custom'), modelChoices(n, b, b === d.backend ? d.model : null),
+               () => fillEfforts(f.elements.reasoning_effort, n, f.elements.backend.value, f.elements.model.value));
+  }
+  // “同 Master”没有自己的模型：隐藏整个模型区，保存时 model 为空。
+  $('#node-model-field').hidden = !b || b === 'demo';
   fillEfforts(f.elements.reasoning_effort, n, b, f.elements.model.value);
-  f.elements.model.disabled = !b; f.elements.reasoning_effort.closest('label').hidden = b !== 'codex';
+  f.elements.reasoning_effort.closest('label').hidden = b !== 'codex';
 }
 $('#node-form').elements.backend.onchange = syncNodeForm;
-$('#node-form').elements.model.oninput = syncNodeForm;
 $('#node-form').onsubmit = e => {
   e.preventDefault(); const f = e.target;
   act(async () => {
