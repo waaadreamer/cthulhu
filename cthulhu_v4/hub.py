@@ -9,6 +9,7 @@
 import re
 import secrets
 
+from .models import clean as clean_models
 from .util import LEASE, LOCAL, MAX_TURNS, PROTOCOL, TERMINAL
 from .tools import FEISHU_TOOLS
 
@@ -176,6 +177,9 @@ class Hub:
                      backends=[b for b in body.get('backends', []) if b in {'demo', 'codex', 'claude'}],
                      host=body.get('host'), home=body.get('home'), features=list(body.get('features') or []),
                      code=body.get('code'), managed=bool(body.get('managed')), base=body.get('base'))
+            if 'models' in body:
+                # 节点只在列表变化时上报；未上报时沿用中心保存的上一份。
+                n['models'] = clean_models(body['models'])
             for e in body.get('events', []):
                 if e['seq'] <= n['ack']:
                     continue

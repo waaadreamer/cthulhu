@@ -119,10 +119,11 @@
     <p class="muted" id="model-who"></p>
     <div class="row">
       <label>后端<select name="backend"></select></label>
-      <label>推理强度<select name="reasoning_effort"><option value="">默认</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></label>
+      <label>推理强度<select name="reasoning_effort"><option value="">默认</option></select></label>
     </div>
     <label>模型<input name="model" list="model-list" placeholder="留空使用 CLI 默认模型" autocomplete="off"></label>
     <datalist id="model-list"></datalist>
+    <p id="model-catalog" class="muted"></p>
     <p id="model-note" class="muted"></p>
     <label id="model-new" class="chk" hidden><input type="checkbox" name="new_session"> 我了解：将开始新的原生会话</label>
     <div class="actions"><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>
@@ -142,10 +143,11 @@
     <p class="muted">新任务没有指定时使用这些默认值，已有任务不受影响。</p>
     <div class="row">
       <label>默认后端<select name="backend"></select></label>
-      <label>推理强度<select name="reasoning_effort"><option value="">默认</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></label>
+      <label>推理强度<select name="reasoning_effort"><option value="">默认</option></select></label>
     </div>
     <label>默认模型<input name="model" list="node-models" placeholder="留空使用 CLI 默认模型" autocomplete="off"></label>
     <datalist id="node-models"></datalist>
+    <p id="node-catalog" class="muted"></p>
     <label>默认工作目录<input name="cwd" autocomplete="off"></label>
     <p class="muted">原生 CLI 从工作目录读取 AGENTS.md / CLAUDE.md。留空时，每个任务必须自己填写目录。</p>
     <div class="actions"><button id="node-retry" class="btn" type="button" hidden>重试更新</button><button id="node-recover-copy" class="btn" type="button" hidden>复制恢复命令</button><button class="btn" type="button" data-close>取消</button><button class="btn primary" type="submit">保存</button></div>

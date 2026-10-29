@@ -6,6 +6,7 @@ import { Model } from './model.js';
 import { View, Live } from './render.js';
 import { Chat } from './chat.js';
 import { applyDelta } from './delta.js';
+import { modelChoices, effortChoices, catalogNote } from './models.js';
 
 const STATE = { running: '进行中', waiting: '等待', paused: '已暂停', review: '待审核', completed: '已完成', failed: '未达成', cancelled: '已取消' };
 const DONE = new Set(['completed', 'failed', 'cancelled']);
@@ -396,7 +397,13 @@ $('#composer').onsubmit = e => {
 };
 
 // ---- 模型 ----
-const MODELS = { codex: ['gpt-6-astra', 'gpt-6.1-sol'], claude: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'], demo: [] };
+// 推理强度下拉跟随所选模型：只列该模型支持的档位；当前值不在其中时保留并标出，不静默改掉。
+function fillEfforts(select, node, backend, model) {
+  const keep = select.value, list = effortChoices(node, backend, model);
+  select.replaceChildren(el('option', { value: '', text: '默认' }), ...list.map(e => el('option', { value: e, text: e })));
+  if (keep && !list.includes(keep)) select.append(el('option', { value: keep, text: keep + '（该模型不支持）' }));
+  select.value = keep;
+}
 function modelLabel(a) {
   return [a.model || (a.backend === 'demo' ? '模拟' : '默认模型'), a.backend === 'codex' && a.reasoning_effort ? a.reasoning_effort : null,
           a.backend !== 'demo' ? a.backend : null].filter(Boolean).join('  ');
@@ -408,13 +415,18 @@ function openModel(aid) {
   $('#model-who').textContent = aid === 'master' ? 'Master' : (snap.tasks.find(t => t.agent === aid)?.title || aid);
   f.elements.backend.replaceChildren(...['codex', 'claude', 'demo'].filter(b => !node?.backends?.length || node.backends.includes(b))
     .map(b => el('option', { value: b, text: b })));
-  f.elements.backend.value = a.backend; f.elements.model.value = a.model || ''; f.elements.reasoning_effort.value = a.reasoning_effort || '';
+  f.elements.backend.value = a.backend; f.elements.model.value = a.model || '';
+  f.elements.reasoning_effort.replaceChildren(el('option', { value: a.reasoning_effort || '', text: a.reasoning_effort || '默认' }));
+  f.elements.reasoning_effort.value = a.reasoning_effort || '';
   syncModelForm(a);
   dialog('#model-dialog');
 }
 function syncModelForm(a = snap.agents.find(x => x.id === $('#model-form').dataset.agent)) {
   const f = $('#model-form'), b = f.elements.backend.value;
-  $('#model-list').replaceChildren(...MODELS[b].map(m => el('option', { value: m })));
+  const node = snap.nodes.find(n => n.id === (a.node || 'local'));
+  $('#model-list').replaceChildren(...modelChoices(node, b, b === a.backend ? a.model : null).map(m => el('option', { value: m.id, label: m.label })));
+  $('#model-catalog').textContent = catalogNote(node, b);
+  fillEfforts(f.elements.reasoning_effort, node, b, f.elements.model.value);
   f.elements.reasoning_effort.closest('label').hidden = b !== 'codex';
   const fresh = b !== a.backend;
   $('#model-new').hidden = !fresh; f.elements.new_session.required = fresh && !!a.session;
@@ -422,6 +434,7 @@ function syncModelForm(a = snap.agents.find(x => x.id === $('#model-form').datas
     : a.session ? '沿用当前原生会话，下一回合起生效。' : '下一回合起生效。';
 }
 $('#model-form').elements.backend.onchange = () => syncModelForm();
+$('#model-form').elements.model.oninput = () => syncModelForm();
 $('#model-form').onsubmit = e => {
   e.preventDefault(); const f = e.target;
   act(async () => {
@@ -491,6 +504,7 @@ function openNode(id) {
   f.elements.backend.replaceChildren(el('option', { value: '', text: '同 Master' }),
     ...['codex', 'claude', 'demo'].filter(b => !n.backends?.length || n.backends.includes(b)).map(b => el('option', { value: b, text: b })));
   f.elements.backend.value = d.backend || ''; f.elements.model.value = d.model || '';
+  f.elements.reasoning_effort.replaceChildren(el('option', { value: d.reasoning_effort || '', text: d.reasoning_effort || '默认' }));
   f.elements.reasoning_effort.value = d.reasoning_effort || ''; f.elements.cwd.value = d.cwd || '';
   f.elements.cwd.placeholder = (n.home || '/home/user') + '/project';
   f.elements.max_turns.value = n.max_turns || snap.max_turns;
@@ -517,10 +531,14 @@ async function copyText(box, button, label) {
 }
 function syncNodeForm() {
   const f = $('#node-form'), b = f.elements.backend.value;
-  $('#node-models').replaceChildren(...(MODELS[b] || []).map(m => el('option', { value: m })));
+  const n = snap.nodes.find(x => x.id === f.dataset.node), d = n?.defaults || {};
+  $('#node-models').replaceChildren(...modelChoices(n, b, b === d.backend ? d.model : null).map(m => el('option', { value: m.id, label: m.label })));
+  $('#node-catalog').textContent = b ? catalogNote(n, b) : '';
+  fillEfforts(f.elements.reasoning_effort, n, b, f.elements.model.value);
   f.elements.model.disabled = !b; f.elements.reasoning_effort.closest('label').hidden = b !== 'codex';
 }
 $('#node-form').elements.backend.onchange = syncNodeForm;
+$('#node-form').elements.model.oninput = syncNodeForm;
 $('#node-form').onsubmit = e => {
   e.preventDefault(); const f = e.target;
   act(async () => {

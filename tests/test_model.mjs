@@ -96,3 +96,23 @@ console.log('test_model: ok');
   assert.deepEqual(files('sali 上的 /a/b'), ['?::/a/b']);
 }
 console.log('test_model: files ok');
+
+// 模型选择：以节点上报的目录为准；当前值不在目录里时保留并标出；推理强度跟随所选模型。
+{
+  const { modelChoices, effortChoices, catalogNote, FALLBACK, EFFORTS } = await import('../static/js/models.js');
+  const node = { models: {
+    codex: { list: [{ id: 'gpt-a', name: 'GPT-A', efforts: ['low', 'ultra'] }, { id: 'gpt-b', name: 'gpt-b' }], at: 1000, error: null },
+    claude: { list: [{ id: 'claude-opus-9-9', name: 'opus → claude-opus-9-9', alias: 'opus' }], at: 1000, error: '超时' } } };
+  assert.deepEqual(modelChoices(node, 'codex').map(m => m.id), ['gpt-a', 'gpt-b']);
+  assert.equal(modelChoices(node, 'codex')[0].label, 'GPT-A（gpt-a）');
+  assert.equal(modelChoices(node, 'claude')[0].label, 'opus（claude-opus-9-9）');
+  assert.deepEqual(modelChoices(node, 'codex', 'old-model').map(m => m.id), ['old-model', 'gpt-a', 'gpt-b']);
+  assert.deepEqual(modelChoices({}, 'codex').map(m => m.id), FALLBACK.codex);          // 节点未上报：内置列表
+  assert.deepEqual(effortChoices(node, 'codex', 'gpt-a'), ['low', 'ultra']);
+  assert.deepEqual(effortChoices(node, 'codex', 'unknown'), EFFORTS);
+  assert.deepEqual(effortChoices(node, 'claude', 'claude-opus-9-9'), []);
+  assert.equal(catalogNote(node, 'codex', 1000 + 30 * 60), '2 个模型，30 分钟前更新');
+  assert.match(catalogNote(node, 'claude', 1000), /上次发现失败：超时/);
+  assert.match(catalogNote({}, 'codex'), /尚未上报/);
+}
+console.log('test_model: models ok');

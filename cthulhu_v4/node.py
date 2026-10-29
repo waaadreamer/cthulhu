@@ -16,7 +16,9 @@ import socket
 import time
 import uuid
 
+from . import proxy
 from .files import FEATURE, MAX_BYTES, read_path
+from .models import REFRESH as MODELS_REFRESH, discover
 from .runtime import make_runtime
 from .update import FEATURE as UPDATE_FEATURE, digest, install as install_release, mark as mark_update
 from .store import Store
@@ -72,6 +74,9 @@ class Node:
         self.restart = False
         self.on_synced = None
         self.backends = backends or ['demo'] + [b for b in ('codex', 'claude') if shutil.which(b)]
+        # 本机可用模型：后台定期发现；有变化时随下一次同步上报一次，中心持久保存。
+        self.models, self.models_dirty = {}, False
+        self.discover_models = not backends   # 测试显式指定后端时不启动真实 CLI
         self.link = link             # 由传输层注入：request(body) → result
         self.bridge_url = ''         # 本机 MCP 桥（HTTP loopback）
         self.active, self.turns, self.expires = {}, {}, {}
@@ -118,16 +123,34 @@ class Node:
     def hello(self):
         return {'protocol': PROTOCOL, 'version': VERSION, 'instance': self.instance}
 
+    async def refresh_models(self):
+        env = proxy.model_env(os.environ, self.model_proxy)
+        env.pop('CLAUDECODE', None)
+        while not self.closed:
+            try:
+                found = await discover(self.backends, env, self.models, cwd=self.state_dir / 'model-probe')
+                if found != self.models:
+                    self.models, self.models_dirty = found, True
+                    self.kick.set()
+            except Exception as e:
+                print('模型发现失败：' + str(e), flush=True)
+            await asyncio.sleep(MODELS_REFRESH)
+
     async def sync_once(self):
         events = self.outbox()
         started = time.monotonic()
-        result = await self.link.request({'op': 'sync', 'instance': self.instance, 'base': str(self.state_dir.parent),
+        dirty = self.models_dirty
+        extra = {'models': self.models} if dirty else {}
+        result = await self.link.request(extra | {'op': 'sync', 'instance': self.instance, 'base': str(self.state_dir.parent),
                                           # 已收到全文的回合：中心续租时只回 id，不再重发 prompt。
                                           'have': list(self.expires),
                                           'backends': self.backends, 'version': VERSION,
                                           'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE], 'code': self.code,
                                           'managed': self.managed, 'events': events})
         self.accept(result, started)
+        if dirty:
+            # 只有中心确认收到才清掉标记；连接中断时下一次同步重报，列表不会丢。
+            self.models_dirty = False
         if self.on_synced:
             hook, self.on_synced = self.on_synced, None
             hook()
@@ -265,6 +288,7 @@ class Node:
     async def run(self):
         """同步循环：有新事件立即上传；否则每秒一次心跳续租。连接由 link 负责重建。"""
         monitor = asyncio.create_task(self.watchdog())
+        finder = asyncio.create_task(self.refresh_models()) if self.discover_models else None
         try:
             while not self.closed and not self.restart:
                 try:
@@ -279,7 +303,8 @@ class Node:
         finally:
             await self.close()
             monitor.cancel()
-            await asyncio.gather(monitor, return_exceptions=True)
+            if finder: finder.cancel()
+            await asyncio.gather(monitor, *([finder] if finder else []), return_exceptions=True)
 
     async def close(self):
         self.closed = True
