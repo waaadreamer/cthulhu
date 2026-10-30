@@ -23,8 +23,9 @@
       <div id="tasks" class="tasks"></div>
     </section>
     <section class="sec" data-sec="feishu" id="feishu-sec" hidden>
-      <div class="sec-h"><button class="sec-t" type="button" aria-expanded="true" aria-controls="acl"><span class="caret" aria-hidden="true">›</span><h2>飞书白名单 <span id="acl-count" class="count"></span></h2></button></div>
-      <div id="acl" class="nodes"></div>
+      <button id="acl-open" class="node acl-entry" type="button">
+        <span class="dot" id="acl-dot" aria-hidden="true"></span><span class="node-n">飞书白名单</span>
+        <span class="muted" id="acl-count"></span><span class="chev" aria-hidden="true">›</span></button>
     </section>
   </aside>
 
@@ -176,6 +177,20 @@
   <header class="viewer-head"><h2 id="monitor-t">监控</h2>
     <button id="monitor-close" class="icon" type="button" aria-label="关闭">✕</button></header>
   <div id="monitor-body" class="monitor-body"><p class="muted pad">加载中</p></div>
+</dialog>
+
+<dialog id="acl-dialog" class="monitor acl-page" aria-labelledby="acl-t">
+  <header class="viewer-head"><h2 id="acl-t">飞书白名单 <span id="acl-total" class="count"></span></h2>
+    <button id="acl-close" class="icon" type="button" aria-label="关闭">✕</button></header>
+  <div class="acl-bar">
+    <input id="acl-q" type="search" placeholder="按人名或规则内容搜索" autocomplete="off" aria-label="搜索白名单">
+    <span id="acl-hint" class="muted"></span>
+  </div>
+  <div class="acl-split">
+    <ul id="acl-people" class="acl-people" role="listbox" aria-label="名单"></ul>
+    <section id="acl-detail" class="acl-detail" aria-live="polite"></section>
+  </div>
+  <p class="muted acl-foot">只读。修改请对 Master 说「允许某人做什么」或「收回某人的权限」，只有你发起的回合能改。不在名单里的人奈亚不回复。</p>
 </dialog>
 
 <div id="toast" role="status" hidden></div>

@@ -2,6 +2,7 @@
 import { $, el, api, auth, toast, markdown, stamp, span, fileCtx } from './dom.js';
 import { initViewer, fileFromHash } from './viewer.js';
 import { initMonitor } from './monitor.js';
+import { initAcl, renderAclEntry } from './acl.js';
 import { Model } from './model.js';
 import { View, Live } from './render.js';
 import { Chat } from './chat.js';
@@ -201,16 +202,11 @@ function renderSide() {
   }
 }
 
-// 飞书白名单只读展示：修改通过对 Master 说话完成（只有主人的回合能改）。
+// 飞书白名单：侧栏只放入口（人数），规则全文在单独的页面里按需读取、可搜索。
 function renderFeishu() {
   const f = snap.feishu, sec = $('#feishu-sec');
   sec.hidden = !f; if (!f) return;
-  const acl = f.acl || [];
-  $('#acl-count').textContent = acl.length || '';
-  $('#acl-count').title = f.state === 'running' ? '订阅中' : `订阅状态：${f.state}${f.error ? '，' + f.error : ''}`;
-  $('#acl').replaceChildren(...(acl.length ? acl.map(a => el('div', { class: 'acl' }, el('strong', { text: a.name }),
-    el('ul', {}, ...a.rules.map(r => el('li', { text: r }))))) :
-    [el('div', { class: 'acl muted', text: '暂无。对 Master 说「允许某人做什么」即可添加；不在名单里的人奈亚不回复。' })]));
+  renderAclEntry(f);
 }
 
 function renderMaster() {
@@ -624,8 +620,10 @@ $('#invite-form').onsubmit = e => {
 $('#invite-copy').onclick = () => copyText($('#invite-cmd'), $('#invite-copy'), '复制');
 
 // 左栏分区可折叠，状态记在本浏览器。折叠后标题仍显示数量，有新提问时任务区的数量照常更新。
+// 只有一行入口、没有标题按钮的分区（如飞书白名单）不折叠；必须跳过，否则这里抛错会中断整个脚本，页面白屏。
 for (const sec of document.querySelectorAll('#nav .sec')) {
   const key = 'cthulhu-sec-' + sec.dataset.sec, btn = sec.querySelector('.sec-t');
+  if (!btn) continue;
   const set = closed => {
     sec.toggleAttribute('data-collapsed', closed); btn.setAttribute('aria-expanded', String(!closed));
     localStorage.setItem(key, closed ? '1' : '0');
@@ -643,7 +641,7 @@ const fromHash = () => {
   if (fileFromHash()) return;
   const id = location.hash.match(/task=([\w-]+)/)?.[1]; if (id) openTask(id);
 };
-initMonitor();
+initMonitor(); initAcl();
 initViewer({ returnHash: () => (drawer ? '#task=' + drawer.task : '') });
 addEventListener('hashchange', fromHash);
 setPriority(9);

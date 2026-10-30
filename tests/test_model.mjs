@@ -118,3 +118,26 @@ console.log('test_model: files ok');
   assert.match(catalogNote({}, 'codex'), /尚未上报/);
 }
 console.log('test_model: models ok');
+
+// 飞书白名单页：按人名或规则搜索（多词都要命中、名字命中排前）；拆出授权来源前缀；规则相同的人归组。
+{
+  const { filterAcl, splitRule, groupOf } = await import('../static/js/acl.js');
+  const list = [
+    { id: 'ou_1', name: '张三', rules: ['允许查看 S 集群训练状态'] },
+    { id: 'ou_2', name: '李四', rules: ['允许查看 S 集群训练状态'] },
+    { id: 'ou_3', name: '王五（张三的同事）', rules: ['允许重启 R6003 policy'] },
+  ];
+  assert.deepEqual(filterAcl(list, '').map(a => a.id), ['ou_1', 'ou_2', 'ou_3']);
+  assert.deepEqual(filterAcl(list, '张三').map(a => a.id), ['ou_1', 'ou_3']);
+  assert.deepEqual(filterAcl(list, 'r6003').map(a => a.id), ['ou_3']);             // 不区分大小写，搜规则内容
+  assert.deepEqual(filterAcl(list, '李四 训练').map(a => a.id), ['ou_2']);          // 每个词都要命中
+  assert.deepEqual(filterAcl(list, '训练 张三').map(a => a.id), ['ou_1']);
+  assert.deepEqual(filterAcl(list, '不存在'), []);
+  const r = splitRule('主人授权来源：m_2a170233/飞书om_x100b62b3，2026-10-29；允许重启 R6002 policy');
+  assert.equal(r.text, '允许重启 R6002 policy');
+  assert.match(r.source, /^主人授权来源：m_2a170233/);
+  assert.deepEqual(splitRule('允许查看文档'), { source: '', text: '允许查看文档' });
+  const same = groupOf(list);
+  assert.deepEqual(list.map(same), [2, 2, 1]);
+}
+console.log('test_model: acl ok');

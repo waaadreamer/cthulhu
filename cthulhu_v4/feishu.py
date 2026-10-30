@@ -140,8 +140,13 @@ class Feishu:
         return os.environ | {'LARKSUITE_CLI_CONFIG_DIR': str(self.config_dir)}
 
     def status(self):
-        acl = [{'name': a['name'], 'rules': a['rules']} for a in self.c.store.all('feishu_acl')]
-        return self.info | {'acl': acl}
+        # 快照每秒轮询：只带人数与最近修改时间。全文（几十人、每人上千字）由白名单页按需读取 acl_list。
+        acl = self.c.store.all('feishu_acl')
+        return self.info | {'acl_count': len(acl), 'acl_at': max((a.get('updated_at') or 0 for a in acl), default=0)}
+
+    def acl_list(self):
+        return sorted(({k: a.get(k) for k in ('id', 'name', 'rules', 'updated_at')} for a in self.c.store.all('feishu_acl')),
+                      key=lambda a: a['name'])
 
     # ---- lark-cli ----
     async def run_cli(self, argv, timeout=CALL_TIMEOUT):

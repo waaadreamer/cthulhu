@@ -262,7 +262,10 @@ class FeishuTests(unittest.IsolatedAsyncioTestCase):
         item = self.c.hub.tool('local', {'job': job['id'], 'call_id': 2, 'name': 'feishu_acl', 'arguments': {
             'action': 'set', 'user_id': ALICE, 'name': '爱丽丝', 'rules': ['允许查看 S 集群训练状态']}})
         self.assertEqual(item['rules'], ['允许查看 S 集群训练状态'])
-        self.assertEqual(self.c.snapshot()['feishu']['acl'], [{'name': '爱丽丝', 'rules': ['允许查看 S 集群训练状态']}])
+        self.assertEqual(self.c.snapshot()['feishu']['acl_count'], 1)
+        self.assertNotIn('acl', self.c.snapshot()['feishu'])        # 规则全文不进每秒轮询的快照
+        self.assertEqual([(a['id'], a['name'], a['rules']) for a in self.c.feishu.acl_list()],
+                         [(ALICE, '爱丽丝', ['允许查看 S 集群训练状态'])])
         with self.assertRaises(ValueError):
             self.c.hub.tool('local', {'job': job['id'], 'call_id': 3, 'name': 'feishu_acl', 'arguments': {
                 'action': 'set', 'user_id': OWNER, 'name': '主人', 'rules': ['x']}})
