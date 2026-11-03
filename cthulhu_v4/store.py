@@ -19,6 +19,7 @@ DELTAS = ('native:item/agentMessage/delta', 'native:item/reasoning/summaryTextDe
 
 class Store:
     def __init__(self, path):
+        self.path = str(path)
         self.db = sqlite3.connect(path, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
@@ -122,6 +123,31 @@ class Store:
 
     def delete(self, kind, ident):
         self.db.execute('DELETE FROM objects WHERE kind=? AND id=?', (kind, ident))
+
+    def history(self, query='', before=None, limit=50, aside=True):
+        """主聊天的对话记录（主人、Master、飞书往来、定期审核），新的在前，可按关键词筛选。
+
+        为什么单开只读连接：带关键词时要扫全部事件（实测 190 万条约 2 秒），由调用方放到线程里执行；
+        主连接只能在事件循环线程用，在这里扫会卡住节点同步、让租约过期。WAL 下只读连接不阻塞写入。
+        """
+        clauses = ["((kind IN ('chat', 'review', 'feishu_in', 'feishu_out') AND visible=1)"
+                   + (" OR (kind = 'reply' AND actor = 'master')" if aside else '') +
+                   " OR (kind = 'message' AND actor = 'owner' AND target = 'master' AND json_extract(data, '$.copy') = 0))"]
+        args = []
+        if before:
+            clauses.append('seq < ?'); args.append(int(before))
+        for word in str(query or '').split()[:5]:
+            clauses.append("text LIKE ? ESCAPE '\\'")
+            args.append('%' + word.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
+        args.append(max(1, min(int(limit), 200)))
+        db = sqlite3.connect(f'file:{self.path}?mode=ro', uri=True)
+        try:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(f"SELECT seq, at, actor, target, task, kind, text, data FROM events WHERE {' AND '.join(clauses)} "
+                              'ORDER BY seq DESC LIMIT ?', args).fetchall()
+        finally:
+            db.close()
+        return [dict(r) | {'data': json.loads(r['data'])} for r in rows]
 
     def close(self):
         self.db.close()

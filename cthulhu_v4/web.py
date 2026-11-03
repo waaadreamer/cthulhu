@@ -158,6 +158,11 @@ class Web:
                 return {'events': events, 'more': len(events) >= limit, 'highwater': c.store.highwater()}
             if path == '/api/file':
                 return await c.files.read(q('ref'), refresh=q('refresh') == '1')
+            if path == '/api/history':
+                limit = int(q('limit', 50))
+                events = await asyncio.to_thread(c.store.history, q('q', ''), q('before'), limit, q('aside') == '1')
+                events = [e | {'text': cut(e['text'], UI_TEXT), 'data': cut(e['data'], UI_FIELD, 200)} for e in events]
+                return {'events': events, 'more': len(events) >= limit}
             if path == '/api/monitor':
                 return c.monitor.panels()
             if path == '/api/feishu/acl':

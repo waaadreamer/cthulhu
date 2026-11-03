@@ -59,7 +59,15 @@ export class Chat {
   apply(e) {
     this.root.querySelector('.empty')?.remove();
     const d = e.data || {};
-    if (e.kind === 'dispatch' && e.target === 'master') { this.proc && !this.proc.done && this.proc.finish(e); this.proc = null; this.current(e); return; }
+    if (e.kind === 'dispatch' && e.target === 'master') {
+      this.proc && !this.proc.done && this.proc.finish(e); this.proc = null;
+      // 只处理执行者进度、系统通知的回合不进主聊天（每天几百个，会把对话冲走），在「过程」侧栏查看。
+      // 旧事件没有 owner 字段，按原样展示。
+      this.quiet = d.owner === false;
+      if (!this.quiet) this.current(e);
+      return;
+    }
+    if (e.actor === 'master' && (e.kind.startsWith('native:') || e.kind === 'harness_tool') && this.quiet) return;
     if (e.actor === 'master' && e.kind.startsWith('native:')) { this.current(e).model.apply(e); return; }
     if (e.actor === 'master' && e.kind === 'harness_tool') { if (this.demo) this.current(e).model.apply(e); return; }
     if (e.actor === 'master' && e.kind === 'remote_result') { if (this.proc) { this.proc.finish(e); this.dirty.add(this.proc); } return; }

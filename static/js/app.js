@@ -8,6 +8,7 @@ import { View, Live } from './render.js';
 import { Chat } from './chat.js';
 import { applyDelta } from './delta.js';
 import { modelChoices, effortChoices, catalogNote } from './models.js';
+import { initHistory } from './history.js';
 
 const STATE = { running: '进行中', waiting: '等待', paused: '已暂停', review: '待审核', completed: '已完成', failed: '未达成', cancelled: '已取消' };
 const DONE = new Set(['completed', 'failed', 'cancelled']);
@@ -53,6 +54,8 @@ async function poll() {
     if (!$('#chat').querySelector(':scope > :not(.older):not(.live):not(.empty)') && !$('#chat .empty')) $('#chat').append(el('div', { class: 'empty' }, el('h2', { text: '从一个目标开始' }),
       el('p', { text: '告诉 Master 你想完成什么。它会拆成任务，交给星系上的独立执行者，过程都能在任务里查看。' })));
     if (stick) scrollEnd($('#chat'));
+    else if (!unseen.base) unseen.base = chatCursor; // 记下离开底部时的位置，只统计之后的新内容
+    showLatest();
     if (drawer) await drawer.poll();
     $('#conn').dataset.ok = 'true'; $('#conn').title = '已连接';
   } catch (e) {
@@ -61,6 +64,16 @@ async function poll() {
   } finally { polling = false; }
 }
 const nearBottom = n => n.scrollHeight - n.scrollTop - n.clientHeight < 120;
+// 主人往上翻历史时不自动跳到底，只在角落提示有新内容；点一下回到最新。
+const unseen = { base: 0 };
+function showLatest() {
+  const c = $('#chat'), btn = $('#to-latest'), away = !nearBottom(c);
+  if (!away) unseen.base = 0;
+  btn.hidden = !away;
+  btn.textContent = away && chatCursor > unseen.base && unseen.base ? '有新消息 ↓' : '回到最新 ↓';
+}
+$('#chat').addEventListener('scroll', () => showLatest(), { passive: true });
+$('#to-latest').onclick = () => { scrollEnd($('#chat')); showLatest(); };
 const scrollEnd = n => (n.scrollTop = n.scrollHeight);
 
 // demo 后端没有原生工具事件，界面用中心的 harness_tool 记录代替；真实后端不必下载这些（结果正文往往很大）。
@@ -216,6 +229,7 @@ function renderMaster() {
   $('#master-state').textContent = a.paused ? '已暂停' : a.status === 'running' ? '工作中' : '就绪';
   $('#master-state').dataset.state = a.paused ? 'paused' : a.status;
   $('#master-toggle').textContent = a.paused ? '恢复' : '暂停';
+  $('#master-open').setAttribute('aria-pressed', String(drawer?.task === MASTER));
   renderDeploy();
   const decides = !!snap.prefs?.master_decides, sw = $('#decides');
   sw.setAttribute('aria-checked', String(decides));
@@ -273,10 +287,12 @@ function renderQuestions() {
 async function act(fn) { try { await fn(); await poll(); } catch (e) { toast(e.message); } }
 
 // ---- 抽屉：某个 old_one 的完整过程 ----
+// taskId 为 MASTER 时展示 Master 自己的完整过程：主聊天只保留对话，工作过程、未公开的最终回复都在这里查。
+const MASTER = 'master';
 class Drawer {
   constructor(taskId) {
     this.task = taskId; this.cursor = 0;
-    const t = snap.tasks.find(t => t.id === taskId);
+    const t = taskId === MASTER ? { agent: 'master', node: 'local' } : snap.tasks.find(t => t.id === taskId);
     this.agent = t.agent;
     this.harness = snap.agents.find(a => a.id === t.agent)?.backend === 'demo';
     this.model = new Model(t.agent, 'drawer', { harnessTools: this.harness });
@@ -293,9 +309,10 @@ class Drawer {
       this.pager.sentinel.after(...tmp.children);
     });
     $('#drawer').hidden = false; document.body.classList.add('drawer-open');
-    if (!location.hash.startsWith('#file=')) history.replaceState(null, '', '#task=' + taskId);
+    if (!location.hash.startsWith('#file=')) history.replaceState(null, '', taskId === MASTER ? '#master' : '#task=' + taskId);
   }
   head() {
+    if (this.task === MASTER) return this.masterHead();
     const t = snap.tasks.find(t => t.id === this.task); if (!t) return;
     const a = snap.agents.find(a => a.id === t.agent) || {};
     $('#d-title').textContent = t.title;
@@ -323,6 +340,16 @@ class Drawer {
       onclick: () => act(async () => { await api('api/task/archive', { task_id: t.id, archived: !t.archived }); if (!t.archived) closeDrawer(); }) }));
     $('#d-form').hidden = DONE.has(t.state);
   }
+  masterHead() {
+    const a = snap.agents.find(a => a.id === 'master') || {};
+    $('#d-title').textContent = 'Master 工作过程';
+    $('#d-state').textContent = a.paused ? '已暂停' : a.status === 'running' ? '工作中' : '就绪'; $('#d-state').dataset.state = a.paused ? 'paused' : a.status;
+    $('#d-meta').replaceChildren(el('span', { text: modelLabel(a) }),
+      a.session ? el('span', { class: 'mono', title: '原生会话 ' + a.session, text: a.session.slice(0, 8) }) : null,
+      el('span', { class: 'muted', text: '只处理执行者进度的回合，回复留在这里，不进主聊天' }));
+    $('#d-controls').replaceChildren();
+    $('#d-form').hidden = true; // 给 Master 发消息用主输入框，避免两个入口
+  }
   // 单飞：上一次轮询未结束时直接复用，避免同一批事件并发拉取、游标互相覆盖。
   poll() {
     this.polling ||= this.pollOnce().finally(() => (this.polling = null));
@@ -344,6 +371,7 @@ class Drawer {
 }
 
 async function openTask(id) {
+  if (id === MASTER) { if (drawer?.task !== MASTER) { drawer?.pager.close(); drawer = new Drawer(MASTER); } renderSide(); drawer.poll().catch(e => toast(e.message)); return; }
   // 刚创建的任务可能还不在快照里（另一轮轮询正在进行，poll() 会直接返回）：先刷新一次状态再打开。
   if (!snap?.tasks.some(t => t.id === id)) {
     try { snap = await api('api/state'); } catch (e) { toast(e.message); return; }
@@ -639,10 +667,13 @@ addEventListener('keydown', e => { if (e.key === 'Escape' && drawer && !document
 // #task=<id> 可直达某个任务的过程；在已打开的页面里改 hash 也生效。
 const fromHash = () => {
   if (fileFromHash()) return;
+  if (location.hash === '#master') return openTask(MASTER);
   const id = location.hash.match(/task=([\w-]+)/)?.[1]; if (id) openTask(id);
 };
 initMonitor(); initAcl();
-initViewer({ returnHash: () => (drawer ? '#task=' + drawer.task : '') });
+initViewer({ returnHash: () => (drawer ? (drawer.task === MASTER ? '#master' : '#task=' + drawer.task) : '') });
+initHistory();
+$('#master-open').onclick = () => (drawer?.task === MASTER ? closeDrawer() : openTask(MASTER));
 addEventListener('hashchange', fromHash);
 setPriority(9);
 if (!auth.token) showLogin(); else poll().then(fromHash);

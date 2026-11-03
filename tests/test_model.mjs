@@ -141,3 +141,11 @@ console.log('test_model: models ok');
   assert.deepEqual(list.map(same), [2, 2, 1]);
 }
 console.log('test_model: acl ok');
+
+{
+  const { speaker } = await import('../static/js/history.js');
+  assert.equal(speaker({ kind: 'message', actor: 'owner' }), '你');
+  assert.equal(speaker({ kind: 'reply', actor: 'master' }), 'Master · 侧栏');
+  assert.equal(speaker({ kind: 'feishu_in', data: { name: '张三' } }), '张三');
+  assert.equal(speaker({ kind: 'feishu_in', data: { owner: true } }), '你 · 飞书');
+}

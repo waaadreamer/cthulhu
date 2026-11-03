@@ -109,5 +109,24 @@ class ReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.c.reply_is_public({k: v for k, v in job.items() if k != 'seq'}))  # 升级前的回合保持原样
 
 
+class HistoryTests(unittest.TestCase):
+    def test_history_is_conversation_only_newest_first_and_searchable(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = Center(d); s = c.store
+            c.enqueue('owner', 'master', '训练先不动', 9)
+            s.emit('chat', '收到，100% 静态排查', actor='master', visible=True)
+            s.emit('reply', '已收到进度', actor='master')
+            s.emit('reply', '执行者自己的回复', actor='old_x')
+            s.emit('native:item/completed', '静态排查', actor='master')
+            kinds = [e['kind'] for e in s.history()]
+            self.assertEqual(kinds, ['reply', 'chat', 'message'])
+            self.assertEqual([e['text'] for e in s.history('静态 100%')], ['收到，100% 静态排查'])
+            self.assertEqual([e['kind'] for e in s.history(aside=False)], ['chat', 'message'])
+            self.assertEqual(s.history('99%'), [])                         # % 按字面匹配
+            top = s.history(limit=1)[0]
+            self.assertEqual([e['kind'] for e in s.history(before=top['seq'])], ['chat', 'message'])
+            s.close()
+
+
 if __name__ == '__main__':
     unittest.main()
