@@ -130,8 +130,9 @@ class Hub:
             a = s.get('agent', aid)
             a.update(status='paused' if a['paused'] else 'idle', idle_at=c.clock(), failures=0); s.put('agent', a)
             if data.get('result'):
-                s.emit('chat' if aid == 'master' else 'reply', data['result'], actor=aid,
-                       task=c.task_id(aid), visible=aid == 'master')
+                public = aid == 'master' and c.reply_is_public(j)
+                s.emit('chat' if public else 'reply', data['result'], actor=aid,
+                       task=c.task_id(aid), visible=public)
         elif outcome == 'failed':
             j['state'] = 'failed'; s.put('lease', j)
             c.set_messages(j.get('messages') or [j['message']], 'failed')
@@ -225,8 +226,12 @@ class Hub:
                 s.put('lease', j)
                 c.set_messages(j['messages'], 'running')
                 a['status'] = 'running'; s.put('agent', a)
-                s.emit('dispatch', '已派发至节点 ' + node, target=a['id'], task=t and t['id'],
-                       data={'job': j['id'], 'node': node, 'message_id': m['id'], 'message_ids': j['messages']})
+                # 记下派发事件的序号：回合结束时据此判断本回合是否已用 tell_owner 公开过。
+                j['seq'] = s.emit('dispatch', '已派发至节点 ' + node, target=a['id'], task=t and t['id'],
+                                  data={'job': j['id'], 'node': node, 'message_id': m['id'], 'message_ids': j['messages'],
+                                        # 网页据此决定这个回合的工作过程放主聊天还是只放 Master 侧栏。
+                                        'owner': any(x['sender'] in ('owner', 'feishu') for x in batch)})
+                s.put('lease', j)
                 jobs.append(j); free -= 1
             # 文件读取请求不是业务状态，不进事务、不落盘；随同步响应捎给节点即可。
             reply = {'ack': n['ack'], 'lease_seconds': LEASE, 'jobs': jobs, 'files': c.files.requests_for(node)}

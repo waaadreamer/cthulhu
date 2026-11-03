@@ -67,5 +67,47 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(len(self.queued()), 2)
 
 
+class ReplyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.h = Harness(Path(self.tmp.name))
+        self.c = self.h.c
+
+    async def asyncTearDown(self):
+        await self.h.close(); self.tmp.cleanup()
+
+    def chats(self):
+        return [e for e in self.c.store.events(limit=2000) if e['kind'] == 'chat']
+
+    def asides(self):
+        return [e for e in self.c.store.events(limit=2000) if e['kind'] == 'reply' and e['actor'] == 'master']
+
+    async def test_owner_turn_reply_reaches_chat(self):
+        self.c.enqueue('owner', 'master', '你好', 9)
+        await self.h.settle()
+        self.assertEqual(len(self.chats()), 1)
+        self.assertEqual(self.asides(), [])
+
+    async def test_worker_only_turn_reply_stays_aside(self):
+        t = self.c.tool('master', 'create_task', task_args(self.tmp.name, backend='demo'))
+        await self.h.settle()
+        before = len(self.chats())
+        self.c.enqueue('system', 'master', '某个系统通知', 8)
+        await self.h.settle()
+        self.assertEqual(len(self.chats()), before)
+        self.assertTrue(self.asides())
+        dispatch = [e for e in self.c.store.events(limit=2000) if e['kind'] == 'dispatch' and e['target'] == 'master'][-1]
+        self.assertIs(dispatch['data']['owner'], False)
+
+    def test_reply_after_tell_owner_is_not_repeated(self):
+        m = self.c.enqueue('owner', 'master', '查一下', 9)
+        seq = self.c.store.emit('dispatch', '', target='master')
+        job = {'id': 'turn_x', 'messages': [m['id']], 'message': m['id'], 'seq': seq}
+        self.assertTrue(self.c.reply_is_public(job))
+        self.c.tool('master', 'tell_owner', {'text': '已安排'})
+        self.assertFalse(self.c.reply_is_public(job))
+        self.assertTrue(self.c.reply_is_public({k: v for k, v in job.items() if k != 'seq'}))  # 升级前的回合保持原样
+
+
 if __name__ == '__main__':
     unittest.main()

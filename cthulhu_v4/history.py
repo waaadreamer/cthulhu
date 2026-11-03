@@ -14,7 +14,7 @@ NOISE = tuple(re.compile(p) for p in (
     r'^十分钟增量审核', r'^等待到期，请检查', r'^任务尚未结束，但当前没有活动回合',
     r'^任务 t_\w+ 等待到期，已唤醒核验', r'^任务 t_\w+ 非预期空闲'))
 QUERY = '''SELECT seq, at, kind, actor, target, task, text FROM events
-    WHERE seq > ? AND seq <= ? AND (kind IN ('chat', 'feishu_out')
+    WHERE seq > ? AND seq <= ? AND (kind IN ('chat', 'feishu_out') OR (kind = 'reply' AND actor = 'master')
           OR (kind = 'message' AND (actor = 'master' OR target = 'master')))
     ORDER BY seq'''
 WINDOW = 20000   # 每次最多扫描的事件序号跨度：首次补齐上百万条历史时不能长时间占住事件循环
@@ -26,6 +26,8 @@ def entry(seq, at, kind, actor, target, task, text):
         return None
     if kind == 'chat':
         target = 'owner'          # chat 是 Master 写进主聊天的话（tell_owner 与最终回复）
+    elif kind == 'reply':
+        target = 'aside'          # Master 只留在侧栏的最终回复（见 Center.reply_is_public）
     elif kind == 'feishu_out':
         target = 'feishu'
     t = datetime.fromtimestamp(at).astimezone()
