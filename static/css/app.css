@@ -218,7 +218,10 @@ time { font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-num
 
 /* ---------- 输入区 ---------- */
 .dock { padding: 0 max(24px, calc((100% - 740px) / 2)) 18px; }
-#questions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+/* 待回答问题多了会把会话挤没：限高并在区内滚动，会话区始终留出大半屏。 */
+#questions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; max-height: 42vh; max-height: 42dvh; overflow-y: auto; overscroll-behavior: contain; }
+#questions:empty { margin-bottom: 0; }
+#questions > .q { flex: none; }
 .q { border-radius: 14px; padding: 12px 14px; background: color-mix(in srgb, var(--need) 7%, var(--bg-2)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--need) 30%, transparent); }
 .q[data-state=master] { background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--line-2); }
 .q-h { display: flex; gap: 10px; align-items: center; font-size: 12.5px; flex-wrap: wrap; margin-bottom: 4px; }
@@ -469,16 +472,73 @@ dialog .field[hidden] { display: none; }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--s2); border: 1px solid var(--bad); color: var(--ink); padding: 9px 18px; border-radius: 10px; z-index: 20; max-width: 90vw; box-shadow: var(--shadow); }
 
 /* ---------- 窄屏：左栏抽出，任务过程全屏 ---------- */
+.bar-actions { display: contents; }
+.mask { display: none; }
 @media (max-width: 900px) {
-  #app, body.drawer-open #app { grid-template-columns: minmax(0, 1fr); }
-  #nav { position: fixed; inset: 0 auto 0 0; width: min(300px, 85vw); z-index: 5; transform: translateX(-100%); transition: transform .2s; }
-  body.nav-open #nav { transform: none; box-shadow: 0 0 0 100vmax rgb(0 0 0 / .55); }
-  .mobile { display: inline-block; }
-  #drawer { position: fixed; inset: 0; z-index: 6; }
+  /* 100dvh：手机浏览器地址栏收放时 100vh 比可见区高，输入框会被压到屏幕外。 */
+  #app, body.drawer-open #app { grid-template-columns: minmax(0, 1fr); height: 100dvh; }
+  #nav { position: fixed; inset: 0 auto 0 0; width: min(320px, 86vw); z-index: 6; transform: translateX(-100%); transition: transform .2s;
+    padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); overscroll-behavior: contain; }
+  body.nav-open #nav { transform: none; box-shadow: 20px 0 50px -20px rgb(0 0 0 / .8); }
+  body.nav-open .mask { display: block; position: fixed; inset: 0; z-index: 5; background: rgb(0 0 0 / .55); }
+  .mobile { display: inline-grid; place-items: center; }
+  .icon { width: 40px; height: 40px; font-size: 18px; }
+  #drawer { position: fixed; inset: 0; z-index: 7; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
   .resize { display: none; }
-  .chat, .dock { padding-left: 14px; padding-right: 14px; }
-  .bar { padding: 10px 14px; flex-wrap: wrap; }
-  .me { max-width: 90%; }
+  /* 顶栏一行：☰、Master 名与状态、⋯；其余按钮收进下拉菜单。 */
+  .bar { padding: 6px 8px 6px 6px; gap: 6px; padding-top: calc(6px + env(safe-area-inset-top)); position: relative; }
+  .who { gap: 8px; } .who .model-btn { min-width: 0; flex: 0 1 auto; padding: 6px 10px; }
+  .q-h .link, .d-meta .model-btn { padding: 6px 0; }
+  .bar-actions { display: none; position: absolute; right: 8px; top: calc(100% + 4px); z-index: 8; flex-direction: column; align-items: stretch;
+    gap: 2px; min-width: 200px; padding: 6px; background: var(--s1); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: var(--shadow); }
+  body.bar-open .bar-actions { display: flex; }
+  .bar-actions > .btn, .bar-actions > .switch { justify-content: flex-start; text-align: left; padding: 10px 12px; font-size: 14px; border-radius: 8px; border-color: transparent; }
+  .bar-actions > .btn:not(.ghost) { background: none; }
+  .chat { padding: 16px 12px 24px; gap: 14px; overscroll-behavior: contain; }
+  .dock { padding: 0 8px calc(8px + env(safe-area-inset-bottom)); }
+  .to-latest { right: 12px; }
+  .me { max-width: 88%; }
+  .fs-in, .fs-out { max-width: 94%; }
+  .reply { font-size: 15px; line-height: 1.7; }
+  /* iOS 在字号小于 16px 的输入框聚焦时会放大整页；放大后要手动缩回，所以手机上输入框一律 16px。 */
+  input, textarea, select, #input, #d-input, .q-a textarea, dialog input, dialog textarea, dialog select { font-size: 16px; }
+  #composer { padding: 9px 10px 7px; border-radius: 14px; }
+  .composer-row { margin-top: 6px; }
+  .seg button { padding: 6px 12px; }
+  .btn { padding: 7px 14px; }
+  .q-a { flex-wrap: wrap; } .q-a textarea { flex-basis: 100%; }
+  #questions { max-height: 36dvh; }
+  /* 抽屉：头部可折行，控制按钮横向滚动，不把时间线挤没。 */
+  .d-head { padding: 10px 12px 8px; }
+  .d-title-row h2 { font-size: 16px; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .d-controls { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; padding-bottom: 2px; }
+  .d-controls .btn { flex: none; }
+  .timeline { padding: 12px 12px 20px; }
+  .d-form { padding: 8px 10px; gap: 6px; } #d-input { min-width: 0; padding: 8px 10px; }
+  .step > summary { padding: 8px 10px; }
+  .step .meta { display: none; }
+  .step-body { padding: 8px; }
+  pre.out, pre.cmd, pre.diff { max-height: 320px; font-size: 12px; }
+  .card { padding: 10px 12px; }
+  .card dl { grid-template-columns: 1fr; gap: 0; } .card dt { margin-top: 6px; }
+  /* 左栏：触控目标至少 40px。 */
+  .task { padding: 10px 10px; } .node { padding: 9px 10px; }
+  .tgroup > summary, .archive > summary { padding: 9px 10px; }
+  .sec-t { padding: 8px; }
+  .event { flex-wrap: wrap; gap: 2px 8px; }
+  .event .link { padding: 4px 0; }
+  /* 对话框：贴满屏幕，底部留出安全区。 */
+  dialog { width: 100vw; max-width: 100vw; max-height: 100dvh; margin: 0; border-radius: 0; border: 0; padding: 16px 14px calc(16px + env(safe-area-inset-bottom)); }
+  dialog.viewer, dialog.monitor, dialog.acl-page, dialog.history-page { width: 100vw; height: 100dvh; max-height: 100dvh; padding: 0 0 env(safe-area-inset-bottom); }
+  dialog .row { grid-template-columns: 1fr; }
+  dialog .actions .btn { flex: 1; }
+  .viewer-head { padding: calc(8px + env(safe-area-inset-top)) 10px 8px; }
+  .monitor-body { padding: 12px; }
+  .doc { padding: 16px 14px 32px; }
+  .dir li { grid-template-columns: 1fr auto; } .dir time { display: none; }
+  .history-list { padding: 8px 12px; }
+  .acl-bar { flex-wrap: wrap; padding: 10px 12px; } .acl-bar input { max-width: none; flex-basis: 100%; }
+  .canvas.full { padding-top: env(safe-area-inset-top); }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 

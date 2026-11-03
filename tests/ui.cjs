@@ -133,6 +133,14 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.locator('#invite-form [data-close]').click();
     await page.setViewportSize({ width: 390, height: 844 });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    // 窄屏：顶栏一行，次要按钮收进“⋯”菜单，点一项后菜单收起；输入框不低于 16px（iOS 聚焦不放大）。
+    if (await page.locator('#drawer').isVisible()) await page.locator('#d-close').click();  // 手机上抽屉是全屏的，会盖住顶栏
+    assert((await page.locator('.bar').boundingBox()).height <= 60);
+    assert(await page.locator('#history-open').isHidden());
+    await page.locator('#bar-more').click(); await page.locator('#monitor-open').click();
+    await page.locator('#monitor-dialog[open]').waitFor(); await page.locator('#monitor-close').click();
+    assert(await page.locator('#history-open').isHidden());
+    assert.equal(await page.locator('#input').evaluate(n => getComputedStyle(n).fontSize), '16px');
     await page.screenshot({ path: path.join(root, 'preview-mobile.png') });
     assert.deepEqual(errors, []);
     console.log('ui: ok');

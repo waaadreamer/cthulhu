@@ -404,15 +404,17 @@ $('#d-form').onsubmit = e => {
 
 // ---- 输入框 ----
 const input = $('#input');
+// 触屏（无实体键盘）上回车只换行、点「发送」才发：手机输入法的回车键很容易误触，长消息会被半截发出去。
+const touch = matchMedia('(pointer: coarse)');
 function setPriority(p) {
   priority = p; $('#composer').dataset.urgent = String(p === 10);
   for (const b of document.querySelectorAll('[data-priority]')) b.setAttribute('aria-pressed', String(+b.dataset.priority === p));
-  input.placeholder = p === 10 ? '加急：立即打断 Master 当前回合' : '给 Master 发消息…（Enter 发送，Shift+Enter 换行）';
+  input.placeholder = p === 10 ? '加急：立即打断 Master 当前回合' : touch.matches ? '给 Master 发消息…' : '给 Master 发消息…（Enter 发送，Shift+Enter 换行）';
 }
 for (const b of document.querySelectorAll('[data-priority]')) b.onclick = () => setPriority(+b.dataset.priority);
 const grow = n => { n.style.height = 'auto'; n.style.height = Math.min(n.scrollHeight, 240) + 'px'; };
 input.oninput = () => grow(input);
-input.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#composer').requestSubmit(); } };
+input.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !touch.matches) { e.preventDefault(); $('#composer').requestSubmit(); } };
 $('#composer').onsubmit = e => {
   e.preventDefault(); const text = input.value.trim(); if (!text) return;
   sentAt = Date.now(); chat.live.set({ phase: 'wait', text: '已发送' });
@@ -659,8 +661,20 @@ for (const sec of document.querySelectorAll('#nav .sec')) {
   btn.onclick = () => set(!sec.hasAttribute('data-collapsed'));
 }
 
+// 窄屏：左栏是抽出层，点遮罩或打开任务后收起；顶栏放不下的按钮收进“⋯”菜单，点了任何一项就收起。
 $('#nav-toggle').onclick = () => document.body.classList.toggle('nav-open');
-addEventListener('keydown', e => { if (e.key === 'Escape' && drawer && !document.querySelector('dialog[open]')) closeDrawer(); });
+$('#nav-mask').onclick = () => document.body.classList.remove('nav-open');
+const barMenu = open => { document.body.classList.toggle('bar-open', open); $('#bar-more').setAttribute('aria-expanded', String(open)); };
+$('#bar-more').onclick = e => { e.stopPropagation(); barMenu(!document.body.classList.contains('bar-open')); };
+$('#bar-actions').addEventListener('click', e => e.target.closest('button') && barMenu(false));
+document.addEventListener('click', e => !e.target.closest('#bar-actions') && barMenu(false));
+addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || document.querySelector('dialog[open]')) return;
+  if (document.querySelector('.canvas.full')) return document.querySelector('.canvas.full .canvas-bar .link').click();
+  if (document.body.classList.contains('bar-open')) return barMenu(false);
+  if (document.body.classList.contains('nav-open')) return document.body.classList.remove('nav-open');
+  if (drawer) closeDrawer();
+});
 
 // ---- 启动 ----
 // #task=<id> 可直达某个任务的过程；在已打开的页面里改 hash 也生效。

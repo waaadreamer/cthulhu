@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark">
 <title>Cthulhu</title>
 <link rel="stylesheet" href="./css/app.css">
@@ -28,18 +28,22 @@
         <span class="muted" id="acl-count"></span><span class="chev" aria-hidden="true">›</span></button>
     </section>
   </aside>
+  <div id="nav-mask" class="mask" aria-hidden="true"></div>
 
   <main id="main">
     <header class="bar">
       <button id="nav-toggle" class="icon mobile" type="button" aria-label="任务列表">☰</button>
       <div class="who"><strong>Master</strong><span id="master-state" class="pill"></span>
         <button id="model" class="model-btn" type="button" title="切换模型"></button></div>
-      <button id="master-open" class="btn ghost" type="button" aria-pressed="false" title="Master 的完整工作过程">过程</button>
-      <button id="history-open" class="btn ghost" type="button" title="搜索、翻看以往的对话">历史</button>
-      <button id="monitor-open" class="btn ghost" type="button">监控</button>
-      <button id="deploy" class="btn upd-btn" type="button" hidden></button>
-      <button id="decides" class="switch" type="button" role="switch" aria-checked="false"><span class="knob" aria-hidden="true"></span>Master 全权回答</button>
-      <button id="master-toggle" class="btn" type="button">暂停</button>
+      <button id="bar-more" class="icon mobile" type="button" aria-label="更多操作" aria-expanded="false" aria-controls="bar-actions">⋯</button>
+      <div id="bar-actions" class="bar-actions">
+        <button id="master-open" class="btn ghost" type="button" aria-pressed="false" title="Master 的完整工作过程">过程</button>
+        <button id="history-open" class="btn ghost" type="button" title="搜索、翻看以往的对话">历史</button>
+        <button id="monitor-open" class="btn ghost" type="button">监控</button>
+        <button id="deploy" class="btn upd-btn" type="button" hidden></button>
+        <button id="decides" class="switch" type="button" role="switch" aria-checked="false"><span class="knob" aria-hidden="true"></span>Master 全权回答</button>
+        <button id="master-toggle" class="btn" type="button">暂停</button>
+      </div>
     </header>
     <div class="chat-wrap"><div id="chat" class="chat" aria-live="polite"></div>
       <button id="to-latest" class="btn to-latest" type="button" hidden>回到最新 ↓</button></div>
