@@ -55,8 +55,65 @@ class Messages:
             self.return_review(task, sender, text)
         if reply_to and task and task.get('wait', {}).get('message_id') == reply_to:
             self.clear_wait(task)
+        if target == 'master' and sender == 'owner' and priority < 10:
+            self.steer(m)
         self.wake(target)
         return m
+
+    def steer(self, m):
+        """主人的消息在 Master 回合进行中到达时，直接插进这个回合（Codex turn/steer），而不是排队等回合结束。
+
+        为什么：Master 一个回合可能跑几十分钟到几小时，排队意味着主人的话要等到它全部做完；
+        原生 Codex 在两次工具调用之间就能读到插入的输入，与交互式使用时的排队消息一致。
+        插入后消息并入该回合（messages），回合结束时与其余输入一起标记；节点报告插入失败、
+        或回合在插入确认前就结束时，消息退回队列（见 unsteer），不会丢。
+        不插入的情况：回合已被要求停止；回合里有非主人的飞书消息（那类回合单独成回合，
+        并进主人的话会让白名单检查误判为主人回合）；节点版本不支持插入。
+        """
+        s = self.store
+        j = next((j for j in s.where('lease', 'running') if j['state'] == 'running' and j['agent'] == 'master'
+                  and not j.get('stop_reason')), None)
+        if not j or 'steer' not in (s.get('node', j['node']).get('features') or []):
+            return False
+        ids = j.get('messages') or [j['message']]
+        if any((s.find('message', i) or {}).get('sender') == 'feishu' for i in ids):
+            return False
+        j['messages'] = ids + [m['id']]
+        j['steer'] = (j.get('steer') or []) + [m['id']]
+        s.put('lease', j)
+        m.update(state='running', steered=j['id']); s.put('message', m)
+        s.emit('steered', '已插入 Master 当前回合，它会在下一步看到', actor='system', target='master',
+               data={'message': m['id'], 'job': j['id']}, visible=True)
+        return True
+
+    def unsteer(self, j, mid, maybe_seen=False):
+        """插入没有确认送达：从回合里拿掉，回到队列最前（主人的优先级本来最高）。重复处理好过漏掉。
+
+        maybe_seen：回合结束时插入仍未确认，Codex 可能已经读到并处理了，标 interrupted 让 Master 先核对再答复。
+        """
+        j['steer'] = [x for x in j.get('steer') or [] if x != mid]
+        j['messages'] = [x for x in j.get('messages') or [j['message']] if x != mid]
+        m = self.store.get('message', mid)
+        m['state'] = 'queued'; m.pop('steered', None)
+        if maybe_seen:
+            m['interrupted'] = True
+        self.store.put('message', m)
+
+    def settle(self, j, state):
+        """回合结束时标记它处理的输入。Master 回合中断或失败时，主人的消息不标成 unknown/failed，而是重新排队。
+
+        为什么：标成 unknown 后没有任何机制再把它交给 Master，主人只能重发（实测断线一次丢 3–9 条）。
+        重新排队并标 interrupted：Master 先核对是否已答复、已执行，避免重复副作用。最多重投 3 次，防止循环。
+        """
+        for mid in j.get('steer') or []:
+            self.unsteer(j, mid, maybe_seen=True)   # 插入未确认就结束了：同样退回队列
+        for mid in j.get('messages') or [j['message']]:
+            m = self.store.get('message', mid)
+            if state in ('unknown', 'failed') and j['agent'] == 'master' and m['sender'] == 'owner' and m.get('retries', 0) < 3:
+                m.update(state='queued', interrupted=True, retries=m.get('retries', 0) + 1)
+            else:
+                m['state'] = state
+            self.store.put('message', m)
 
     def merge_progress(self, sender, text, priority):
         """执行者发给 Master 的普通进度，若它上一条进度还在排队，就追加进那一条，不另占一条。

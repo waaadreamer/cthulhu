@@ -338,7 +338,7 @@ class Center(Messages, Questions, Tasks, Review):
                 # Codex 的 developerInstructions 只在建线程时写入一次，多次压缩后未必完整保留；
                 # 每回合附上精简的核心规则，保证关键约束不随上下文压缩丢失。Claude 每次启动都会重新附加完整说明。
                 state['core_rules'] = (ROOT / 'skills' / 'master_core.md').read_text().strip()
-        keep = ('id', 'sender', 'priority', 'text', 'reply_to', 'at', 'key')
+        keep = ('id', 'sender', 'priority', 'text', 'reply_to', 'at', 'key', 'interrupted')
         if isinstance(message, list) and len(message) > 1:
             # 主人的消息与 agent/系统来信分开：只有主人的话是授权来源，必须逐条回应；
             # “后来的进度可能覆盖前面”只适用于 agent 与系统来信，不能让主人的指令被当成过时进度跳过。
@@ -369,6 +369,12 @@ class Center(Messages, Questions, Tasks, Review):
         told = self.store.db.execute("SELECT 1 FROM events WHERE seq > ? AND actor = 'master' AND kind = 'harness_tool' "
                                      "AND text = 'tell_owner' LIMIT 1", (job['seq'],)).fetchone()
         return not told
+
+    def steer_text(self, mid):
+        m = self.store.get('message', mid)
+        keep = ('id', 'sender', 'priority', 'text', 'reply_to', 'at', 'interrupted')
+        return ('以下为 harness 路由输入：主人在本回合进行中发来新消息，已插入本回合。先处理并答复它，再决定手上的工作是否继续。'
+                '来源由程序记录。\n' + json.dumps({'owner_message': {k: m.get(k) for k in keep}}, ensure_ascii=False))
 
     def notify_failure(self, aid, error):
         """执行者失败通知：同一执行者在 Master 尚未读到之前只保留一条，更新为最新错误与累计次数。

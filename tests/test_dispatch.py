@@ -74,8 +74,9 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_failure_marks_failed_and_pauses_master(self):
         with self.scripted():
             m = self.c.enqueue('owner', 'master', 'boom')
-            await self.h.settle()
-        self.assertEqual(self.c.store.get('message', m['id'])['state'], 'failed')
+            await self.h.settle(lambda: self.c.store.get('agent', 'master')['paused'])
+        got = self.c.store.get('message', m['id'])
+        self.assertEqual((got['state'], got['interrupted']), ('queued', True))   # 恢复后重投，不丢
         self.assertTrue(self.c.store.get('agent', 'master')['paused'])
 
     async def test_master_gets_queued_messages_in_one_turn(self):
@@ -116,7 +117,9 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Scripted.seen, ['slow', 'urgent'])
         self.assertTrue(Scripted.closed)
         self.assertEqual(self.c.store.get('lease', job['id'])['state'], 'interrupted')
-        self.assertEqual(self.c.store.get('message', old['id'])['state'], 'unknown')
+        # 被打断回合里主人的旧消息随加急消息一起重投（标 interrupted），而不是停在 unknown 无人处理。
+        got = self.c.store.get('message', old['id'])
+        self.assertEqual((got['state'], got['interrupted']), ('handled', True))
         self.assertFalse(self.c.store.get('agent', 'master')['paused'])
 
     async def test_pause_stops_process_and_resume_keeps_session(self):
@@ -202,5 +205,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             self.c.hub.attach('local', node.link); self.h.node = node
             await self.h.sync(2)
         self.assertEqual(Scripted.seen, ['hang'])  # 没有重放
-        self.assertEqual(self.c.store.get('message', m['id'])['state'], 'unknown')
+        # 主人的消息不静默丢：重新排队并标 interrupted，Master 恢复后先核对再处理；暂停期间不会派发。
+        got = self.c.store.get('message', m['id'])
+        self.assertEqual((got['state'], got['interrupted']), ('queued', True))
         self.assertTrue(self.c.store.get('agent', 'master')['paused'])

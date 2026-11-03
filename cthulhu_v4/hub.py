@@ -94,8 +94,8 @@ class Hub:
     def uncertain(self, j, reason):
         """结果未知：暂停任务、报备 Master。已执行的外部操作可能存在，不能自动重放。"""
         s = self.c.store
-        j['state'] = 'unknown'; s.put('lease', j)
-        self.c.set_messages(j.get('messages') or [j['message']], 'unknown')
+        j['state'] = 'unknown'
+        self.c.settle(j, 'unknown'); s.put('lease', j)
         a = s.get('agent', j['agent']); a.update(paused=True, status='paused'); s.put('agent', a)
         t = self.c.task_for(a['id'])
         if t and t['state'] not in TERMINAL:
@@ -119,14 +119,14 @@ class Hub:
         if j['state'] != 'running':
             return  # 迟到结果只作为 remote_result 留档，绝不据此重新激活任务。
         if outcome == 'stopped' and j.get('stop_reason'):
-            j['state'] = 'interrupted'; s.put('lease', j)
-            c.set_messages(j.get('messages') or [j['message']], 'unknown')
+            j['state'] = 'interrupted'
+            c.settle(j, 'unknown'); s.put('lease', j)
             a = s.get('agent', aid); a.update(status='paused' if a['paused'] else 'idle', idle_at=c.clock()); s.put('agent', a)
             s.emit('interrupted', '节点已确认停止旧回合；已有文件与外部作业不会自动回滚。',
                    target=aid, task=c.task_id(aid), visible=True)
         elif outcome == 'completed':
-            j['state'] = 'done'; s.put('lease', j)
-            c.set_messages(j.get('messages') or [j['message']], 'handled')
+            j['state'] = 'done'
+            c.settle(j, 'handled'); s.put('lease', j)
             a = s.get('agent', aid)
             a.update(status='paused' if a['paused'] else 'idle', idle_at=c.clock(), failures=0); s.put('agent', a)
             if data.get('result'):
@@ -134,8 +134,8 @@ class Hub:
                 s.emit('chat' if public else 'reply', data['result'], actor=aid,
                        task=c.task_id(aid), visible=public)
         elif outcome == 'failed':
-            j['state'] = 'failed'; s.put('lease', j)
-            c.set_messages(j.get('messages') or [j['message']], 'failed')
+            j['state'] = 'failed'
+            c.settle(j, 'failed'); s.put('lease', j)
             a = s.get('agent', aid); a['failures'] = a.get('failures', 0) + 1
             a.update(status='idle', idle_at=c.clock())
             s.emit('runtime_error', data.get('error', ''), target=aid, task=c.task_id(aid), visible=True)
@@ -158,6 +158,8 @@ class Hub:
         aid, kind, data = j['agent'], event['kind'], event.get('data') or {}
         if kind == 'session':
             c.save_session(aid, data['session'])
+        elif kind == 'steer':
+            self.steered(j, data)
         elif kind == 'finished':
             self.finished(node, j, data)
             s.emit('remote_result', data.get('result') or data.get('error') or '', actor=aid,
@@ -165,6 +167,19 @@ class Hub:
         else:
             s.emit(kind, event.get('text', ''), actor=aid, target=None, task=c.task_id(aid),
                    data=data, visible=bool(event.get('visible')))
+
+    def steered(self, j, data):
+        """节点报告插入结果。成功：消息留在本回合，回合结束时一起标记；失败：退回队列，下一回合先处理。"""
+        mid = data.get('message')
+        if j['state'] != 'running' or mid not in (j.get('steer') or []):
+            return  # 回合已结束（settle 已退回队列）或重复报告
+        if data.get('ok'):
+            j['steer'] = [x for x in j['steer'] if x != mid]
+        else:
+            self.c.unsteer(j, mid)
+            self.c.store.emit('steer_failed', '插入当前回合失败，已排到下一回合最前：' + (data.get('error') or ''),
+                              target=j['agent'], data={'message': mid, 'job': j['id']})
+        self.c.store.put('lease', j)
 
     # ---- 节点请求 ----
     def sync(self, node, body):
@@ -200,7 +215,11 @@ class Hub:
                 # 被要求停止的回合不再续租，也不发给节点；节点据此停止进程并回报 stopped。
                 if not j.get('stop_reason') and not s.get('agent', j['agent'])['paused']:
                     j['until'] = c.clock() + LEASE; s.put('lease', j)
-                    jobs.append({'id': j['id']} if j['id'] in have else j)
+                    item = {'id': j['id']} if j['id'] in have else dict(j)
+                    if j.get('steer'):
+                        # 待插入的消息随续租下发，直到节点报告结果；节点按消息 id 去重，重复下发不会重复插入。
+                        item['steer'] = [{'id': mid, 'text': c.steer_text(mid)} for mid in j['steer']]
+                    jobs.append(item)
             plan = c.update_plan(n, running)
             s.put('node', n)
             # 等待更新时不派发新回合：消息留在队列里，更新完成（或失败）后照常派发。

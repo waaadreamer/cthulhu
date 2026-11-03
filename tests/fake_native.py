@@ -20,6 +20,15 @@ for line in sys.stdin:
             if f['params'].get('threadId'):
                 assert f['params'].get('excludeTurns') is True, 'resume 必须带 excludeTurns'
             send({'id': f['id'], 'result': {'history': history, 'thread': {'id': f['params'].get('threadId', 'native-codex-1')}, 'model': f['params'].get('model'), 'reasoningEffort': f['params'].get('config', {}).get('model_reasoning_effort'), 'approvalPolicy': 'never', 'sandbox': {'type': 'dangerFullAccess'}}})
+        elif method == 'turn/start' and f['params'].get('input', [{}])[0].get('text') == 'wait-steer':
+            # 回合进行中不结束，等插入的消息到达后再完成：验证 turn/steer 的协议与 expectedTurnId。
+            send({'id': f['id'], 'result': {'turn': {'id': 'turn-steer'}}})
+        elif method == 'turn/steer':
+            assert f['params']['expectedTurnId'] == 'turn-steer', f['params']
+            send({'id': f['id'], 'result': {'turnId': 'turn-steer'}})
+            text = f['params']['input'][0]['text']
+            send({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'phase': 'final_answer', 'text': 'steered:' + text}}})
+            send({'method': 'turn/completed', 'params': {'turn': {'id': 'turn-steer', 'status': 'completed'}}})
         elif method == 'turn/start':
             assert f['params']['approvalPolicy'] == 'never'
             assert f['params']['sandboxPolicy'] == {'type': 'dangerFullAccess'}

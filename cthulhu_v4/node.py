@@ -81,6 +81,7 @@ class Node:
         self.bridge_url = ''         # 本机 MCP 桥（HTTP loopback）
         self.active, self.turns, self.expires = {}, {}, {}
         self.grace = 0
+        self.steering = set()  # (job id, message id)：已尝试插入的消息，中心重复下发时不重复插入
         self.stops = {}  # job id → 停止原因；CancelledError 本身不带原因，回报时须如实区分
         self.kick = asyncio.Event()
         self.closed = False
@@ -145,7 +146,7 @@ class Node:
                                           # 已收到全文的回合：中心续租时只回 id，不再重发 prompt。
                                           'have': list(self.expires),
                                           'backends': self.backends, 'version': VERSION,
-                                          'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE], 'code': self.code,
+                                          'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE, 'steer'], 'code': self.code,
                                           'managed': self.managed, 'events': events})
         self.accept(result, started)
         if dirty:
@@ -201,6 +202,30 @@ class Node:
             turn = Turn(self, job)
             self.turns[jid] = turn
             self.active[jid] = asyncio.create_task(self.execute(job, turn))
+        for job in result['jobs']:
+            for item in job.get('steer') or ():
+                key = (job['id'], item['id'])
+                if key in self.steering or job['id'] not in self.turns:
+                    continue  # 已尝试过；或回合不在本机运行（结束报告会让中心退回队列）
+                self.steering.add(key)
+                task = asyncio.create_task(self.steer(job['id'], item))
+                self.reads.add(task); task.add_done_callback(self.reads.discard)
+
+    async def steer(self, jid, item):
+        """把中心转来的主人消息插进正在运行的回合，并如实报告结果；失败时中心把消息退回队列。"""
+        ok, error = False, ''
+        try:
+            turn = self.turns.get(jid)
+            for _ in range(100):     # execute 刚开始时运行时可能还没创建
+                if not turn or getattr(turn, 'runtime', None): break
+                await asyncio.sleep(.05)
+            if not turn or not getattr(turn, 'runtime', None):
+                raise RuntimeError('回合已结束')
+            await turn.runtime.steer(item['text'])
+            ok = True
+        except Exception as e:
+            error = str(e) or type(e).__name__
+        self.queue(jid, 'steer', {'message': item['id'], 'ok': ok, 'error': error})
 
     async def execute(self, job, turn):
         outcome, result, error, runtime = 'failed', '', '', None
@@ -209,6 +234,7 @@ class Node:
             if not Path(a['cwd']).is_dir():
                 raise ValueError('节点上的工作目录不存在：' + a['cwd'])
             runtime = make_runtime(turn, a)
+            turn.runtime = runtime
             result = await runtime.run(job['prompt'])
             outcome = 'completed'
         except asyncio.CancelledError:
@@ -227,6 +253,7 @@ class Node:
                 self.queue(job['id'], 'finished', {'outcome': outcome, 'result': result, 'error': error})
             self.active.pop(job['id'], None); self.turns.pop(job['id'], None); self.stops.pop(job['id'], None)
             self.expires.pop(job['id'], None)
+            self.steering = {k for k in self.steering if k[0] != job['id']}
 
     async def call_tool(self, job, name, arguments):
         if time.monotonic() >= self.expires.get(job['id'], 0):

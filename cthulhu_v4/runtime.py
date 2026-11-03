@@ -119,6 +119,9 @@ class ProcessRuntime:
         self.proc.stdin.write((json.dumps(payload, ensure_ascii=False) + '\n').encode())
         await self.proc.stdin.drain()
 
+    async def steer(self, text):
+        raise RuntimeError('该后端不支持在回合进行中插入消息')
+
     def fail(self, message):
         if self.done and not self.done.done():
             self.done.set_exception(RuntimeError(message))
@@ -147,6 +150,7 @@ class CodexRuntime(ProcessRuntime):
         super().__init__(sink, agent)
         self.pending, self.serial, self.final = {}, 0, []
         self.session = agent['session']
+        self.turn_id, self.turn_ready = None, asyncio.Event()
 
     # 恢复长会话时 Codex 要读完整段历史：Master 的会话文件到 50MB 时 thread/resume 实测要 30–57 秒，
     # 统一 60 秒上限会让 Master 在恢复阶段超时失败。其他请求仍然很快，保持较短的上限。
@@ -179,6 +183,9 @@ class CodexRuntime(ProcessRuntime):
                 '-c', 'mcp_servers.cthulhu.env_vars=' + json.dumps(list(cfg['env'])),
                 # 仅本地 harness 工具由角色权限检查后直接执行；不修改其他 MCP 的审批。
                 '-c', 'mcp_servers.cthulhu.default_tools_approval_mode="approve"',
+                # Master 不在回合里 sleep 等执行者：发完指令就结束回合，回复到达会自动开新回合。
+                # 在回合里等待会让主人的新消息一直排在后面（实测 3 天 493 次、共 2.7 小时）。
+                *(['-c', 'features.sleep_tool=false'] if self.a['id'] == 'master' else []),
                 'app-server', '--listen', 'stdio://']
         await self.spawn(argv)
         self.readers.append(asyncio.create_task(self.read()))
@@ -262,8 +269,22 @@ class CodexRuntime(ProcessRuntime):
         if self.a.get('reasoning_effort'): params['effort'] = self.a['reasoning_effort']
         # 每轮显式带上模型：主人在网页切换模型后，沿用同一线程也立即按新模型执行。
         if self.a.get('model'): params['model'] = self.a['model']
-        await self.request('turn/start', params)
+        self.turn_ready.clear()
+        started = await self.request('turn/start', params)
+        self.turn_id = (started.get('turn') or {}).get('id')
+        self.turn_ready.set()
         return await self.done
+
+    # 恢复长会话可能要一分多钟：插入请求先等回合真正开始，再交给 Codex。
+    STEER_WAIT = 180
+
+    async def steer(self, text):
+        await asyncio.wait_for(self.turn_ready.wait(), self.STEER_WAIT)
+        if not self.turn_id or not self.done or self.done.done():
+            raise RuntimeError('回合已结束，未插入')
+        # expectedTurnId：只插进仍在进行的这一个回合；回合已换时 Codex 拒绝，消息退回队列。
+        await self.request('turn/steer', {'threadId': self.session, 'expectedTurnId': self.turn_id,
+                                          'input': [{'type': 'text', 'text': text}]})
 
 
 class ClaudeRuntime(ProcessRuntime):
@@ -314,6 +335,9 @@ class DemoRuntime:
     """
     def __init__(self, sink, agent):
         self.sink, self.a = sink, agent
+
+    async def steer(self, text):
+        raise RuntimeError('模拟后端不支持在回合进行中插入消息')
 
     async def run(self, text):
         sink, aid = self.sink, self.a['id']
