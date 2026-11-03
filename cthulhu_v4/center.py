@@ -19,7 +19,7 @@ from .update import FEATURE as UPDATE_FEATURE
 from .history import History
 from .hub import Hub
 from .store import Store
-from .tools import dispatch, tools_for
+from .tools import HTML_TEXT_LIMIT, dispatch, tools_for
 from .util import LEASE, LOCAL, MAX_TURNS, ROOT, TERMINAL, process_alive, uid
 
 EFFORTS = {'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}
@@ -279,11 +279,13 @@ class Center(Messages, Questions, Tasks, Review):
         """
         if name not in {t['name'] for t in tools_for(actor)}:
             raise ValueError('该角色没有此工具')
-        too_long = [k for k, v in (args or {}).items() if isinstance(v, str) and len(v) > AGENT_TEXT_LIMIT]
+        html = name == 'tell_owner' and (args or {}).get('format') == 'html'
+        too_long = [k for k, v in (args or {}).items()
+                    if isinstance(v, str) and len(v) > (HTML_TEXT_LIMIT if html and k == 'text' else AGENT_TEXT_LIMIT)]
         if too_long:
             # 正常沟通（含证据）远低于这个长度：实测最长约 3K 字。超长文字会撑爆接收方的上下文，
             # 直接打回让 agent 精炼后重发，而不是截断后替它决定保留什么。
-            raise ValueError(f"{'、'.join(too_long)} 超过 {AGENT_TEXT_LIMIT} 字符，未发送。请精炼后重发：写结论与关键证据，"
+            raise ValueError(f"{'、'.join(too_long)} 超过 {HTML_TEXT_LIMIT if html else AGENT_TEXT_LIMIT} 字符，未发送。请精炼后重发：写结论与关键证据，"
                              '长内容放进文件并用 节点::绝对路径 引用')
         with self.store.atomic():
             prior = dedupe and self.store.find('rpc', dedupe)

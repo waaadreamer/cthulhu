@@ -44,6 +44,34 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         # 静态路径不能逃出 static 目录。
         self.assertNotIn(b'websockets', await asyncio.to_thread(self.call, '/../requirements.txt', token=''))
 
+    def head(self, path):
+        with urllib.request.urlopen(self.url + path, timeout=10) as r:
+            return r.headers, r.read()
+
+    async def test_canvas_host_is_sandbox_only_and_main_page_csp_is_unchanged(self):
+        # 主页面仍只允许本站脚本、禁止被嵌入；画布宿主页允许内联脚本画图，但不许发请求、只许本站嵌入。
+        main, _ = await asyncio.to_thread(self.head, '/')
+        self.assertIn("script-src 'self';", main['Content-Security-Policy'])
+        self.assertIn("frame-ancestors 'none'", main['Content-Security-Policy'])
+        canvas, body = await asyncio.to_thread(self.head, '/canvas.html')
+        csp = canvas['Content-Security-Policy']
+        self.assertIn("connect-src 'none'", csp)
+        self.assertIn("frame-ancestors 'self'", csp)
+        self.assertIn("form-action 'none'", csp)
+        self.assertIn(b'postMessage', body)
+        font, raw = await asyncio.to_thread(self.head, '/vendor/katex/fonts/KaTeX_Main-Regular.woff2')
+        self.assertEqual(font['Content-Type'], 'font/woff2')
+        self.assertEqual(raw[:4], b'wOF2')
+
+    async def test_html_canvas_is_sent_whole_but_other_long_text_is_cut(self):
+        self.app.center.tool('master', 'tell_owner', {'text': '<p>' + 'x' * 40000 + '</p>', 'format': 'html'})
+        with self.app.center.store.atomic():
+            self.app.center.store.emit('chat', 'y' * 40000, actor='master', visible=True)
+        events = (await asyncio.to_thread(self.call, '/api/events?view=conversation&after=0&limit=500'))['events']
+        chats = [e for e in events if e['kind'] == 'chat']
+        self.assertEqual(len(chats[-2]['text']), 40007)
+        self.assertIn('截断', chats[-1]['text'])
+
     async def test_state_polls_return_small_deltas_that_rebuild_the_snapshot(self):
         full = await asyncio.to_thread(self.call, '/api/state')
         self.assertIn('agents', full)

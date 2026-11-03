@@ -2,6 +2,7 @@
 import { el, markdown, clock, rich } from './dom.js';
 import { Model } from './model.js';
 import { View, Live, render, who, elapsed } from './render.js';
+import { canvas } from './canvas.js';
 
 const LINES = {
   task_created: '新任务', instruction: '已下达', completed: '审核通过', review_requested: '申请结束', task_failed: '未达成', review_returned: '退回', task_reopened: '重新打开', question: '提问', ask_owner: '需要你决定',
@@ -105,7 +106,7 @@ export class Chat {
       this.root.append(el('div', { class: 'reply' + (e.kind === 'review' ? ' review' : '') },
         el('div', { class: 'reply-h' }, el('span', { class: 'av', 'aria-hidden': 'true', text: '✳' }),
           el('span', { text: e.kind === 'review' ? 'Master 定期审核' : 'Master' }), el('time', { text: clock(e.at) })),
-        markdown(e.text)));
+        e.data?.format === 'html' ? canvas(e.text) : markdown(e.text)));
       return;
     }
     if (LINES[e.kind] && (e.visible || e.kind === 'task_created')) this.line(e);

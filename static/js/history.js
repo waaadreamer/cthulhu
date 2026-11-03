@@ -1,6 +1,7 @@
 // 对话历史页：主人与 Master 的往来（含飞书、定期审核），新的在前，可按关键词搜索、逐页往前翻。
 // 主聊天里混着任务动态和工作过程，消息一多就难找；这里只列对话本身，按需从中心读取，不进每秒轮询。
 import { $, el, api, toast, markdown, stamp } from './dom.js';
+import { canvas } from './canvas.js';
 
 const PAGE = 50;
 const LABEL = { chat: 'Master', review: 'Master 定期审核', reply: 'Master · 侧栏', feishu_in: '飞书来信', feishu_out: 'Master → 飞书', message: '你' };
@@ -25,7 +26,7 @@ async function load(reset) {
       $('#history-list').append(el('li', { class: 'h-item ' + e.kind },
         el('div', { class: 'h-head' }, el('strong', { text: speaker(e) }), el('time', { text: stamp(e.at) }),
           el('span', { class: 'muted mono', text: '#' + e.seq })),
-        el('div', { class: 'h-body' }, markdown(e.text))));
+        el('div', { class: 'h-body' }, e.data?.format === 'html' ? canvas(e.text) : markdown(e.text))));
     }
     $('#history-more').hidden = !r.more;
     const n = $('#history-list').children.length;

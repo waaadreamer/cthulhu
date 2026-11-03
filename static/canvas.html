@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script>
+// HTML 画布的宿主页：主聊天以 <iframe sandbox="allow-scripts"> 载入它，再用 postMessage 送来 Master 写的 HTML。
+// 为什么这样做：沙箱不含 allow-same-origin，页面是不透明来源，脚本读不到主页面的 localStorage（访问凭证），
+// 也调不了中心接口（接口要 Bearer 凭证，不认 cookie）。中心给这个文件单独发 CSP：允许内联脚本与 https 上的图表库，
+// 禁止 fetch/XHR/WebSocket（connect-src 'none'）。主页面自己的 CSP 不变。
+(function () {
+  var done = false;
+  addEventListener('message', function (e) {
+    if (done || e.source !== parent || !e.data || typeof e.data.html !== 'string') return;
+    done = true;
+    var html = e.data.html;
+    // 片段（没有 <html>/<body>）套一层与主界面一致的深色底；完整文档原样使用，由作者自己决定样式。
+    if (!/<(html|head|body)[\s>]/i.test(html))
+      html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        + '<style>:root{color-scheme:dark}body{margin:0;padding:14px 16px;font:14px/1.6 system-ui,-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif;'
+        + 'color:#e8e9ef;background:#1a1d26}img,svg,canvas,video{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #383f52;padding:4px 8px}</style>'
+        + '</head><body>' + html + '</body></html>';
+    // document.open 保留本文档与它的 CSP，只替换内容；之后再挂高度上报（open 会清掉之前的事件监听）。
+    document.open(); document.write(html); document.close();
+    var last = 0;
+    function report() {
+      var h = Math.ceil(Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0));
+      if (h !== last) { last = h; parent.postMessage({ canvasHeight: h }, '*'); }
+    }
+    if (typeof ResizeObserver === 'function') new ResizeObserver(report).observe(document.documentElement);
+    addEventListener('load', report); setTimeout(report, 0); setTimeout(report, 600);
+  });
+  parent.postMessage({ canvasReady: true }, '*');
+})();
+</script>

@@ -11,6 +11,7 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from .tools import HTML_TEXT_LIMIT
 from .util import ROOT, cut
 
 UI_TEXT, UI_FIELD = 20000, 8000
@@ -46,9 +47,23 @@ def snapshot_delta(old, new):
             out[k] = {'drop': True}
     return out
 
+def ui_event(e):
+    """单个字段过长时截断（注明原长度）：一条大工具输出不能让一页事件变成几 MB。完整内容仍在库里。
+    HTML 画布例外：截断后的 HTML 会渲染成半张图甚至跑不起来，按它自己的上限整段发给浏览器。"""
+    html = e['kind'] == 'chat' and (e['data'] or {}).get('format') == 'html'
+    return e | {'text': cut(e['text'], HTML_TEXT_LIMIT if html else UI_TEXT), 'data': cut(e['data'], UI_FIELD, 200)}
+
+
 STATIC = ROOT / 'static'
 MIME = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
-        '.sh': 'text/x-shellscript'}
+        '.sh': 'text/x-shellscript', '.woff2': 'font/woff2'}
+TEXT_MIME = ('text/', 'image/svg')
+CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+# HTML 画布宿主页（static/canvas.html）只在 sandbox="allow-scripts" 的 iframe 里运行，来源不透明，碰不到凭证。
+# 为了能画图：允许内联脚本/样式与 https 上的图表库、图片、字体；禁止一切网络请求，表单也不能提交；只许本站嵌入。
+CANVAS_CSP = ("default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https:; style-src 'unsafe-inline' https:; "
+              "img-src data: blob: https:; font-src data: https:; media-src data: blob:; connect-src 'none'; "
+              "form-action 'none'; base-uri 'none'; frame-ancestors 'self'")
 
 
 class Web:
@@ -93,9 +108,11 @@ class Web:
                     if not target.is_relative_to(STATIC) or not target.is_file():
                         target = STATIC / 'index.html'
                 mime = MIME.get(target.suffix, 'application/octet-stream')
-                self.respond(200, target.read_bytes(), mime + '; charset=utf-8')
+                # 字体是二进制，不能带 charset；也不再 gzip（woff2 本身已压缩）。
+                self.respond(200, target.read_bytes(), mime + '; charset=utf-8' if mime.startswith(TEXT_MIME) else mime,
+                             csp=CANVAS_CSP if target.name == 'canvas.html' else CSP)
 
-            def respond(self, status, value, content_type='application/json; charset=utf-8'):
+            def respond(self, status, value, content_type='application/json; charset=utf-8', csp=CSP):
                 raw = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
                 # 自己压缩文本响应：反向代理默认只压缩 HTML，JSON 原样外发，而出站流量计费。
                 gz = len(raw) > 1024 and 'gzip' in self.headers.get('Accept-Encoding', '') and content_type.startswith(('application/json', 'text/'))
@@ -109,7 +126,7 @@ class Web:
                 self.send_header('Content-Length', str(len(raw)))
                 self.send_header('Cache-Control', 'no-store')
                 self.send_header('X-Content-Type-Options', 'nosniff')
-                self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
+                self.send_header('Content-Security-Policy', csp)
                 self.end_headers()
                 try: self.wfile.write(raw)
                 except (BrokenPipeError, ConnectionResetError): pass
@@ -153,15 +170,14 @@ class Web:
                 events = c.store.events(after=int(q('after', 0)), limit=limit, agent=q('agent'),
                                         conversation=q('view') == 'conversation', ui=True, harness=q('harness') == '1',
                                         before=None if before is None else int(before), compact=before is not None)
-                # 单个字段过长时截断（注明原长度）：一条大工具输出不能让一页事件变成几 MB。完整内容仍在库里。
-                events = [e | {'text': cut(e['text'], UI_TEXT), 'data': cut(e['data'], UI_FIELD, 200)} for e in events]
+                events = [ui_event(e) for e in events]
                 return {'events': events, 'more': len(events) >= limit, 'highwater': c.store.highwater()}
             if path == '/api/file':
                 return await c.files.read(q('ref'), refresh=q('refresh') == '1')
             if path == '/api/history':
                 limit = int(q('limit', 50))
                 events = await asyncio.to_thread(c.store.history, q('q', ''), q('before'), limit, q('aside') == '1')
-                events = [e | {'text': cut(e['text'], UI_TEXT), 'data': cut(e['data'], UI_FIELD, 200)} for e in events]
+                events = [ui_event(e) for e in events]
                 return {'events': events, 'more': len(events) >= limit}
             if path == '/api/monitor':
                 return c.monitor.panels()

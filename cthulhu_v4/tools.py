@@ -2,6 +2,9 @@
 S = {'type': 'string'}
 I = {'type': 'integer'}
 B = {'type': 'boolean'}
+FORMATS = ('markdown', 'html')
+# HTML 画布常内联图表数据，2 万字符不够；但它整段进 Master 上下文、存进事件，仍要有上限。
+HTML_TEXT_LIMIT = 100000
 READ_ONLY = {'list_tasks', 'read_task_events', 'list_questions', 'read_messages', 'list_nodes'}
 
 
@@ -32,7 +35,11 @@ MASTER = [
           'backend': {'type': 'string', 'enum': ['codex', 'claude', 'demo']}, 'model': S,
           'reasoning_effort': {'type': 'string', 'enum': ['low', 'medium', 'high', 'xhigh']}},
          ['title', 'description', 'acceptance', 'deadline']),
-    spec('tell_owner', '主动向主人主聊天框汇报判断、操作结果和风险。', {'text': S}, ['text']),
+    spec('tell_owner', '主动向主人主聊天框汇报判断、操作结果和风险。format 默认 markdown（支持表格、$公式$、$$块公式$$、任务列表）。'
+         "format='html' 时 text 是一段 HTML（可含 <style>、<script>、内联 SVG/canvas，可从 https CDN 引入 ECharts、Chart.js 等），"
+         '在主聊天里以沙箱画布渲染，适合图表、对比、时间线、进度等可视化：画布不能发网络请求，数据须内联；读不到页面其他内容。'
+         f'HTML 上限 {HTML_TEXT_LIMIT} 字符；飞书看不到画布，需要同时告知飞书时另用 feishu 发文字。',
+         {'text': S, 'format': {'type': 'string', 'enum': ['markdown', 'html']}}, ['text']),
     spec('list_questions', '读取问题、当前版本与等待期限。'),
     spec('answer_question', '回答问题；必须提交读取时的 version，旧版本拒绝，防止覆盖主人晚到的回答。',
          {'question_id': S, 'version': I, 'answer': S}, ['question_id', 'version', 'answer']),
@@ -93,6 +100,14 @@ def send_message(c, actor, p):
     return message
 
 
+def tell_owner(c, actor, p):
+    fmt = p.get('format') or 'markdown'
+    if fmt not in FORMATS:
+        raise ValueError("format 只能是 'markdown' 或 'html'")
+    # format 只在 html 时写入：旧事件没有这个字段，前端一律按 Markdown 渲染。
+    return {'seq': c.store.emit('chat', p['text'], actor='master', visible=True, data={'format': 'html'} if fmt == 'html' else None)}
+
+
 HANDLERS = {
     'list_nodes': lambda c, a, p: c.hub.nodes(),
     'list_tasks': lambda c, a, p: c.list_tasks(a),
@@ -104,7 +119,7 @@ HANDLERS = {
     'list_questions': lambda c, a, p: c.store.all('question'),
     'answer_question': lambda c, a, p: c.answer(a, p),
     'ask_owner': lambda c, a, p: c.ask_owner(a, p),
-    'tell_owner': lambda c, a, p: {'seq': c.store.emit('chat', p['text'], actor='master', visible=True)},
+    'tell_owner': tell_owner,
     'finish_review': lambda c, a, p: c.finish_review(p),
     'control_task': lambda c, a, p: c.control(p),
     'set_deadline': lambda c, a, p: c.set_deadline(a, p),

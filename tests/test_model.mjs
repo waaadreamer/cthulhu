@@ -166,3 +166,35 @@ console.log('test_model: acl ok');
   assert.equal(groupOpen('archived', store), false);
 }
 console.log('test_model: task groups ok');
+
+// Markdown：表格、公式、嵌套列表、任务列表、引用里的块；流式输出时半截的围栏与公式不吞掉前文。
+{
+  const { parseBlocks, cells } = await import('../static/js/markdown.js');
+  const { scan } = await import('../static/js/dom.js');
+  const types = t => parseBlocks(t).map(b => b.type);
+  const [tbl] = parseBlocks('| 名称 | 数量 |\n|:---|---:|\n| a | 1 |\n| `x|y` | 2 | 多余 |\n| b |');
+  assert.deepEqual(tbl.head, ['名称', '数量']); assert.deepEqual(tbl.align, ['left', 'right']);
+  assert.deepEqual(tbl.rows, [['a', '1'], ['`x|y`', '2'], ['b', '']]);   // 反引号里的 | 不切；列数以表头为准
+  assert.deepEqual(cells('a \\| b | c'), ['a | b', 'c']);
+  assert.deepEqual(types('标题\n---'), ['para', 'hr']);                    // 一列的 “---” 不是表格
+  assert.deepEqual(parseBlocks('$$\n\\int_0^1 x\\,dx\n$$')[0], { type: 'math', text: '\\int_0^1 x\\,dx' });
+  assert.deepEqual(parseBlocks('$$a^2$$')[0], { type: 'math', text: 'a^2' });
+  assert.deepEqual(parseBlocks('\\[\nx\n\\]')[0], { type: 'math', text: 'x' });
+  const [ul] = parseBlocks('- 一\n  - 子\n    1. 孙\n- [x] 完成\n- [ ] 未完');
+  assert.equal(ul.items.length, 3);
+  assert.equal(ul.items[0].blocks[1].items[0].blocks[1].ordered, true);
+  assert.deepEqual(ul.items.map(i => i.check), [null, true, false]);
+  assert.equal(parseBlocks('3. 三\n4. 四')[0].start, 3);
+  assert.deepEqual(parseBlocks('> 引\n> - 列')[0].blocks.map(b => b.type), ['para', 'list']);
+  assert.deepEqual(types('前文\n```py\nprint(1)'), ['para', 'code']);    // 未闭合的围栏到末尾为止
+  assert.deepEqual(types('前文\n$$\nx'), ['para', 'math']);
+  assert.deepEqual(parseBlocks('段一\n续行\n## 标')[0].lines, ['段一', '续行']);
+  // 行内：公式、斜体、删除线、转义；金额与 snake_case 不误判。
+  const kinds = t => scan(t).filter(g => g.type !== 'text').map(g => g.type + ':' + g.text);
+  assert.deepEqual(kinds('质能 $E=mc^2$ 与 \\(a+b\\)'), ['math:E=mc^2', 'math:a+b']);
+  assert.deepEqual(kinds('价格 $5 到 $10，变量 a_b_c'), []);
+  assert.deepEqual(kinds('*斜* 与 ~~删~~ 与 **粗**'), ['em:斜', 'del:删', 'bold:粗']);
+  assert.deepEqual(kinds('2 * 3 * 4'), []);
+  assert.equal(scan('\\*不是斜体\\*').map(g => g.text).join(''), '*不是斜体*');
+}
+console.log('test_model: markdown ok');

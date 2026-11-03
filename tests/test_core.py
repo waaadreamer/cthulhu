@@ -125,6 +125,21 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(self.c.store.all('message')), before)
         self.c.tool(t['agent'], 'send_message', {'to': 'master', 'text': 'x' * 20000})  # 边界内正常
 
+    def test_tell_owner_html_has_its_own_format_and_budget(self):
+        # Markdown 是默认，旧事件没有 format 字段；HTML 画布另有上限，仍然拒绝无限长。
+        seq = self.c.tool('master', 'tell_owner', {'text': '# 标题'})['seq']
+        html = self.c.tool('master', 'tell_owner', {'text': '<svg></svg>' + 'x' * 30000, 'format': 'html'})['seq']
+        by = {e['seq']: e for e in self.c.store.events(limit=500)}
+        self.assertEqual(by[seq]['data'], {})
+        self.assertEqual(by[html]['data'], {'format': 'html'})
+        self.assertTrue(by[html]['visible'])
+        with self.assertRaisesRegex(ValueError, 'text'):
+            self.c.tool('master', 'tell_owner', {'text': 'x' * 30000})                       # Markdown 仍是 2 万
+        with self.assertRaisesRegex(ValueError, '100000'):
+            self.c.tool('master', 'tell_owner', {'text': 'x' * 100001, 'format': 'html'})
+        with self.assertRaisesRegex(ValueError, 'format'):
+            self.c.tool('master', 'tell_owner', {'text': 'x', 'format': 'pdf'})
+
     def test_repeated_worker_failures_coalesce_into_one_master_message(self):
         t = self.create()
         for i in range(5):

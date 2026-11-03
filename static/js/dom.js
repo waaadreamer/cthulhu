@@ -1,4 +1,6 @@
 // DOM 小工具、安全的 Markdown 渲染与 API 访问。全程不使用 innerHTML：命令输出里的 HTML 只会显示为文本。
+import { parseBlocks } from './markdown.js';
+
 export const $ = s => document.querySelector(s);
 
 export function el(tag, attrs, ...kids) {
@@ -26,9 +28,15 @@ const P = "[^\\s/`'\"<>()（）\\[\\]{}，。；、：:,;|]";
 const REF = `[A-Za-z0-9_-]{1,64}::\\/(?:${P}+\\/)*${P}*`;
 const PATH = `\\/(?:${P}+\\/)+${P}*`;
 const BEFORE = "(?<=^|[\\s(（\\[{'\"`：:=，,])";
+// 分组序号有含义（scan 按序号分派）：1 代码 2 粗体 3 链接 4 网址 5/6 文件 7–9 公式 10 删除线 11 斜体 12 转义。
+// 行内公式 $…$ 按 pandoc 规则：开头 $ 后、结尾 $ 前不能是空白，结尾 $ 后不能紧跟数字或字母，
+// 这样 “$5 到 $10” 这类金额不会被当成公式。斜体只认 *…*，不认 _…_，免得把 snake_case 拆开。
 const INLINE = new RegExp([
   '`[^`\\n]+`', '\\*\\*[^*\\n]+\\*\\*', '\\[[^\\]\\n]+\\]\\([^\\s)]+\\)', 'https?:\\/\\/[^\\s)<>]+',
-  `(?<![A-Za-z0-9_-])${REF}`, BEFORE + PATH].map(x => `(${x})`).join('|'), 'g');
+  `(?<![A-Za-z0-9_-])${REF}`, BEFORE + PATH,
+  '\\$\\$[^$\\n]+?\\$\\$', '\\\\\\(.+?\\\\\\)', '(?<![\\\\$\\w])\\$(?=[^\\s$])[^$\\n]*?[^\\s\\\\$]\\$(?![\\w$])',
+  '~~[^~\\n]+~~', '(?<![*\\w])\\*(?![\\s*])[^*\\n]+?(?<![\\s*])\\*(?![*\\w])',
+  '\\\\[\\\\`*_$|~\\[\\]()#+\\-.!<>]'].map(x => `(${x})`).join('|'), 'g');
 const FILES = new RegExp(`((?<![A-Za-z0-9_-])${REF})|(${BEFORE}${PATH})`, 'g');
 const IS_REF = new RegExp(`^${REF}$`), IS_PATH = new RegExp(`^${PATH}$`);
 
@@ -69,8 +77,13 @@ export function scan(text, ctx = {}, re = INLINE) {
     else if (s[0] === '`') {
       const inner = s.slice(1, -1);
       out.push(IS_REF.test(inner) || IS_PATH.test(inner) ? fileSeg(inner, ctx, prefix, inner, true) : { type: 'code', text: inner });
-    } else if (s.startsWith('**')) out.push({ type: 'bold', text: s.slice(2, -2) });
-    else if (/^https?:\/\//i.test(s)) out.push({ type: 'url', href: s, text: s });
+    } else if (m[2]) out.push({ type: 'bold', text: s.slice(2, -2) });
+    else if (m[4]) out.push({ type: 'url', href: s, text: s });
+    else if (m[7] || m[8]) out.push({ type: 'math', text: s.slice(2, -2) });
+    else if (m[9]) out.push({ type: 'math', text: s.slice(1, -1) });
+    else if (m[10]) out.push({ type: 'del', text: s.slice(2, -2) });
+    else if (m[11]) out.push({ type: 'em', text: s.slice(1, -1) });
+    else if (m[12]) out.push({ type: 'text', text: s[1] });
     else {
       const [, label, target] = s.match(/^\[([^\]]+)\]\((.+)\)$/);
       // 只允许 http(s) 与文件链接，避免 javascript: 等协议。
@@ -95,6 +108,8 @@ function put(parent, segs, ctx) {
     if (g.type === 'text') parent.append(g.text);
     else if (g.type === 'code') parent.append(el('code', { text: g.text }));
     else if (g.type === 'bold') { const b = el('strong'); put(b, scan(g.text, ctx), ctx); parent.append(b); }
+    else if (g.type === 'em' || g.type === 'del') { const b = el(g.type); put(b, scan(g.text, ctx), ctx); parent.append(b); }
+    else if (g.type === 'math') parent.append(math(g.text, false));
     else if (g.type === 'url') parent.append(el('a', { href: g.href, target: '_blank', rel: 'noopener noreferrer', text: g.text }));
     else parent.append(fileLink(g.node, g.path, g.label, g.code));
   }
@@ -108,37 +123,64 @@ export function linkPaths(parent, text, ctx = {}) { put(parent, scan(text, ctx, 
 // 单行富文本（事件行等）。
 export function rich(text, ctx = {}) { const n = el('span'); inline(n, text, ctx); return n; }
 
-export function markdown(text, opts = {}) {
-  const root = el('div', { class: 'md' });
-  const ctx = { node: opts.node, last: null };
-  let mention = null;
-  let code = null, list = null, para = null;
-  for (const line of clean(text).split('\n')) {
-    ctx.last = mention || ctx.last; mention = lastMention(line);
-    const fence = line.match(/^\s*```(\S*)/);
-    if (fence) {
-      if (code) { root.append(code); code = null; }
-      else { code = el('pre', { class: 'code', 'data-lang': fence[1] || null }); }
-      list = para = null; continue;
+// ---- 公式 ----
+// KaTeX（static/vendor/katex，MIT）约 270KB，只在第一次遇到公式时加载。加载前先显示 TeX 原文，
+// 加载完再原地替换：流式输出时节点会被频繁替换，已脱离文档的占位就跳过。
+let katexLoad = null;
+const pendingMath = new Set();
+function typeset(n) {
+  try { globalThis.katex.render(n.dataset.tex, n, { displayMode: n.dataset.display === '1', throwOnError: false, output: 'html' }); }
+  catch { /* 渲染失败时保留原文 */ }
+}
+export function math(tex, display) {
+  const n = el(display ? 'div' : 'span', { class: display ? 'math math-block' : 'math', 'data-tex': tex, 'data-display': display ? '1' : '0', text: tex });
+  if (globalThis.katex) { typeset(n); return n; }
+  pendingMath.add(n);
+  // UMD 包在模块里执行时挂到 self.katex 上；样式表同时加载，字体按需由样式表引用。
+  katexLoad ||= (document.head.append(el('link', { rel: 'stylesheet', href: new URL('../vendor/katex/katex.min.css', import.meta.url).href })),
+    import('../vendor/katex/katex.min.js')).then(() => { for (const p of pendingMath) p.isConnected !== false && typeset(p); pendingMath.clear(); },
+    () => { katexLoad = null; pendingMath.clear(); });
+  return n;
+}
+
+// 块树 → DOM。文件路径的节点推测沿用“正文里最近提到的节点名”：按阅读顺序逐段更新 ctx.last。
+function blocks(parent, list, ctx) {
+  const run = (n, t) => { inline(n, t, ctx); ctx.last = lastMention(t) || ctx.last; return n; };
+  for (const b of list) {
+    if (b.type === 'para') {
+      const p = el('p');
+      b.lines.forEach((l, i) => { if (i) p.append(el('br')); run(p, l); });
+      parent.append(p);
+    } else if (b.type === 'heading') parent.append(run(el('h' + Math.min(6, b.level + 2)), b.text));
+    else if (b.type === 'code') parent.append(el('pre', { class: 'code', 'data-lang': b.lang || null, text: b.text }));
+    else if (b.type === 'math') parent.append(math(b.text, true));
+    else if (b.type === 'hr') parent.append(el('hr'));
+    else if (b.type === 'quote') parent.append(blocks(el('blockquote'), b.blocks, ctx));
+    else if (b.type === 'list') {
+      const n = el(b.ordered ? 'ol' : 'ul', { start: b.ordered && b.start !== 1 ? b.start : null });
+      for (const it of b.items) {
+        const li = el('li', { class: it.check == null ? null : 'task-item' });
+        if (it.check != null) li.append(el('input', { type: 'checkbox', checked: it.check, disabled: true, 'aria-label': it.check ? '已完成' : '未完成' }));
+        // 只有一段文字的项不包 <p>，保持紧凑列表的行距。
+        const [head, ...rest] = it.blocks;
+        if (head?.type === 'para') { head.lines.forEach((l, i) => { if (i) li.append(el('br')); run(li, l); }); blocks(li, rest, ctx); }
+        else blocks(li, it.blocks, ctx);
+        n.append(li);
+      }
+      parent.append(n);
+    } else if (b.type === 'table') {
+      const cell = (tag, t, k) => run(el(tag, { 'data-align': b.align[k] }), t);
+      // 宽表在窄屏上横向滚动，而不是把整页撑宽。
+      parent.append(el('div', { class: 'table-wrap' }, el('table', {},
+        el('thead', {}, el('tr', {}, ...b.head.map((t, k) => cell('th', t, k)))),
+        el('tbody', {}, ...b.rows.map(r => el('tr', {}, ...r.map((t, k) => cell('td', t, k))))))));
     }
-    if (code) { code.textContent += (code.textContent ? '\n' : '') + line; continue; }
-    if (!line.trim()) { list = para = null; continue; }
-    const item = line.match(/^\s*([-*]|\d+[.)])\s+(.*)/);
-    if (item) {
-      const ordered = /\d/.test(item[1]);
-      if (!list || list.ordered !== ordered) { list = el(ordered ? 'ol' : 'ul'); list.ordered = ordered; root.append(list); }
-      const li = el('li'); inline(li, item[2], ctx); list.append(li); para = null; continue;
-    }
-    list = null;
-    const h = line.match(/^(#{1,4})\s+(.+)/);
-    if (h) { const n = el('h' + Math.min(6, h[1].length + 2)); inline(n, h[2], ctx); root.append(n); para = null; continue; }
-    const quote = line.match(/^>\s?(.*)/);
-    if (quote) { const q = el('blockquote'); inline(q, quote[1], ctx); root.append(q); para = null; continue; }
-    if (para) para.append(el('br')); else { para = el('p'); root.append(para); }
-    inline(para, line, ctx);
   }
-  if (code) root.append(code);
-  return root;
+  return parent;
+}
+
+export function markdown(text, opts = {}) {
+  return blocks(el('div', { class: 'md' }), parseBlocks(clean(text)), { node: opts.node, last: null });
 }
 
 const pad = n => String(n).padStart(2, '0');
