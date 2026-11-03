@@ -28,7 +28,8 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     await page.locator('#chat .live').waitFor({ state: 'detached' });
     // 切换模型：同后端直接保存；换后端需要确认新会话。
     await page.locator('#model').click();
-    await page.locator('#model-form [name=model]').fill('demo-model');
+    // demo 后端不显示模型卡片（没有可选目录），直接写隐藏字段，验证保存路径与标签刷新。
+    await page.locator('#model-dialog[open]').waitFor(); await page.evaluate(() => { document.querySelector('#model-form [name=model]').value = 'demo-model'; });
     await page.locator('#model-form .btn.primary').click();
     await page.locator('#model').getByText('demo-model').waitFor();
     // 新建任务 → 抽屉自动打开
@@ -92,12 +93,15 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
     // 归档：从列表收起到“已归档”，取消归档后回来。
     await page.locator('#d-controls').getByText('归档', { exact: true }).click();
     await page.locator('#drawer').waitFor({ state: 'hidden' });
-    await page.locator('#tasks .archive summary').waitFor();
-    assert.equal(await page.locator('#tasks > .task').count(), 0);
-    await page.locator('#tasks .archive summary').click();
-    await page.locator('#tasks .archive .task').click();
+    await page.locator('#tasks [data-group=archived] summary').waitFor();
+    assert.equal(await page.locator('#tasks [data-group=completed]').count(), 0);
+    await page.locator('#tasks [data-group=archived] summary').click();
+    await page.locator('#tasks [data-group=archived] .task').click();
     await page.locator('#d-controls').getByText('取消归档').click();
-    await page.locator('#tasks > .task').waitFor();
+    // 已完成组默认收起；展开后刷新仍保持展开（记在本浏览器）。
+    await page.locator('#tasks [data-group=completed] summary').click();
+    await page.locator('#tasks [data-group=completed] .task').waitFor();
+    await page.reload(); await page.locator('#tasks [data-group=completed] .task').waitFor();
     // 左栏：节点在任务上方，两个分区都能折叠，刷新后保持。
     assert(await page.evaluate(() => document.querySelector('[data-sec=nodes]').compareDocumentPosition(document.querySelector('[data-sec=tasks]')) & Node.DOCUMENT_POSITION_FOLLOWING));
     await page.locator('[data-sec=nodes] .sec-t').click();

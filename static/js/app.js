@@ -9,6 +9,7 @@ import { Chat } from './chat.js';
 import { applyDelta } from './delta.js';
 import { modelChoices, effortChoices, catalogNote } from './models.js';
 import { initHistory } from './history.js';
+import { groupTasks, groupOpen, setGroupOpen } from './tasks.js';
 
 const STATE = { running: '进行中', waiting: '等待', paused: '已暂停', review: '待审核', completed: '已完成', failed: '未达成', cancelled: '已取消' };
 const DONE = new Set(['completed', 'failed', 'cancelled']);
@@ -182,20 +183,18 @@ function taskRow(t) {
     el('span', { class: 'chev', 'aria-hidden': 'true', text: '›' }));
 }
 
-// 已归档任务收进底部的折叠组；展开状态单独记住，否则每秒重绘会把它收起。
-let archiveOpen = false;
+// 任务按状态分组折叠（分组规则见 tasks.js）。左栏每秒整块重绘，所以展开状态存在 localStorage、
+// 每次重绘读回：否则主人刚展开的组下一秒就被收起，刷新后也记不住。
 function renderSide() {
   const list = $('#tasks'); list.replaceChildren();
-  const byRecent = (a, b) => DONE.has(a.state) - DONE.has(b.state) || b.created_at - a.created_at;
-  const tasks = snap.tasks.filter(t => !t.archived).sort(byRecent);
-  const archived = snap.tasks.filter(t => t.archived).sort((a, b) => (b.completed_at || b.created_at) - (a.completed_at || a.created_at));
-  $('#task-count').textContent = tasks.filter(t => !DONE.has(t.state)).length || '';
-  if (!tasks.length) list.append(el('p', { class: 'muted pad', text: archived.length ? '没有未归档的任务' : '还没有任务' }));
-  for (const t of tasks) list.append(taskRow(t));
-  if (archived.length) {
-    const group = el('details', { class: 'archive', open: archiveOpen, ontoggle: () => (archiveOpen = group.open) },
-      el('summary', {}, el('span', { text: '已归档' }), el('span', { class: 'count', text: archived.length })),
-      ...archived.map(taskRow));
+  $('#task-count').textContent = snap.tasks.filter(t => !t.archived && !DONE.has(t.state)).length || '';
+  if (!snap.tasks.length) list.append(el('p', { class: 'muted pad', text: '还没有任务' }));
+  for (const g of groupTasks(snap.tasks)) {
+    // 新建的 <details open> 也会触发一次 toggle；只在和已存值不同时写入，免得把默认值误记成主人的选择。
+    const group = el('details', { class: 'tgroup', 'data-group': g.key, open: groupOpen(g.key),
+      ontoggle: () => group.open !== groupOpen(g.key) && setGroupOpen(g.key, group.open) },
+      el('summary', {}, el('span', { text: g.label }), el('span', { class: 'count', text: g.tasks.length })),
+      ...g.tasks.map(taskRow));
     list.append(group);
   }
   const nodes = $('#nodes'); nodes.replaceChildren();

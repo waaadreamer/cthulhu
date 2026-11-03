@@ -138,13 +138,15 @@ dialog mark { background: color-mix(in srgb, var(--need) 30%, transparent); colo
 .task[data-state=review] .dot { background: var(--need); }
 .task[data-state=failed] .dot { background: var(--bad); }
 .dot.busy { animation: pulse 2s ease-in-out infinite; }
-.archive { margin-top: 6px; }
-.archive > summary { list-style: none; display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 12.5px; color: var(--ink-3); cursor: pointer; border-radius: 8px; }
-.archive > summary::-webkit-details-marker { display: none; }
-.archive > summary::before { content: '›'; transition: transform .15s; }
-.archive[open] > summary::before { transform: rotate(90deg); }
-.archive > summary:hover { color: var(--ink-2); background: var(--s1); }
-.archive .task { opacity: .75; } .archive .task:hover { opacity: 1; }
+/* 任务分组：组名一行可折叠，组内任务缩进对齐圆点。 */
+.tgroup + .tgroup { margin-top: 2px; }
+.tgroup > summary { list-style: none; display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 12.5px; color: var(--ink-3); cursor: pointer; border-radius: 8px; user-select: none; }
+.tgroup > summary::-webkit-details-marker { display: none; }
+.tgroup > summary::before { content: '›'; display: inline-block; width: 8px; transition: transform .15s; }
+.tgroup[open] > summary::before { transform: rotate(90deg); }
+.tgroup > summary:hover { color: var(--ink-2); background: var(--s1); }
+.tgroup[data-group=active] > summary { color: var(--ink-2); }
+.tgroup[data-group=archived] .task { opacity: .75; } .tgroup[data-group=archived] .task:hover { opacity: 1; }
 .node { display: flex; align-items: center; gap: 9px; padding: 6px 10px; font-size: 13px; border-radius: 8px; width: 100%; border: 0; background: none; text-align: left; cursor: pointer; }
 .node:hover { background: var(--s1); }
 .node[data-online=true] .dot { background: var(--done); }

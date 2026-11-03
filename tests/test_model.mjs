@@ -149,3 +149,20 @@ console.log('test_model: acl ok');
   assert.equal(speaker({ kind: 'feishu_in', data: { name: '张三' } }), '张三');
   assert.equal(speaker({ kind: 'feishu_in', data: { owner: true } }), '你 · 飞书');
 }
+
+// 任务分组：固定顺序、空组省略、待审核算进行中、未知状态不丢；展开状态只记主人改过的组。
+{
+  const { groupTasks, groupOpen, setGroupOpen } = await import('../static/js/tasks.js');
+  const t = (id, state, extra = {}) => ({ id, state, created_at: +id.slice(1), ...extra });
+  const groups = groupTasks([t('t1', 'completed', { completed_at: 50 }), t('t2', 'running'), t('t3', 'review'), t('t4', 'paused'),
+    t('t5', 'completed', { completed_at: 90 }), t('t6', 'weird'), t('t7', 'failed', { archived: true }), t('t8', 'waiting')]);
+  assert.deepEqual(groups.map(g => g.key), ['active', 'paused', 'completed', 'archived']);
+  assert.deepEqual(groups[0].tasks.map(x => x.id), ['t8', 't6', 't3', 't2']);   // 新建的在前
+  assert.deepEqual(groups[2].tasks.map(x => x.id), ['t5', 't1']);               // 刚结束的在前
+  const mem = new Map(), store = { getItem: k => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v) };
+  assert.equal(groupOpen('active', store), true); assert.equal(groupOpen('completed', store), false);
+  setGroupOpen('completed', true, store); setGroupOpen('active', false, store);
+  assert.equal(groupOpen('completed', store), true); assert.equal(groupOpen('active', store), false);
+  assert.equal(groupOpen('archived', store), false);
+}
+console.log('test_model: task groups ok');
