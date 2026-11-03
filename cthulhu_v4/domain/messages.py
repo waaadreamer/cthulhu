@@ -1,7 +1,14 @@
 """消息队列：先落盘再执行；优先级只排序，10 是显式打断。"""
 
+from datetime import datetime
+
 BATCH_COUNT = 30
 BATCH_CHARS = 60000
+
+
+def progress(sender, reply_to, key, copy, solo):
+    """可合并的普通进度：执行者自己发的、不是回复、不是程序生成的副本、没有专门的去重键或单独成回合要求。"""
+    return sender not in {'owner', 'system', 'master', 'feishu'} and not (reply_to or key or copy or solo)
 
 
 class Messages:
@@ -28,6 +35,10 @@ class Messages:
             original = s.get('message', reply_to)
             if original['sender'] != target or original['target'] != sender:
                 raise ValueError('reply_to 必须对应双方之间的来信')
+        if target == 'master' and progress(sender, reply_to, key, copy, solo):
+            merged = self.merge_progress(sender, text, priority)
+            if merged:
+                return merged
         m = {'id': self.uid('m'), 'sender': sender, 'target': target, 'text': text, 'priority': priority,
              'state': 'queued', 'at': self.clock(), 'reply_to': reply_to, 'key': key, 'copy': copy, 'solo': solo}
         s.put('message', m)
@@ -45,6 +56,28 @@ class Messages:
         if reply_to and task and task.get('wait', {}).get('message_id') == reply_to:
             self.clear_wait(task)
         self.wake(target)
+        return m
+
+    def merge_progress(self, sender, text, priority):
+        """执行者发给 Master 的普通进度，若它上一条进度还在排队，就追加进那一条，不另占一条。
+
+        为什么：单个执行者一天能发近两百条进度，每条都可能单独成一个 Master 回合，而后一条往往覆盖前一条。
+        追加而不是替换：每段原文都保留并标出时间，Master 仍能看到完整经过。
+        只合并仍为 queued 的：已派发（running）的消息内容已交给模型，再改会让记录与实际输入不一致。
+        单条过长时不再合并，避免一条消息超过单回合输入上限。
+        """
+        s = self.store
+        m = next((m for m in s.where('message', 'queued') if m['state'] == 'queued' and m['target'] == 'master'
+                  and m['sender'] == sender and progress(m['sender'], m.get('reply_to'), m.get('key'), m.get('copy'), m.get('solo'))), None)
+        if not m or len(m['text']) + len(text) > BATCH_CHARS // 2:
+            return None
+        stamp = datetime.fromtimestamp(self.clock()).astimezone().strftime('%H:%M:%S')
+        m.update(text=m['text'] + f'\n\n[追加 {stamp}]\n' + text, priority=max(m['priority'], priority),
+                 merged=m.get('merged', 1) + 1, at_last=self.clock())
+        s.put('message', m)
+        # 每段原文仍单独记一条事件：侧栏、消息导出与记忆提炼都按事件读，合并只影响 Master 的队列。
+        s.emit('message', text, actor=sender, target='master', task=self.task_id(sender),
+               data={'id': m['id'], 'sender': sender, 'target': 'master', 'priority': priority, 'merged_into': m['id']})
         return m
 
     def next_message(self, aid):
@@ -92,7 +125,8 @@ class Messages:
         n = 0
         for m in self.store.where('message', 'queued'):
             if m['sender'] == aid and m['target'] == 'master' and m['state'] == 'queued' and not m.get('copy'):
-                m['state'] = 'superseded'; self.store.put('message', m); n += 1
+                # 合并过的一条含多段进度：按段计数，告诉 Master 的“几条未读”与执行者实际发的条数一致。
+                m['state'] = 'superseded'; self.store.put('message', m); n += m.get('merged', 1)
         return n
 
     def has_queued(self, aid):

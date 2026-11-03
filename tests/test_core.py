@@ -148,7 +148,9 @@ class CoreTests(unittest.TestCase):
         self.c.tool(t['agent'], 'finish_task', {'result': '完成', 'evidence': '证据'})
         queued = [m for m in self.c.store.all('message') if m['target'] == 'master' and m['state'] == 'queued']
         self.assertFalse(any(m['text'].startswith('进度') for m in queued))
-        self.assertEqual(sum(m['state'] == 'superseded' for m in self.c.store.all('message')), 4)
+        # 四条进度在排队时已合并成一条（见 merge_progress），整条被标记 superseded，原文都在其中
+        [sup] = [m for m in self.c.store.all('message') if m['state'] == 'superseded']
+        self.assertTrue(all(f'进度 {i}' in sup['text'] for i in range(4)))
         done = next(m for m in queued if '申请结束' in m['text'])
         self.assertIn('4 条未读进度消息已被本申请取代', done['text'])
 

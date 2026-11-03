@@ -266,7 +266,9 @@ class Tasks:
                 if wait.get('until', float('inf')) <= now:
                     t.update(state='running', wait={}); s.put('task', t)
                     self.enqueue('system', a['id'], '等待到期，请检查回复或外部作业状态，再决定续办或报备 master。', 8)
-                    self.enqueue('system', 'master', f"任务 {t['id']} 等待到期，已唤醒核验。", 8)
+                    # 不再给 Master 发“已唤醒”：执行者核验后会汇报，卡住会 ask_master；这条通知不含新信息，
+                    # 却占全部来信的约三成、每条一个 Master 回合。留一条任务事件，侧栏与 read_task_events 可查。
+                    s.emit('wait_expired', '等待到期，已唤醒执行者核验', target=a['id'], task=t['id'], data={'wait': wait})
                 continue
             if a['paused'] or self.hub.busy(a['id']) or self.has_queued(a['id']):
                 continue
