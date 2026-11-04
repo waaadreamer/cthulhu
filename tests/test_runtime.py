@@ -49,7 +49,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('--dangerously-skip-permissions', argv)
                 self.assertEqual(argv[argv.index('--permission-mode') + 1], 'bypassPermissions')
         else:
-            for argv in launches: self.assertIn('--yolo', argv)
+            for argv in launches:
+                self.assertIn('--yolo', argv)
+                # 每回合新起的 app-server 不拉远程插件目录（每次 16MB+）；apps 必须保留，否则 codex_apps 工具消失。
+                self.assertEqual(argv[argv.index('features.plugins=false') - 1], '-c')
+                self.assertNotIn('features.apps=false', argv)
 
     async def test_codex_protocol_and_resume(self): await self.check_backend('codex')
     async def test_claude_protocol_and_resume(self): await self.check_backend('claude')

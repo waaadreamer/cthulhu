@@ -14,7 +14,7 @@ import uuid
 
 from . import proxy
 from .memory import read_path
-from .util import ROOT, process_identity
+from .util import CODEX_LEAN, ROOT, process_identity
 
 
 CHUNK = 1 << 20
@@ -177,7 +177,7 @@ class CodexRuntime(ProcessRuntime):
 
     async def start(self):
         cfg = self.mcp()
-        argv = ['codex', '--yolo', *proxy.codex_args(self.sink.proxy),
+        argv = ['codex', '--yolo', *CODEX_LEAN, *proxy.codex_args(self.sink.proxy),
                 '-c', 'mcp_servers.cthulhu.command=' + json.dumps(cfg['command']),
                 '-c', 'mcp_servers.cthulhu.args=' + json.dumps(cfg['args']),
                 '-c', 'mcp_servers.cthulhu.env_vars=' + json.dumps(list(cfg['env'])),

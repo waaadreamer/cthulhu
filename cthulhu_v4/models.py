@@ -14,6 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from .util import CODEX_LEAN
+
 CLAUDE_ALIASES = ('fable', 'opus', 'sonnet', 'haiku')
 TIMEOUT = 60
 REFRESH = 6 * 3600     # 模型目录变化很慢；失败时下一轮再试，保留上一次成功的结果
@@ -27,7 +29,7 @@ async def _kill(proc):
 
 async def codex_models(env, timeout=TIMEOUT, cwd=None):
     with tempfile.TemporaryDirectory() as d:
-        proc = await asyncio.create_subprocess_exec('codex', 'app-server', '--listen', 'stdio://', cwd=d, env=env,
+        proc = await asyncio.create_subprocess_exec('codex', *CODEX_LEAN, 'app-server', '--listen', 'stdio://', cwd=d, env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True, limit=16 * 1024 * 1024)
 

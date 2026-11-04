@@ -19,6 +19,13 @@ LOCAL = 'local'
 # 每个节点同时运行的回合数上限，由主人在网页按节点调整；未设置时用这个默认值。
 # 为什么放在中心而不是节点启动参数：主人在网页即可调整，不用登录执行机重启节点（重启会打断回合）。
 MAX_TURNS = 8
+# 每个回合都会新起一个 codex app-server（回合结束即关，见 node.execute），而 Codex 启动时会拉一份
+# 约 1 万项的远程插件目录：实测空闲的 app-server 25 秒内就下行 17MB，其中一条连接 16MB；
+# 本地缓存（~/.codex/cache/remote_plugin_catalog）每次都被重写，等于没生效，一天累计几十 GB。
+# 关掉 plugins 后同一个 app-server 只下行约 1.6MB，而 skills 列表和 codex_apps 的 400 个 MCP 工具
+# 与默认完全一致（逐项对比过）；本机也没有安装任何远程插件。不要连 apps 一起关：
+# 那会让 codex_apps 的 MCP 工具消失，功能就变了。
+CODEX_LEAN = ['-c', 'features.plugins=false']
 
 
 def uid(prefix):

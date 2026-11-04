@@ -43,6 +43,11 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(out['codex']['list'][0]['default'])
         self.assertIsNone(out['codex']['error'])
         self.assertNotIn('demo', out)
+        # 模型目录探测每 6 小时起一次 app-server，同样不该顺带下载远程插件目录。
+        codex_calls = [c for c in map(json.loads, self.log.read_text().splitlines()) if c['cli'] == 'codex']
+        self.assertTrue(codex_calls)
+        for c in codex_calls:
+            self.assertEqual(c['args'][c['args'].index('features.plugins=false') - 1], '-c')
 
     def test_claude_resolves_aliases_without_waiting_for_reply(self):
         started = time.monotonic()
