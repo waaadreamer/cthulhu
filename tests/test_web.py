@@ -15,7 +15,8 @@ from cthulhu_v4.util import ROOT
 class WebTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.app = App(self.tmp.name, port=0, ws_port=0, public_url='https://example.test:8001/v4')
+        self.app = App(self.tmp.name, port=0, ws_port=0, public_url='https://example.test:8001/v4',
+                       allowed_origins=['https://alias.test:8001/'])
         await self.app.start()
         self.url, self.token = self.app.web.url, self.app.web.token
 
@@ -43,6 +44,17 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b'#!/usr/bin/env bash', await asyncio.to_thread(self.call, '/install.sh', token=''))
         # 静态路径不能逃出 static 目录。
         self.assertNotIn(b'websockets', await asyncio.to_thread(self.call, '/../requirements.txt', token=''))
+
+    async def test_static_files_load_from_any_origin_but_api_stays_restricted(self):
+        # 回归：从域名入口打开时，浏览器加载模块脚本带 Origin，曾被当成跨站请求 403，整页按钮失效。
+        for origin in ('https://evil.example', 'null'):
+            js = await asyncio.to_thread(self.call, '/js/app.js', token='', origin=origin)
+            self.assertIn(b'import', js)
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                await asyncio.to_thread(self.call, '/api/state', origin=origin)
+            self.assertEqual(ctx.exception.code, 403)
+        state = await asyncio.to_thread(self.call, '/api/state', origin='https://alias.test:8001')
+        self.assertIn('nodes', state)
 
     def head(self, path):
         with urllib.request.urlopen(self.url + path, timeout=10) as r:

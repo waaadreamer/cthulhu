@@ -20,7 +20,7 @@ class App:
                  ws_host='127.0.0.1', ws_port=8770, public_url=None, galaxy_url=None,
                  tls_cert=None, tls_key=None, install_url=INSTALL_URL,
                  feishu_cli=None, feishu_config=None, feishu_owner=None, feishu_bot=None,
-                 feishu_judge_model='gpt-6.1-sol', model_proxy=None, git_proxy=None, **timing):
+                 feishu_judge_model='gpt-6.1-sol', model_proxy=None, git_proxy=None, allowed_origins=(), **timing):
         self.state = Path(state).resolve()
         self.center = Center(self.state, backend, model, reasoning_effort=reasoning_effort, **timing)
         self.notice = self.center.configure_master(backend, model, reasoning_effort)
@@ -29,6 +29,7 @@ class App:
         self.center.release = Release(ROOT)
         self.port, self.ws_host, self.ws_port = port, ws_host, ws_port
         self.public_url = public_url.rstrip('/') if public_url else None
+        self.allowed_origins = tuple(allowed_origins or ())
         self.galaxy_url = galaxy_url
         self.tls_cert, self.tls_key = tls_cert, tls_key
         self.install_url = self.center.install_url = install_url

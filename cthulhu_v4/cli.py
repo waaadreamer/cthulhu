@@ -46,7 +46,7 @@ async def run_center(args):
     lock = lock_dir(state, 'server.lock')
     try:
         app = App(state, backend=args.backend, model=args.model, reasoning_effort=args.reasoning_effort,
-                  port=args.port, ws_host=args.ws_host, ws_port=args.ws_port, public_url=args.public_url,
+                  port=args.port, ws_host=args.ws_host, ws_port=args.ws_port, public_url=args.public_url, allowed_origins=args.allowed_origin,
                   galaxy_url=args.galaxy_url, tls_cert=args.tls_cert, tls_key=args.tls_key,
                   heartbeat=args.heartbeat, review_interval=args.review_interval,
                   question_timeout=args.question_timeout,
@@ -191,6 +191,7 @@ def main(argv=None):
     c.add_argument('--ws-host', default='127.0.0.1')
     c.add_argument('--ws-port', type=int, default=8770)
     c.add_argument('--public-url', help='反向代理后的网页地址，如 https://host:8001/v4；星系地址默认为其 /galaxy')
+    c.add_argument('--allowed-origin', action='append', default=[], help='网页的其他公网来源（如 https://example.com:8001），可重复')
     c.add_argument('--galaxy-url', help='显式指定节点连接地址（wss://…）')
     c.add_argument('--install-url', help='安装脚本地址（默认 GitHub v4 分支）')
     c.add_argument('--tls-cert'); c.add_argument('--tls-key')

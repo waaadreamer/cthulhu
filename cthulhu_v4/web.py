@@ -84,11 +84,14 @@ class Web:
 
             def handle_request(self):
                 url = urlsplit(self.path)
-                origin = self.headers.get('Origin')
-                if origin and origin not in web.allowed_origins:
-                    return self.respond(403, {'error': '跨站请求被拒绝'})
+                # 静态文件先于来源检查：它们本来就公开（不含凭证），而浏览器加载 <script type=module>
+                # 会带 Origin 头。用白名单外的地址（如域名而非 IP）打开时，若这里拒掉 app.js，
+                # 页面只剩静态 HTML：登录框不出现、按钮都没绑定，看起来就是“什么都点不动”。
                 if self.command == 'GET' and not url.path.startswith('/api/'):
                     return self.static(url.path)
+                origin = self.headers.get('Origin')
+                if origin and origin not in web.allowed_origins:
+                    return self.respond(403, {'error': f'跨站请求被拒绝：{origin} 不在允许的来源里（中心启动参数 --allowed-origin）'})
                 try:
                     length = int(self.headers.get('Content-Length', '0'))
                     if length > 1024 * 1024: raise ValueError('请求体过大')
@@ -138,6 +141,8 @@ class Web:
         if app.public_url:
             u = urlsplit(app.public_url)
             self.allowed_origins.add(f'{u.scheme}://{u.netloc}')
+        # 同一个反向代理常有多个入口（IP 与域名）；每个都要显式列出，仍不从请求头推断。
+        self.allowed_origins.update(o.rstrip('/') for o in app.allowed_origins)
         self.url = f'http://127.0.0.1:{self.port}'
 
     async def route(self, method, path, query, token, body):
