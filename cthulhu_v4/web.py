@@ -169,14 +169,16 @@ class Web:
                 return snap | {'etag': etag, 'now': now}
             if path == '/api/events':
                 # 两种读法：before 向前翻历史（不含流式增量）；after 跟随最新（含增量以便流式显示）。
-                # highwater 与查询在同一线程读取：客户端以它作为跟随游标，被过滤掉的事件不会重复拉取。
+                # highwater 与查询在同一个读快照里取：客户端以它作为跟随游标，被过滤掉的事件不会重复拉取。
+                # 查询放到线程里：扫大表时不能占住事件循环，否则节点心跳停摆、租约过期（见 Store.events_snapshot）。
                 limit = int(q('limit', 200))
                 before = q('before')
-                events = c.store.events(after=int(q('after', 0)), limit=limit, agent=q('agent'),
-                                        conversation=q('view') == 'conversation', ui=True, harness=q('harness') == '1',
-                                        before=None if before is None else int(before), compact=before is not None)
+                events, top = await asyncio.to_thread(
+                    c.store.events_snapshot, after=int(q('after', 0)), limit=limit, agent=q('agent'),
+                    conversation=q('view') == 'conversation', ui=True, harness=q('harness') == '1',
+                    before=None if before is None else int(before), compact=before is not None)
                 events = [ui_event(e) for e in events]
-                return {'events': events, 'more': len(events) >= limit, 'highwater': c.store.highwater()}
+                return {'events': events, 'more': len(events) >= limit, 'highwater': top}
             if path == '/api/file':
                 return await c.files.read(q('ref'), refresh=q('refresh') == '1')
             if path == '/api/history':

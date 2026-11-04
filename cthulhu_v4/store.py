@@ -77,8 +77,26 @@ class Store:
                               json.dumps(data or {}, ensure_ascii=False), int(visible)))
         return cur.lastrowid
 
+    def events_snapshot(self, **kw):
+        """在只读连接上读事件，并在同一个读快照里取 highwater；调用方必须放到线程里执行。
+
+        为什么单开只读连接：按 agent 过滤的查询要倒序扫 events 表（线上 14GB、280 万行），
+        在事件循环线程里跑会拖住节点心跳与租约续期，实测的现象就是点开某个执行者的历史后网页卡死、
+        中心不断提示租约到期。WAL 下只读连接不阻塞写入，主连接也不能跨线程用。
+        highwater 与查询必须在同一个读事务里：先于查询的游标最多让客户端重复拉一次，
+        晚于查询的游标会让两次读之间新写入的事件被永久跳过。
+        """
+        db = sqlite3.connect(f'file:{self.path}?mode=ro', uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute('BEGIN')
+            top = db.execute('SELECT COALESCE(MAX(seq),0) FROM events').fetchone()[0]
+            return self.events(db=db, **kw), top
+        finally:
+            db.close()
+
     def events(self, after=0, limit=200, task=None, agent=None, visible=False, conversation=False,
-               before=None, ui=False, compact=False, harness=True):
+               before=None, ui=False, compact=False, harness=True, db=None):
         """按 seq 读取事件。
 
         before：向前翻页（返回 seq < before 的最新 limit 条，仍按升序）；before<=0 表示从最新开始。
@@ -112,7 +130,7 @@ class Store:
         args.append(max(1, min(int(limit), 500)))
         where = ' AND '.join(clauses) or '1'
         order = 'DESC' if before is not None else 'ASC'
-        rows = list(self.db.execute(f'SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ?', args))
+        rows = list((db or self.db).execute(f'SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ?', args))
         if before is not None:
             rows.reverse()
         return [dict(r) | {'data': json.loads(r['data'])} for r in rows]

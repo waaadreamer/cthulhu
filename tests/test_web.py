@@ -185,4 +185,8 @@ class PagingTests(unittest.TestCase):
             self.assertTrue(any(e['kind'].endswith('/delta') for e in s.events(after=0, agent='old_a', ui=True)))
             # 工具读取保持原始全集。
             self.assertEqual(len(s.events(after=0, limit=500, agent='old_a')), 91)
+            # 网页路径用的只读快照：内容与主连接一致，highwater 与查询同一读快照。
+            snap, top = s.events_snapshot(before=0, limit=10, agent='old_a', ui=True, compact=True)
+            self.assertEqual([e['seq'] for e in snap], [e['seq'] for e in page])
+            self.assertEqual(top, s.highwater())
             s.close()
