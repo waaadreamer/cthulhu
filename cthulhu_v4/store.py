@@ -36,6 +36,13 @@ class Store:
             -- 租约与消息只增不删，热路径只关心少数 running/queued 行；按状态建表达式索引，
             -- 否则每次节点同步、网页轮询都要反序列化全部历史，事件循环被拖住、节点租约过期。
             CREATE INDEX IF NOT EXISTS objects_state ON objects(kind, json_extract(data, '$.state'));
+            -- 按执行者读事件（网页点开某个执行者的历史）要匹配 actor、target 或其任务；没有这两个索引时
+            -- 只能倒序扫整张 events 表（线上 14GB、280 万行，冷门执行者实测 3~6 秒）。带 seq 的复合索引
+            -- 还让“跟随最新”(seq>?) 的每秒轮询只读新增的行，而不是这个执行者的全部历史。
+            -- 线上大库须停中心后离线建好同名索引：这里的 IF NOT EXISTS 此时是空操作；
+            -- 若在大库上靠启动时建，会在启动阶段长时间占住写锁，节点租约随之到期。
+            CREATE INDEX IF NOT EXISTS events_actor ON events(actor, seq);
+            CREATE INDEX IF NOT EXISTS events_target ON events(target, seq);
         ''')
 
     @contextmanager
