@@ -95,7 +95,8 @@ class FileService:
 
     # 由 hub.request(op='file') 调用：节点回传读取结果。只接受发给该节点的请求。
     def deliver(self, node, body):
-        p = self.pending.get(body.get('id'))
+        # file 是节点专门放文件请求 id 的字段；多路复用连接会把 id 改写成传输层自己的请求号（见 node.file_reply）。
+        p = self.pending.get(body.get('file') or body.get('id'))
         if not p or p['node'] != node:
             return {'ok': False}
         if not p['future'].done():

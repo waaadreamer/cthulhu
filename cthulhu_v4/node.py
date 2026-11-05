@@ -64,6 +64,17 @@ class Turn:
         return await self.node.call_tool(self.job, name, args)
 
 
+def file_reply(req, body):
+    """文件读取结果的回传请求体。
+
+    为什么文件 id 要放在 file 里而不只是 id：多路复用连接上，传输层给每个请求写入自己的 id 来匹配响应，
+    会覆盖请求体里的同名字段。中心靠 id 找等待中的网页请求，被覆盖后永远找不到，网页只能等到超时；
+    本机节点走进程内链路不加 id，所以只有远端节点读不了文件。
+    仍保留 id：旧中心不支持多路复用，只认 id，且那条串行连接不会改写它。
+    """
+    return {'op': 'file', 'file': req['id'], 'id': req['id'], **body}
+
+
 class Node:
     def __init__(self, state_dir, *, backends=None, link=None, protected=(), app=None, managed=False,
                  model_proxy=None):
@@ -333,7 +344,7 @@ class Node:
         """读文件放到线程里，避免大文件或慢盘拖住续租心跳。回传失败就算了：网页会超时，可重试。"""
         body = await asyncio.to_thread(read_path, req['path'], req.get('known'), req.get('max', MAX_BYTES), self.protected)
         try:
-            await (self.data_link() or self.link).request({'op': 'file', 'id': req['id'], **body}, timeout=UPLOAD_TIMEOUT)
+            await (self.data_link() or self.link).request(file_reply(req, body), timeout=UPLOAD_TIMEOUT)
         except (ConnectionError, RuntimeError):
             pass
 

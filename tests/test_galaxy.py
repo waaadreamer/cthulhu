@@ -13,6 +13,7 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
 from cthulhu_v4.center import Center
+from cthulhu_v4.node import file_reply
 from cthulhu_v4.transport import decode_invite, encode_invite, make_handler, RemoteLink
 from cthulhu_v4.util import MAX_FRAME, PROTOCOL, ROOT
 
@@ -293,3 +294,21 @@ class MuxTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(tool.done())
         self.release.set()
         self.assertEqual(await tool, {'ok': True})
+
+    async def test_file_reply_survives_the_connection_overwriting_request_ids(self):
+        # 回归：多路复用连接把请求体里的 id 改写成传输层的请求号，文件请求 id 因此丢失，
+        # 中心找不到等待者，远端节点的文件网页读取全部超时（本机节点走进程内链路，不受影响）。
+        fid = 'abc123'
+        future = asyncio.get_running_loop().create_future()
+        self.c.files.pending[fid] = {'node': 'slow', 'path': '/x', 'known': None, 'future': future, 'sent': True}
+        body = {'kind': 'file', 'path': '/x', 'size': 2, 'mtime': 1.0, 'content': 'aGk=', 'truncated': False}
+        self.assertEqual(await self.link.request(file_reply({'id': fid}, body)), {'ok': True})
+        self.assertEqual(future.result()['content'], 'aGk=')
+
+    async def test_old_node_reply_with_only_id_is_still_accepted(self):
+        # 旧节点只发 id；它连的是串行连接，id 不会被改写。
+        fid = 'old456'
+        future = asyncio.get_running_loop().create_future()
+        self.c.files.pending[fid] = {'node': 'slow', 'path': '/x', 'known': None, 'future': future, 'sent': True}
+        self.c.files.deliver('slow', {'op': 'file', 'id': fid, 'kind': 'dir', 'entries': []})
+        self.assertEqual(future.result()['kind'], 'dir')
