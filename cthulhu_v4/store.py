@@ -47,6 +47,13 @@ class Store:
             -- 索引项隐含 rowid，按 rowid 倒序取前几条可以直接沿索引读。消息约 2 万条，启动时建索引不到 1 秒。
             CREATE INDEX IF NOT EXISTS objects_message_sender ON objects(json_extract(data, '$.sender')) WHERE kind = 'message';
             CREATE INDEX IF NOT EXISTS objects_message_target ON objects(json_extract(data, '$.target')) WHERE kind = 'message';
+            -- “某个执行者的任务”在事件入库、消息投递、派发里每次都要查；没有索引时是反序列化全部任务
+            -- （线上 324 个、约 2MB）再在 Python 里比对，实测占事件循环主线程的 93%，节点心跳与文件读取因此超时。
+            CREATE INDEX IF NOT EXISTS objects_task_agent ON objects(json_extract(data, '$.agent')) WHERE kind = 'task';
+            -- wait_for_reply 要找“回复了某条消息的消息”；消息只增不删，全表扫描会随历史线性变慢。
+            CREATE INDEX IF NOT EXISTS objects_message_reply ON objects(json_extract(data, '$.reply_to')) WHERE kind = 'message';
+            -- 任务结束时要关闭它名下的问题；问题表小，但同样不该靠遍历找。
+            CREATE INDEX IF NOT EXISTS objects_question_task ON objects(json_extract(data, '$.task')) WHERE kind = 'question';
         ''')
 
     @contextmanager
@@ -75,6 +82,42 @@ class Store:
     def all(self, kind):
         return [json.loads(r[0]) for r in self.db.execute('SELECT data FROM objects WHERE kind=? ORDER BY rowid', (kind,))]
 
+    # 允许按字段查找的 (kind, 字段)：每一项都必须有同名表达式索引。白名单的目的是让“没有索引的查找”
+    # 无法被写出来——否则它会悄悄退化成全表扫描，在热路径上拖住事件循环（见 objects_task_agent 的说明）。
+    INDEXED = {('task', 'agent'), ('message', 'reply_to'), ('question', 'task')}
+
+    def lookup(self, kind, field, value, limit=None):
+        """按索引字段取对象，按写入顺序；只反序列化命中的行。"""
+        if (kind, field) not in self.INDEXED:
+            raise ValueError(f'{kind}.{field} 没有索引，不能直接查找；先建索引并登记到 Store.INDEXED')
+        sql = f"SELECT data FROM objects WHERE kind=? AND json_extract(data, '$.{field}') = ? ORDER BY rowid"
+        args = [kind, value]
+        if limit:
+            sql += ' LIMIT ?'; args.append(int(limit))
+        return [json.loads(r[0]) for r in self.db.execute(sql, args)]
+
+    def queued_for(self, target):
+        """发给 target 的排队中消息。走 objects_state 只取 queued 行（队列通常只有几条），再在 SQL 里按收件人过滤，
+        不把别人的队列反序列化到 Python。没有为此单独建索引：规划器本来就选 objects_state，多一个索引只增加写入成本。"""
+        return [json.loads(r[0]) for r in self.db.execute(
+            "SELECT data FROM objects WHERE kind='message' AND json_extract(data, '$.state') = 'queued' "
+            "AND json_extract(data, '$.target') = ? ORDER BY rowid", (target,))]
+
+    def queued_targets(self):
+        """有排队消息的收件人，按其 agent 的创建顺序排列。"""
+        return [r[0] for r in self.db.execute(
+            "SELECT DISTINCT json_extract(data, '$.target') FROM objects WHERE kind='message' "
+            "AND json_extract(data, '$.state') = 'queued'")]
+
+    def get_many(self, kind, ids):
+        """按 id 批量取，保持写入顺序（rowid）；不存在的 id 被忽略。"""
+        ids = list(ids)
+        if not ids:
+            return []
+        marks = ','.join('?' * len(ids))
+        return [json.loads(r[0]) for r in self.db.execute(
+            f'SELECT data FROM objects WHERE kind=? AND id IN ({marks}) ORDER BY rowid', (kind, *ids))]
+
     def messages_of(self, who, limit):
         """与 who 有关（发出或收到）的最近 limit 条消息，按写入顺序。
         两路各沿部分索引倒序取 limit 条再合并，只解析这几十行；不能取全部消息到 Python 里过滤。
@@ -92,6 +135,45 @@ class Store:
         marks = ','.join('?' * len(states))
         return [json.loads(r[0]) for r in self.db.execute(
             f"SELECT data FROM objects WHERE kind=? AND json_extract(data, '$.state') IN ({marks}) ORDER BY rowid",
+            (kind, *states))]
+
+    def project(self, kind, fields, *states):
+        """只取对象的指定字段（可按 state 过滤），在 SQL 里提取，不把长字段读成 Python 对象。
+
+        任务的 history/claim/evidence 占体积的九成；网页每秒轮询，只要列表需要的那几个字段。
+        缺失的字段不会出现在结果里（与 JSON 里值为 null 区分开）：前端对 undefined 与 null 的比较结果不同。
+        每个字段单独一列再按 json_type 还原：不能用 json_object 一次拼出，SQLite 会把小数截成 15 位有效数字，
+        时间戳 1792412193.5345566 会变成 1792412193.53456，列表排序与比较随之改变。
+        fields 与 states 都来自代码常量，不接受外部输入，所以直接拼进 SQL。
+        """
+        cols = ','.join(f"json_type(data, '$.{f}'), json_extract(data, '$.{f}')" for f in fields)
+        sql = f"SELECT {cols} FROM objects WHERE kind=?"
+        args = [kind]
+        if states:
+            sql += f" AND json_extract(data, '$.state') IN ({','.join('?' * len(states))})"
+            args += states
+        out = []
+        for row in self.db.execute(sql + ' ORDER BY rowid', args):
+            item = {}
+            for i, f in enumerate(fields):
+                kind_, value = row[2 * i], row[2 * i + 1]
+                if kind_ is None:
+                    continue                      # 字段缺失
+                if kind_ in ('true', 'false'):
+                    value = kind_ == 'true'       # json_extract 把布尔变成 0/1，须还原
+                elif kind_ in ('object', 'array'):
+                    value = json.loads(value)     # 嵌套值以 JSON 文本返回
+                elif kind_ == 'null':
+                    value = None
+                item[f] = value
+            out.append(item)
+        return out
+
+    def where_not(self, kind, *states):
+        """state 不在给定集合里的对象。过滤在 SQL 里完成：只有命中的行才会被反序列化。"""
+        marks = ','.join('?' * len(states))
+        return [json.loads(r[0]) for r in self.db.execute(
+            f"SELECT data FROM objects WHERE kind=? AND json_extract(data, '$.state') NOT IN ({marks}) ORDER BY rowid",
             (kind, *states))]
 
     def emit(self, kind, text='', *, actor='system', target=None, task=None, data=None, visible=False):

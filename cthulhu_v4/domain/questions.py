@@ -89,24 +89,24 @@ class Questions:
         moved = 0
         if on:
             # 开启时正在等主人的问题一并交回，避免它们还要等超时。
-            for q in s.all('question'):
-                if q['state'] == 'owner':
-                    self.delegate({'question_id': q['id']}, reason='已开启 Master 全权回答，问题交回 Master'); moved += 1
+            for q in s.where('question', 'owner'):
+                self.delegate({'question_id': q['id']}, reason='已开启 Master 全权回答，问题交回 Master'); moved += 1
         s.emit('settings', 'Master 全权回答：' + ('开启' if on else '关闭'), actor='owner', data=prefs, visible=True)
         # 不为开关本身唤醒 Master：设置随每回合的 current_state.master_decides 送达，
         # 开启后 ask_owner 也会被拒绝并说明原因，没有必要额外花一个回合。
         return {'master_decides': bool(on), 'delegated': moved}
 
     def close_questions(self, task_id):
-        for q in self.store.all('question'):
-            if q['task'] == task_id and q['state'] not in {'answered', 'closed'}:
+        for q in self.store.lookup('question', 'task', task_id):
+            if q['state'] not in {'answered', 'closed'}:
                 q.update(state='closed', deadline=None, version=q['version'] + 1)
                 self.store.put('question', q)
 
     def expire_questions(self, now):
         s = self.store
-        for q in s.all('question'):
-            if q['state'] == 'owner' and q['deadline'] <= now:
+        # 每个 tick 都跑：只取等主人的问题（走 state 索引），已答复/关闭的不读。
+        for q in s.where('question', 'owner'):
+            if q['deadline'] <= now:
                 q.update(state='master', deadline=None, version=q['version'] + 1)
                 s.put('question', q)
                 s.emit('question_timeout', '等待主人超时，已交回 master 决定。', task=q['task'], data=q, visible=True)

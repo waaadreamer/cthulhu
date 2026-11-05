@@ -124,8 +124,7 @@ class Messages:
         单条过长时不再合并，避免一条消息超过单回合输入上限。
         """
         s = self.store
-        m = next((m for m in s.where('message', 'queued') if m['state'] == 'queued' and m['target'] == 'master'
-                  and m['sender'] == sender and progress(m['sender'], m.get('reply_to'), m.get('key'), m.get('copy'), m.get('solo'))), None)
+        m = next((m for m in s.queued_for('master') if m['sender'] == sender and progress(m['sender'], m.get('reply_to'), m.get('key'), m.get('copy'), m.get('solo'))), None)
         if not m or len(m['text']) + len(text) > BATCH_CHARS // 2:
             return None
         stamp = datetime.fromtimestamp(self.clock()).astimezone().strftime('%H:%M:%S')
@@ -140,8 +139,7 @@ class Messages:
     def next_message(self, aid):
         """选出下一条待处理消息；排队期间已被覆盖的审核请求直接取消，避免空模型调用。"""
         s = self.store
-        pending = sorted((m for m in s.where('message', 'queued') if m['target'] == aid),
-                         key=lambda m: (-m['priority'], m['at']))
+        pending = sorted(s.queued_for(aid), key=lambda m: (-m['priority'], m['at']))
         for m in pending:
             if aid == 'master' and m.get('key') == 'review' and not self.review_due():
                 m['state'] = 'cancelled'; s.put('message', m)
@@ -162,8 +160,8 @@ class Messages:
         if not first or aid != 'master' or first.get('key') == 'review' or first.get('solo'):
             return [first] if first else []
         batch, size = [first], len(first['text'])
-        for m in sorted((m for m in self.store.where('message', 'queued') if m['target'] == aid
-                         and m['id'] != first['id'] and m.get('key') != 'review' and not m.get('solo')),
+        for m in sorted((m for m in self.store.queued_for(aid)
+                         if m['id'] != first['id'] and m.get('key') != 'review' and not m.get('solo')),
                         key=lambda m: (-m['priority'], m['at'])):
             # 单回合输入有上限：剩下的留到下一回合，不截断任何一条来信。
             if len(batch) >= BATCH_COUNT or size + len(m['text']) > BATCH_CHARS:
@@ -180,19 +178,18 @@ class Messages:
         完成通知（或取消记录）与 read_task_events 已覆盖它们。标记为 superseded 而不是删除，可回查。
         提问、完成等程序生成的消息（copy=True）不受影响。"""
         n = 0
-        for m in self.store.where('message', 'queued'):
-            if m['sender'] == aid and m['target'] == 'master' and m['state'] == 'queued' and not m.get('copy'):
+        for m in self.store.queued_for('master'):
+            if m['sender'] == aid and not m.get('copy'):
                 # 合并过的一条含多段进度：按段计数，告诉 Master 的“几条未读”与执行者实际发的条数一致。
                 m['state'] = 'superseded'; self.store.put('message', m); n += m.get('merged', 1)
         return n
 
     def has_queued(self, aid):
-        return any(m['target'] == aid for m in self.store.where('message', 'queued'))
+        return bool(self.store.queued_for(aid))
 
     def cancel_queued(self, aid):
-        for m in self.store.where('message', 'queued'):
-            if m['target'] == aid and m['state'] == 'queued':
-                m['state'] = 'cancelled'; self.store.put('message', m)
+        for m in self.store.queued_for(aid):
+            m['state'] = 'cancelled'; self.store.put('message', m)
 
     def read_messages(self, actor, limit=30):
         limit = max(1, min(int(limit), 100))

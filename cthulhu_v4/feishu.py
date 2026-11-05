@@ -141,8 +141,10 @@ class Feishu:
 
     def status(self):
         # 快照每秒轮询：只带人数与最近修改时间。全文（几十人、每人上千字）由白名单页按需读取 acl_list。
-        acl = self.c.store.all('feishu_acl')
-        return self.info | {'acl_count': len(acl), 'acl_at': max((a.get('updated_at') or 0 for a in acl), default=0)}
+        # 人数与最近修改时间在 SQL 里聚合，不把每人上千字的规则读出来。
+        count, at = self.c.store.db.execute(
+            "SELECT COUNT(*), MAX(COALESCE(json_extract(data, '$.updated_at'), 0)) FROM objects WHERE kind='feishu_acl'").fetchone()
+        return self.info | {'acl_count': count, 'acl_at': at or 0}
 
     def acl_list(self):
         return sorted(({k: a.get(k) for k in ('id', 'name', 'rules', 'updated_at')} for a in self.c.store.all('feishu_acl')),

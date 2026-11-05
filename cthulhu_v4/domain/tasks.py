@@ -228,7 +228,7 @@ class Tasks:
             m = s.get('message', p['message_id'])
             if m['sender'] != actor:
                 raise ValueError('只能等待自己发出的消息')
-            if any(r.get('reply_to') == m['id'] for r in s.all('message')):
+            if s.lookup('message', 'reply_to', m['id'], limit=1):   # 走 reply_to 索引；曾经反序列化全部消息
                 return {'already_replied': True}
             wait = {'kind': 'reply', 'message_id': m['id'], 'until': self.clock() + seconds}
         else:
@@ -251,9 +251,8 @@ class Tasks:
     def tick_tasks(self, now):
         """活性检查：只判断有没有活动回合或显式等待，不把“没有输出”误判为停工。"""
         s = self.store
-        for t in s.all('task'):
-            if t['state'] in TERMINAL or t['state'] == 'paused':
-                continue
+        # 已结束的任务占绝大多数（线上 324 个里只有少数在跑）：在 SQL 里排除，不把它们的 history/evidence 读出来。
+        for t in s.where_not('task', *TERMINAL, 'paused'):
             a = s.get('agent', t['agent'])
             if t['deadline'] <= now and not t['overdue_notified']:
                 t['overdue_notified'] = True; s.put('task', t)

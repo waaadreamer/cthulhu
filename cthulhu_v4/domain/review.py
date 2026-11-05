@@ -62,7 +62,7 @@ class Review:
         schedule = self.schedule()
         if now < schedule['next_review']:
             return
-        if any(t['state'] not in TERMINAL for t in s.all('task')) and self.review_due():
+        if s.where_not('task', *TERMINAL) and self.review_due():
             self.enqueue('system', 'master', '十分钟增量审核：list_tasks 查看任务；按 review_cursor 读取 read_task_events 的新增原始活动，并核对主人的新消息。只汇报新增进展、判断或措施；没有增量不重复汇报。最后 finish_review 记录本轮审核。', 6, key='review')
         schedule['next_review'] = now + self.review_interval
         s.put('settings', schedule)

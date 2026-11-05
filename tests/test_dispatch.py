@@ -71,6 +71,33 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([v for v in Scripted.seen if v in ('high', 'low')], ['high', 'low'])
         self.assertTrue(any(e['kind'] == 'reply' and e['text'] == 'done:high' for e in self.c.store.events(limit=500)))
 
+    async def test_dispatch_hot_path_never_scans_whole_tables(self):
+        # 每个节点每秒同步一次、事件每条入库：这条路径上不允许再出现 Store.all 遍历任务/执行者/消息/租约。
+        # 曾经 task_id 全表扫任务占去中心主线程 93%，节点心跳与文件读取因此超时（见 Store.lookup）。
+        Scripted.gates['high'] = asyncio.Event()
+        with self.scripted():
+            t = self.c.tool('master', 'create_task', task_args(self.path))
+            with self.c.store.atomic():
+                for m in self.c.store.all('message'):
+                    if m['target'] == t['agent']: m['state'] = 'handled'; self.c.store.put('message', m)
+            scanned = []
+            real_all = self.c.store.all
+            self.c.store.all = lambda kind: (scanned.append(kind), real_all(kind))[1]
+            try:
+                with self.c.store.atomic():
+                    self.c.enqueue('master', t['agent'], 'high', 9)
+                await self.h.sync(3)
+                self.assertEqual(Scripted.seen, ['high'])
+                Scripted.gates['high'].set()
+                # 不用 Harness.settle：它自己每轮都 all('message') 判断空闲，会污染这里的扫描记录。
+                for _ in range(200):
+                    await self.h.node.sync_once(); await asyncio.sleep(0.03)
+                    if not self.c.hub.busy(t['agent']) and not self.h.node.active:
+                        break
+            finally:
+                self.c.store.all = real_all
+        self.assertEqual(sorted(set(scanned) & {'task', 'agent', 'message', 'lease'}), [], scanned)
+
     async def test_runtime_failure_marks_failed_and_pauses_master(self):
         with self.scripted():
             m = self.c.enqueue('owner', 'master', 'boom')

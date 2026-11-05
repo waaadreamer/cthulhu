@@ -232,11 +232,13 @@ class Center(Messages, Questions, Tasks, Review):
 
     # ---- 查询 ----
     def task_id(self, agent):
-        return next((t['id'] for t in self.store.all('task') if t['agent'] == agent), None)
+        # 走 task.agent 索引。曾经是遍历全部任务：事件入库每条都调用，实测占中心主线程 93%。
+        found = self.store.lookup('task', 'agent', agent, limit=1)
+        return found[0]['id'] if found else None
 
     def task_for(self, agent):
-        ident = self.task_id(agent)
-        return self.store.get('task', ident) if ident else None
+        found = self.store.lookup('task', 'agent', agent, limit=1)   # 一次查询直接取回，不再先查 id 再读一遍
+        return found[0] if found else None
 
     def snapshot(self):
         s = self.store
@@ -251,8 +253,12 @@ class Center(Messages, Questions, Tasks, Review):
                 pending[j['agent']]['stopping'] = bool(j.get('stop_reason'))
         # 网页每秒轮询一次：只带界面用到的字段。任务证据、结果、问题历史等正文按需从事件里读取。
         task_keys = ('id', 'agent', 'title', 'node', 'state', 'deadline', 'created_at', 'completed_at', 'archived', 'review_round')
-        tasks = [{k: t[k] for k in task_keys if k in t} for t in s.all('task')]
-        questions = [{k: v for k, v in q.items() if k != 'history'} for q in s.all('question')]
+        # 在 SQL 里只取这几个字段：任务的 history/claim/evidence 占体积九成，线上 324 个任务约 2MB，
+        # 以前每秒每个标签都整行解析一遍再丢掉。
+        tasks = s.project('task', task_keys)
+        # 界面只展示待回答的问题（master/owner），已答复/关闭的不下发；也不带 history。
+        questions = s.project('question', ('id', 'task', 'agent', 'text', 'recommendation', 'blocking', 'state', 'version',
+                                           'deadline', 'created_at'), 'master', 'owner')
         # 节点的 seen/ack 每次同步（每秒）都会变，界面不用；带上它们会让快照每秒都“变化”，etag 失效。
         nodes = [{k: v for k, v in n.items() if k not in ('seen', 'ack')} for n in self.hub.nodes()]
         return {'agents': s.all('agent'), 'nodes': nodes, 'tasks': tasks,

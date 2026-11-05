@@ -155,12 +155,24 @@ class Hub:
             # stopped 但中心没要求停（节点本地租约到期/重启）或 unknown：一律当作结果未知。
             self.uncertain(j, f"节点 {node} 的 {aid} 回合结果未知：{data.get('error') or outcome}")
 
-    def ingest(self, node, event):
+    def ingest(self, node, event, batch=None):
+        """batch：同一批事件共用的缓存 {'owner': 回合→(节点, 执行者), 'task': 执行者→任务 id}。
+        一批最多 64 条、几乎都属于同一个回合；每条都重新读租约（带完整 prompt）和查任务是纯浪费。"""
         s, c = self.c.store, self.c
-        j = s.get('lease', event['job'])
-        if j['node'] != node:
+        batch = {'owner': {}, 'task': {}} if batch is None else batch
+        kind, job = event['kind'], event['job']
+        # steer/finished 会读写租约的其余字段并改状态，必须读最新；其余事件只需要回合的归属，
+        # 归属在回合存续期间不会变，可以整批复用。
+        j = None
+        if kind in ('steer', 'finished') or job not in batch['owner']:
+            j = s.get('lease', job)
+            batch['owner'][job] = (j['node'], j['agent'])
+        owner, aid = batch['owner'][job]
+        if owner != node:
             raise PermissionError('事件不属于本节点')
-        aid, kind, data = j['agent'], event['kind'], event.get('data') or {}
+        if aid not in batch['task']:
+            batch['task'][aid] = c.task_id(aid)
+        task, data = batch['task'][aid], event.get('data') or {}
         if kind == 'session':
             c.save_session(aid, data['session'])
         elif kind == 'steer':
@@ -168,9 +180,9 @@ class Hub:
         elif kind == 'finished':
             self.finished(node, j, data)
             s.emit('remote_result', data.get('result') or data.get('error') or '', actor=aid,
-                   task=c.task_id(aid), data={'node': node, 'job': j['id'], 'outcome': data.get('outcome')})
+                   task=task, data={'node': node, 'job': j['id'], 'outcome': data.get('outcome')})
         else:
-            s.emit(kind, event.get('text', ''), actor=aid, target=None, task=c.task_id(aid),
+            s.emit(kind, event.get('text', ''), actor=aid, target=None, task=task,
                    data=data, visible=bool(event.get('visible')))
 
     def steered(self, j, data):
@@ -204,11 +216,15 @@ class Hub:
             self.ingest_batch(node, n, body.get('events', []))
             s.put('node', n)
             jobs, running = [], 0
+            # 全中心正在跑的回合只取一次：下面既续租本节点的回合，也据此判断哪些执行者忙。
+            # 以前每个执行者各调一次 busy()，每次都重新反序列化全部运行中的租约（带完整 prompt）。
+            live = s.where('lease', 'running')
+            busy_agents = {j['agent'] for j in live if j['state'] == 'running'}
             # 节点已持有完整回合（prompt、agent_spec、task 可达数十 KB）时，续租只回 id。
             # 为什么：心跳每秒一次，原先每次重发全文，是中心出站流量的大头。
             # 旧节点不报 have，按原样拿全文，保持兼容。
             have = set(body.get('have') or ())
-            for j in s.where('lease', 'running'):
+            for j in live:
                 if j['node'] != node or j['state'] != 'running':
                     continue
                 running += 1
@@ -227,10 +243,13 @@ class Hub:
             free = 0 if plan in ('draining', 'ready') else (n.get('max_turns') or MAX_TURNS) - running
             if node == LOCAL and c.hold_local:
                 free = 0  # 中心即将重启：本机节点不接新回合，等已派发的回合结束
-            for a in s.all('agent'):
+            # 只看有排队消息的执行者：以前遍历全部 321 个执行者，再对每个逐个查租约和队列，
+            # 每个节点每秒一次。没有消息的执行者本来就派发不了，不必取出来。
+            # get_many 保持执行者创建顺序，名额不够时谁先派发与原先一致。
+            for a in s.get_many('agent', s.queued_targets()):
                 if free <= 0:
                     break
-                if (a.get('node') or LOCAL) != node or a['paused'] or self.busy(a['id']):
+                if (a.get('node') or LOCAL) != node or a['paused'] or a['id'] in busy_agents:
                     continue
                 if a['backend'] not in n['backends']:
                     continue
@@ -269,12 +288,13 @@ class Hub:
         return self.c.tool(job['agent'], body['name'], body.get('arguments') or {}, dedupe=dedupe)
 
     def ingest_batch(self, node, n, events):
+        batch = {'owner': {}, 'task': {}}
         for e in events:
             if e['seq'] <= n['ack']:
                 continue   # 重发的批次：已入库的跳过
             if e['seq'] != n['ack'] + 1:
                 raise ValueError('事件序号不连续，需从确认游标继续')
-            self.ingest(node, e); n['ack'] = e['seq']
+            self.ingest(node, e, batch); n['ack'] = e['seq']
 
     def upload(self, node, body):
         """data 连接上传事件。为什么和 sync 分开：大批事件（MB 级工具输出）在 sync 里会拖慢续租回复，

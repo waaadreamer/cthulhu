@@ -77,6 +77,74 @@ class StoreWhereTest(unittest.TestCase):
             ('lease', 'running')).fetchall()
         self.assertIn('objects_state', ' '.join(str(tuple(r)) for r in plan))
 
+    def plan(self, sql, *args):
+        return ' '.join(str(tuple(r)) for r in self.store.db.execute('EXPLAIN QUERY PLAN ' + sql, args))
+
+    def test_lookup_matches_full_scan_and_uses_index(self):
+        # task_id 曾遍历全部任务，事件入库每条都调用；lookup 必须与全表过滤结果一致，且走索引而不是扫表。
+        for i in range(30):
+            self.store.put('task', {'id': f't{i}', 'agent': f'a{i % 6}', 'state': 'running'})
+        self.store.put('message', {'id': 'm0', 'reply_to': None, 'state': 'handled'})
+        self.store.put('message', {'id': 'm1', 'reply_to': 'm0', 'state': 'handled'})
+        want = [t for t in self.store.all('task') if t['agent'] == 'a3']
+        self.assertEqual(self.store.lookup('task', 'agent', 'a3'), want)
+        self.assertEqual(self.store.lookup('task', 'agent', 'a3', limit=1), want[:1])
+        self.assertEqual(self.store.lookup('task', 'agent', 'nobody'), [])
+        self.assertEqual([m['id'] for m in self.store.lookup('message', 'reply_to', 'm0')], ['m1'])
+        self.assertIn('objects_task_agent', self.plan(
+            "SELECT data FROM objects WHERE kind='task' AND json_extract(data, '$.agent') = ? ORDER BY rowid LIMIT 1", 'a3'))
+        self.assertIn('objects_message_reply', self.plan(
+            "SELECT data FROM objects WHERE kind='message' AND json_extract(data, '$.reply_to') = ? ORDER BY rowid LIMIT 1", 'm0'))
+
+    def test_lookup_refuses_fields_without_an_index(self):
+        # 白名单让“没有索引的查找”写不出来，否则它会悄悄退化成全表扫描。
+        with self.assertRaises(ValueError):
+            self.store.lookup('task', 'title', 'x')
+
+    def test_queued_for_only_returns_that_targets_queue_in_order(self):
+        for i, (target, state) in enumerate([('a', 'queued'), ('b', 'queued'), ('a', 'running'), ('a', 'queued'), ('b', 'handled')]):
+            self.store.put('message', {'id': f'm{i}', 'target': target, 'state': state})
+        self.assertEqual([m['id'] for m in self.store.queued_for('a')], ['m0', 'm3'])
+        self.assertEqual(sorted(self.store.queued_targets()), ['a', 'b'])
+        self.assertEqual(self.store.queued_for('nobody'), [])
+        # 状态变化后索引同步：派发过的消息不能再出现在队列里。
+        self.store.put('message', {'id': 'm0', 'target': 'a', 'state': 'running'})
+        self.assertEqual([m['id'] for m in self.store.queued_for('a')], ['m3'])
+        # 只扫 queued 行（objects_state），不是整张消息表。
+        self.assertIn('objects_state', self.plan(
+            "SELECT data FROM objects WHERE kind='message' AND json_extract(data, '$.state') = 'queued' "
+            "AND json_extract(data, '$.target') = ? ORDER BY rowid", 'a'))
+
+    def test_get_many_keeps_write_order_and_ignores_missing(self):
+        for i in range(5):
+            self.store.put('agent', {'id': f'a{i}'})
+        self.assertEqual([a['id'] for a in self.store.get_many('agent', ['a3', 'a1', 'zz'])], ['a1', 'a3'])
+        self.assertEqual(self.store.get_many('agent', []), [])
+
+    def test_project_matches_python_pick_and_keeps_missing_apart_from_null(self):
+        # 快照只取列表要用的字段：结果必须与“整行解析再挑字段”一致，且不能把缺失的字段变成 null
+        # （前端对 undefined 与 null 的比较结果不同，如 deadline < now）。
+        self.store.put('task', {'id': 't1', 'title': 'a', 'state': 'running', 'deadline': None, 'history': ['x' * 100]})
+        self.store.put('task', {'id': 't2', 'title': 'b', 'state': 'completed', 'archived': True, 'evidence': 'e'})
+        self.store.put('message', {'id': 'm', 'state': 'running'})
+        keys = ('id', 'title', 'state', 'deadline', 'archived')
+        want = [{k: t[k] for k in keys if k in t} for t in self.store.all('task')]
+        self.assertEqual(self.store.project('task', keys), want)
+        self.assertEqual(self.store.project('task', keys)[0], {'id': 't1', 'title': 'a', 'state': 'running', 'deadline': None})
+        self.assertEqual(self.store.project('task', ('id',), 'completed'), [{'id': 't2'}])
+        self.assertEqual(self.store.project('task', ('id',), 'nope'), [])
+        # 类型原样还原：小数不丢精度、布尔仍是布尔、嵌套值仍是对象。
+        self.store.put('task', {'id': 't3', 'state': 'running', 'created_at': 1792412193.5345566, 'archived': False,
+                                'wait': {'kind': 'reply', 'until': 1.5}, 'tags': [1, 'a']})
+        got = self.store.project('task', ('created_at', 'archived', 'wait', 'tags'), 'running')[-1]
+        self.assertEqual(got, {'created_at': 1792412193.5345566, 'archived': False, 'wait': {'kind': 'reply', 'until': 1.5}, 'tags': [1, 'a']})
+        self.assertIs(got['archived'], False)
+
+    def test_where_not_excludes_states_in_sql(self):
+        for i, st in enumerate(['running', 'completed', 'paused', 'failed', 'waiting']):
+            self.store.put('task', {'id': f't{i}', 'state': st})
+        self.assertEqual([t['id'] for t in self.store.where_not('task', 'completed', 'failed', 'paused')], ['t0', 't4'])
+
 
 if __name__ == '__main__':
     unittest.main()
