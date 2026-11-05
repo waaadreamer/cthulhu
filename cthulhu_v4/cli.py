@@ -150,6 +150,9 @@ async def run_node(args):
         raise SystemExit(str(e))
     node.link = RemoteLink(config['center'], config['node'], token=config['token'], pin=config.get('pin'),
                            hello={'instance': node.instance})
+    # 第二条连接承载工具、事件与文件，续租心跳独占第一条（见 Node.data_link）。旧中心会拒绝它，届时只用第一条。
+    node.data = RemoteLink(config['center'], config['node'], token=config['token'], pin=config.get('pin'),
+                           hello={'instance': node.instance}, channel='data', log=lambda *a, **k: None)
     # 第一次与中心同步成功才算新版本可用：此时清理旧代码与更新标记。
     node.on_synced = lambda: (info := update.confirm(base)) and print(f"更新已生效：{info['from']} → {info['to']}", flush=True)
     bridge = Bridge(node, asyncio.get_running_loop()); bridge.start()
@@ -162,7 +165,7 @@ async def run_node(args):
     finally:
         runner.cancel(); stopper.cancel()
         await asyncio.gather(runner, stopper, return_exceptions=True)
-        await node.close(); await node.link.close()
+        await node.close(); await node.link.close(); await node.data.close()
         await asyncio.to_thread(bridge.stop)
         node.store.close(); lock.close()
     if node.restart:

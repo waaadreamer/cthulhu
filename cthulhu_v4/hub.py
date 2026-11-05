@@ -18,6 +18,7 @@ class Hub:
     def __init__(self, center):
         self.c = center
         self.links = {}  # node id → 活动连接（本机为进程内通道，远端为 WebSocket）
+        self.data_links = {}  # node id → 远端节点的 data 连接（工具、事件、文件）
 
     # ---- 节点登记 ----
     def register(self, name):
@@ -42,14 +43,18 @@ class Hub:
             out.append(public)
         return out
 
-    def attach(self, ident, link):
-        if ident in self.links:
+    def attach(self, ident, link, channel=None):
+        # 每个节点每个通道只允许一条连接：控制连接（channel=None，同步与续租）决定在线状态，
+        # data 连接只承载工具调用、事件上传与文件，不影响在线判定。
+        links = self.links if channel is None else self.data_links
+        if ident in links:
             raise PermissionError('此节点已有连接，拒绝并发接管')
-        self.links[ident] = link
+        links[ident] = link
 
-    def detach(self, ident, link):
-        if self.links.get(ident) is link:
-            self.links.pop(ident, None)
+    def detach(self, ident, link, channel=None):
+        links = self.links if channel is None else self.data_links
+        if links.get(ident) is link:
+            links.pop(ident, None)
 
     def check_hello(self, hello):
         """校验节点身份；返回 node id。token 用常量时间比较。"""
@@ -196,12 +201,7 @@ class Hub:
             if 'models' in body:
                 # 节点只在列表变化时上报；未上报时沿用中心保存的上一份。
                 n['models'] = clean_models(body['models'])
-            for e in body.get('events', []):
-                if e['seq'] <= n['ack']:
-                    continue
-                if e['seq'] != n['ack'] + 1:
-                    raise ValueError('事件序号不连续，需从确认游标继续')
-                self.ingest(node, e); n['ack'] = e['seq']
+            self.ingest_batch(node, n, body.get('events', []))
             s.put('node', n)
             jobs, running = [], 0
             # 节点已持有完整回合（prompt、agent_spec、task 可达数十 KB）时，续租只回 id。
@@ -268,11 +268,33 @@ class Hub:
             return self.c.feishu_tool(job, body['name'], body.get('arguments') or {}, dedupe)
         return self.c.tool(job['agent'], body['name'], body.get('arguments') or {}, dedupe=dedupe)
 
+    def ingest_batch(self, node, n, events):
+        for e in events:
+            if e['seq'] <= n['ack']:
+                continue   # 重发的批次：已入库的跳过
+            if e['seq'] != n['ack'] + 1:
+                raise ValueError('事件序号不连续，需从确认游标继续')
+            self.ingest(node, e); n['ack'] = e['seq']
+
+    def upload(self, node, body):
+        """data 连接上传事件。为什么和 sync 分开：大批事件（MB 级工具输出）在 sync 里会拖慢续租回复，
+        节点那边续租超时就会停进程。分开后续租只传几百字节，事件慢慢传不影响租约。"""
+        s = self.c.store
+        with s.atomic():
+            n = s.get('node', node)
+            if n['instance'] and n['instance'] != body.get('instance'):
+                raise PermissionError(f'节点 {node} 的状态目录已改变：请恢复原目录；不能用新目录接管原 session')
+            self.ingest_batch(node, n, body.get('events', []))
+            s.put('node', n)
+        return {'ack': n['ack']}
+
     def request(self, node, body):
         op = body.get('op')
         if op == 'sync':
             self.expire()
             return self.sync(node, body)
+        if op == 'events':
+            return self.upload(node, body)
         if op == 'tool':
             return self.tool(node, body)
         if op == 'file':

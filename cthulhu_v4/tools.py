@@ -18,7 +18,8 @@ def spec(name, description, props=None, required=()):
 
 COMMON = [
     spec('list_nodes', '查看星系节点在线状态、容量与原生后端；任务必须绑定可执行目标的节点。'),
-    spec('list_tasks', '查看任务、DDL、执行者与等待状态。'),
+    spec('list_tasks', '查看任务摘要、DDL、执行者与等待状态；长字段已截断。传 task_id 取单个任务的完整记录（审核历史、证据、退回意见）。',
+         {'task_id': S}),
     spec('read_messages', '读取自己最近的收发消息和处理状态，恢复时核对 failed/unknown 输入，不能直接重放副作用。', {'limit': I}),
     spec('read_task_events', '读取任务活动（与侧栏同源，已去掉遥测与流式增量，长字段截断）；默认 60 条，按 next_after 翻页，不把截断当作没有进展。',
          {'task_id': S, 'after': I, 'limit': I}, ['task_id']),
@@ -110,7 +111,7 @@ def tell_owner(c, actor, p):
 
 HANDLERS = {
     'list_nodes': lambda c, a, p: c.hub.nodes(),
-    'list_tasks': lambda c, a, p: c.list_tasks(a),
+    'list_tasks': lambda c, a, p: c.list_tasks(a, p.get('task_id')),
     'read_messages': lambda c, a, p: c.read_messages(a, p.get('limit', 30)),
     'read_task_events': lambda c, a, p: c.read_task_events(p),
     'send_message': send_message,

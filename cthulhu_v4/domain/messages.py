@@ -196,7 +196,7 @@ class Messages:
 
     def read_messages(self, actor, limit=30):
         limit = max(1, min(int(limit), 100))
-        return [m for m in self.store.all('message') if actor in {m['sender'], m['target']}][-limit:]
+        return self.store.messages_of(actor, limit)
 
     def set_message(self, mid, state):
         m = self.store.get('message', mid); m['state'] = state; self.store.put('message', m)

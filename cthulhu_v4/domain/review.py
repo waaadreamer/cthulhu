@@ -10,19 +10,24 @@ class Review:
         covered = self.schedule()['reported_through']
         return self.store.review_highwater(covered) > covered
 
-    def list_tasks(self, actor):
+    def list_tasks(self, actor, task_id=None):
         s = self.store
         if actor == 'master':
             # 固定本轮读取开始时的边界。finish_review 不能吞掉审核期间刚到的输入。
             schedule = self.schedule()
             schedule['review_snapshot'] = s.review_highwater(schedule['reported_through'])
             s.put('settings', schedule)
+        if task_id:
+            return {'task': s.get('task', task_id), 'now': self.clock()}
         # 已归档任务不再返回：它们已结束，留在列表里只会占用 Master 的上下文。
         tasks = [t for t in s.all('task') if not t.get('archived')]
         live = {t['agent'] for t in tasks}
         keep = ('id', 'node', 'backend', 'model', 'reasoning_effort', 'cwd', 'session', 'status', 'paused')
         agents = [{k: a.get(k) for k in keep} for a in s.all('agent') if a['id'] == 'master' or a['id'] in live]
-        return {'tasks': tasks, 'agents': agents, 'now': self.clock()}
+        # 列表只给摘要：history、claim、evidence、returns 这些字段占了全量的九成，261 个任务约 2MB，
+        # 每次调用都要经节点连接传一遍、再塞进模型上下文。需要某个任务全文时传 task_id 单独取。
+        return {'tasks': [summary(t) for t in tasks], 'agents': agents, 'now': self.clock(),
+                'note': '长字段已截断；需要某个任务的完整记录（审核历史、证据、退回意见）时用 list_tasks(task_id=…)'}
 
     def read_task_events(self, p):
         """给模型读的任务活动：与侧栏同源，但去掉遥测与流式增量，并截断超长字段。
@@ -64,6 +69,16 @@ class Review:
 
 
 FIELD = 1500
+# 任务摘要保留的字段；其余（history、claim、evidence、returns、verdict）只在按 task_id 取全文时给。
+SUMMARY = ('id', 'agent', 'title', 'node', 'state', 'deadline', 'original_deadline', 'created_at', 'completed_at',
+           'review_cursor', 'review_round', 'recoveries', 'wait', 'overdue_notified')
+SUMMARY_TEXT = ('description', 'acceptance', 'result')
+
+
+def summary(t):
+    out = {k: t[k] for k in SUMMARY if k in t}
+    out.update({k: cut(t[k], 300) for k in SUMMARY_TEXT if t.get(k)})
+    return out
 
 
 def slim(e):

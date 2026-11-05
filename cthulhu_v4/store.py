@@ -43,6 +43,10 @@ class Store:
             -- 若在大库上靠启动时建，会在启动阶段长时间占住写锁，节点租约随之到期。
             CREATE INDEX IF NOT EXISTS events_actor ON events(actor, seq);
             CREATE INDEX IF NOT EXISTS events_target ON events(target, seq);
+            -- read_messages 只要与某人有关的最近几十条；没有索引时要反序列化全部消息再在 Python 里过滤。
+            -- 索引项隐含 rowid，按 rowid 倒序取前几条可以直接沿索引读。消息约 2 万条，启动时建索引不到 1 秒。
+            CREATE INDEX IF NOT EXISTS objects_message_sender ON objects(json_extract(data, '$.sender')) WHERE kind = 'message';
+            CREATE INDEX IF NOT EXISTS objects_message_target ON objects(json_extract(data, '$.target')) WHERE kind = 'message';
         ''')
 
     @contextmanager
@@ -70,6 +74,18 @@ class Store:
 
     def all(self, kind):
         return [json.loads(r[0]) for r in self.db.execute('SELECT data FROM objects WHERE kind=? ORDER BY rowid', (kind,))]
+
+    def messages_of(self, who, limit):
+        """与 who 有关（发出或收到）的最近 limit 条消息，按写入顺序。
+        两路各沿部分索引倒序取 limit 条再合并，只解析这几十行；不能取全部消息到 Python 里过滤。
+        表达式须与 objects_message_* 索引定义完全一致才会命中。"""
+        rows = {}
+        for col in ('sender', 'target'):
+            for rowid, data in self.db.execute(
+                    f"SELECT rowid, data FROM objects WHERE kind = 'message' AND json_extract(data, '$.{col}') = ? "
+                    'ORDER BY rowid DESC LIMIT ?', (who, limit)):
+                rows[rowid] = data
+        return [json.loads(rows[r]) for r in sorted(rows)[-limit:]]
 
     def where(self, kind, *states):
         """按 state 取对象（走 objects_state 索引）；表达式须与索引定义完全一致才会命中。"""

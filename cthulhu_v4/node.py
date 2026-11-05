@@ -22,7 +22,14 @@ from .models import REFRESH as MODELS_REFRESH, discover
 from .runtime import make_runtime
 from .update import FEATURE as UPDATE_FEATURE, digest, install as install_release, mark as mark_update
 from .store import Store
+from .transport import MUX
 from .util import LEASE_MARGIN, PROTOCOL, process_alive
+
+# data 连接：每批事件不超过 2MB、等 60 秒。慢链路上一批传不完不会影响续租，只是事件晚到。
+UPLOAD_BYTES = 2 * 1024 * 1024
+UPLOAD_TIMEOUT = 60
+# 工具调用在 data 连接上等多久。不用 15 秒：中心并发处理，慢只会是因为结果大、链路慢，等久一点比反复重传划算。
+TOOL_TIMEOUT = 60
 
 VERSION = '4.1'
 
@@ -77,7 +84,9 @@ class Node:
         # 本机可用模型：后台定期发现；有变化时随下一次同步上报一次，中心持久保存。
         self.models, self.models_dirty = {}, False
         self.discover_models = not backends   # 测试显式指定后端时不启动真实 CLI
-        self.link = link             # 由传输层注入：request(body) → result
+        self.link = link             # 由传输层注入：request(body) → result；控制连接（同步与续租）
+        self.data = None             # 远端节点的 data 连接（见 data_link）；本机节点为 None
+        self.uploaded = asyncio.Event()
         self.bridge_url = ''         # 本机 MCP 桥（HTTP loopback）
         self.active, self.turns, self.expires = {}, {}, {}
         self.grace = 0
@@ -106,7 +115,7 @@ class Node:
 
     def queue(self, job, kind, data, text='', visible=False):
         seq = self.store.emit(kind, text, data={'job': job, 'payload': data, 'visible': visible})
-        self.kick.set()
+        self.kick.set(); self.uploaded.set()
         return seq
 
     def outbox(self, limit=64, max_bytes=8 * 1024 * 1024):
@@ -137,8 +146,39 @@ class Node:
                 print('模型发现失败：' + str(e), flush=True)
             await asyncio.sleep(MODELS_REFRESH)
 
+    def data_link(self):
+        """工具调用、事件上传、文件与更新包走 data 连接；中心不支持时退回控制连接。
+        为什么分两条连接：续租心跳只有几百字节，但 S 这类远端节点上传 1–2MB 的工具结果要十几秒，
+        同一条连接上心跳排在后面，超过 60 秒没续上，节点就以为与中心失联而停掉进程。"""
+        if self.data and MUX in getattr(self.link, 'features', ()):
+            return self.data
+        return None
+
+    async def upload(self):
+        """data 连接上持续上传发件箱；控制连接的同步不再夹带事件。"""
+        while not self.closed:
+            data = self.data_link()
+            events = self.outbox(max_bytes=UPLOAD_BYTES) if data else []
+            if events:
+                try:
+                    r = await data.request({'op': 'events', 'instance': self.instance, 'events': events}, timeout=UPLOAD_TIMEOUT)
+                    self.ack(r['ack'])
+                    continue
+                except (ConnectionError, RuntimeError) as e:
+                    print('事件上传失败，稍后重试：' + str(e), flush=True)
+                    await asyncio.sleep(1)
+                    continue
+            self.uploaded.clear()
+            try: await asyncio.wait_for(self.uploaded.wait(), 1)
+            except asyncio.TimeoutError: pass
+
+    def ack(self, value):
+        # 控制连接与 data 连接都会带回确认游标，先后不定：只前进不后退，否则已确认的事件会被重发。
+        if value > self.settings['ack']:
+            self.settings['ack'] = value; self.store.put('settings', self.settings)
+
     async def sync_once(self):
-        events = self.outbox()
+        events = [] if self.data_link() else self.outbox()
         started = time.monotonic()
         dirty = self.models_dirty
         extra = {'models': self.models} if dirty else {}
@@ -158,7 +198,7 @@ class Node:
         return len(events)
 
     def accept(self, result, started):
-        self.settings['ack'] = result['ack']; self.store.put('settings', self.settings)
+        self.ack(result['ack'])
         if result.get('update') and self.managed and not self.updating and not self.active:
             self.updating = True
             task = asyncio.create_task(self.apply_update(result['update']))
@@ -261,7 +301,10 @@ class Node:
         body = {'op': 'tool', 'job': job['id'], 'call_id': str(uuid.uuid4()), 'name': name, 'arguments': arguments}
         # 连接抖动时用同一 call_id 重试；中心把结果与业务变更同事务落盘，重试不会重复写。
         for attempt in range(8):
+            data = self.data_link()
             try:
+                if data:
+                    return await data.request(body, timeout=TOOL_TIMEOUT)
                 return await self.link.request(body)
             except ConnectionError:
                 if attempt == 7:
@@ -271,7 +314,7 @@ class Node:
     async def apply_update(self, offer):
         """下载、校验、换新代码，然后让 run() 退出，由 CLI 用同一组参数重启进程。"""
         try:
-            payload = await self.link.request({'op': 'release'})
+            payload = await (self.data_link() or self.link).request({'op': 'release'}, timeout=UPLOAD_TIMEOUT)
             old = await asyncio.to_thread(install_release, self.app, payload, offer)
             mark_update(self.state_dir.parent, self.code, offer['code'], old)
             print(f"已更新代码 {self.code} → {offer['code']}，正在重启", flush=True)
@@ -290,7 +333,7 @@ class Node:
         """读文件放到线程里，避免大文件或慢盘拖住续租心跳。回传失败就算了：网页会超时，可重试。"""
         body = await asyncio.to_thread(read_path, req['path'], req.get('known'), req.get('max', MAX_BYTES), self.protected)
         try:
-            await self.link.request({'op': 'file', 'id': req['id'], **body})
+            await (self.data_link() or self.link).request({'op': 'file', 'id': req['id'], **body}, timeout=UPLOAD_TIMEOUT)
         except (ConnectionError, RuntimeError):
             pass
 
@@ -316,6 +359,7 @@ class Node:
         """同步循环：有新事件立即上传；否则每秒一次心跳续租。连接由 link 负责重建。"""
         monitor = asyncio.create_task(self.watchdog())
         finder = asyncio.create_task(self.refresh_models()) if self.discover_models else None
+        uploader = asyncio.create_task(self.upload()) if self.data else None
         try:
             while not self.closed and not self.restart:
                 try:
@@ -329,9 +373,10 @@ class Node:
                 except asyncio.TimeoutError: pass
         finally:
             await self.close()
+            extra = [t for t in (finder, uploader) if t]
             monitor.cancel()
-            if finder: finder.cancel()
-            await asyncio.gather(monitor, *([finder] if finder else []), return_exceptions=True)
+            for t in extra: t.cancel()
+            await asyncio.gather(monitor, *extra, return_exceptions=True)
 
     async def close(self):
         self.closed = True

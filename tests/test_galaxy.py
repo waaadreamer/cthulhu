@@ -253,3 +253,43 @@ class PinTests(unittest.IsolatedAsyncioTestCase):
     def test_invite_blob_roundtrip(self):
         data = {'center': 'wss://h/v4/galaxy', 'code': 'abc', 'node': 'n', 'pin': None}
         self.assertEqual(decode_invite(encode_invite(data)), data)
+
+
+class MuxTests(unittest.IsolatedAsyncioTestCase):
+    """回归：同一节点上一个慢请求（大工具结果、慢链路）不能挡住续租心跳。旧实现一条连接串行，
+    慢请求占住连接 15 秒以上，心跳超过 60 秒没续上，节点停掉进程报“与中心失联”。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.c = Center(Path(self.tmp.name) / 'center')
+        with self.c.store.atomic():
+            node = self.c.hub.register('slow')
+        slow = asyncio.Event(); self.release = slow
+        real = self.c.hub.request
+
+        def request(n, body):
+            if body.get('op') == 'tool':
+                async def hold():
+                    await slow.wait(); return {'ok': True}
+                return hold()
+            return real(n, body)
+        self.c.hub.request = request
+        self.server = await serve(make_handler(self.c), '127.0.0.1', 0, max_size=MAX_FRAME)
+        url = 'ws://127.0.0.1:' + str(self.server.sockets[0].getsockname()[1])
+        self.link = RemoteLink(url, 'slow', token=node['token'], hello={'instance': 'i'})
+
+    async def asyncTearDown(self):
+        self.release.set(); await self.link.close()
+        self.server.close(); await self.server.wait_closed()
+        self.c.store.close(); self.tmp.cleanup()
+
+    async def test_sync_answers_while_a_tool_call_is_still_pending(self):
+        tool = asyncio.create_task(self.link.request({'op': 'tool', 'job': 'x', 'call_id': '1', 'name': 'n'}, timeout=30))
+        await asyncio.sleep(.2)
+        sync = {'op': 'sync', 'instance': 'i', 'backends': ['demo'], 'events': []}
+        async with asyncio.timeout(3):
+            for _ in range(3):
+                self.assertIn('lease_seconds', await self.link.request(sync))
+        self.assertFalse(tool.done())
+        self.release.set()
+        self.assertEqual(await tool, {'ok': True})
