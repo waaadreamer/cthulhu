@@ -120,8 +120,6 @@ class Store:
             clauses.append('seq<?'); args.append(int(before))
         if task:
             clauses.append('task=?'); args.append(task)
-        if agent:
-            clauses.append("(actor=? OR target=? OR task IN (SELECT id FROM objects WHERE kind='task' AND json_extract(data,'$.agent')=?))"); args.extend([agent, agent, agent])
         if visible:
             clauses.append('visible=1')
         if conversation:
@@ -134,10 +132,27 @@ class Store:
             clauses.append("kind != 'harness_tool'")
         if compact:
             clauses.append(f"kind NOT IN ({','.join('?' * len(DELTAS))})"); args.extend(DELTAS)
-        args.append(max(1, min(int(limit), 500)))
+        limit = max(1, min(int(limit), 500))
         where = ' AND '.join(clauses) or '1'
         order = 'DESC' if before is not None else 'ASC'
-        rows = list((db or self.db).execute(f'SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ?', args))
+        conn = db or self.db
+        if not agent:
+            rows = list(conn.execute(f'SELECT * FROM events WHERE {where} ORDER BY seq {order} LIMIT ?', [*args, limit]))
+        else:
+            # 为什么按分支分别取再合并，而不写成一条 actor=? OR target=? OR task IN (...)：
+            # 单条 OR 会让 SQLite 走 MULTI-INDEX OR，先收齐三路命中的全部行再排序取 LIMIT，
+            # 事件最多的执行者（Master）要处理上百万行，线上实测超过 30 秒；
+            # 每一路各自沿 (actor|target|task, seq) 索引按 seq 方向读，凑够 limit 条就停（线上 master 约 12ms）。
+            # 过滤条件在每一路里都相同，所以合并后取前 limit 条与单条 OR 的结果一致。
+            tasks = [r[0] for r in conn.execute(
+                "SELECT id FROM objects WHERE kind='task' AND json_extract(data,'$.agent')=?", (agent,))]
+            branches = [('actor=?', agent), ('target=?', agent), *(('task=?', t) for t in tasks)]
+            found = {}
+            for cond, arg in branches:
+                for r in conn.execute(f'SELECT * FROM events WHERE {cond} AND {where} ORDER BY seq {order} LIMIT ?',
+                                      [arg, *args, limit]):
+                    found[r['seq']] = r
+            rows = sorted(found.values(), key=lambda r: r['seq'], reverse=before is not None)[:limit]
         if before is not None:
             rows.reverse()
         return [dict(r) | {'data': json.loads(r['data'])} for r in rows]

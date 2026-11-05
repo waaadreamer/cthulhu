@@ -34,11 +34,36 @@ class StoreWhereTest(unittest.TestCase):
         db.row_factory = sqlite3.Row
         db.set_trace_callback(lambda q: sql.append(q) if q.startswith('SELECT * FROM events') else None)
         self.store.events(db=db, before=0, limit=10, agent='old_a', ui=True, compact=True)
-        plan = ' '.join(r[3] for r in db.execute('EXPLAIN QUERY PLAN ' + sql[-1]))
+        # 每个分支（actor、target、各任务）各一条查询，每条都必须走索引。
+        plans = [' '.join(r[3] for r in db.execute('EXPLAIN QUERY PLAN ' + q)) for q in sql]
         db.close()
-        self.assertIn('events_actor', plan)
-        self.assertIn('events_target', plan)
-        self.assertNotIn('SCAN events', plan)
+        self.assertEqual(len(plans), 3)     # actor、target、一个任务
+        self.assertTrue(any('events_actor' in p for p in plans))
+        self.assertTrue(any('events_target' in p for p in plans))
+        self.assertFalse(any('SCAN events' in p for p in plans))
+
+    def test_agent_events_match_single_or_query(self):
+        # 分支各取 limit 条再合并，必须与原来的单条 OR 查询返回同样的事件，翻页与跟随两个方向都一样。
+        for i in range(60):
+            self.store.emit('message', actor='old_a', target='master', task='t0')
+            self.store.emit('reply', actor='master', target='old_a', task=None)
+            self.store.emit('native:item/completed', actor='old_b', task='t0', data={'item': {'type': 'agentMessage'}})
+            self.store.emit('native:thread/tokenUsage/updated', actor='old_a')
+            self.store.emit('message', actor='old_c', target='old_d', task='t_other')
+        self.store.put('task', {'id': 't0', 'agent': 'old_a', 'state': 'running'})
+        reference = ("SELECT seq FROM events WHERE {w} AND (actor=? OR target=? OR task IN "
+                     "(SELECT id FROM objects WHERE kind='task' AND json_extract(data,'$.agent')=?)) "
+                     "AND (kind NOT LIKE 'native:%' OR kind IN ({m})) ORDER BY seq {o} LIMIT 25")
+        from cthulhu_v4.store import UI_NATIVE
+        marks = ','.join('?' * len(UI_NATIVE))
+        top = self.store.highwater()
+        for kw, w, o, arg in ((dict(before=0), '1', 'DESC', []), (dict(before=top // 2), 'seq<?', 'DESC', [top // 2]),
+                              (dict(after=top // 3), 'seq>?', 'ASC', [top // 3])):
+            got = [e['seq'] for e in self.store.events(limit=25, agent='old_a', ui=True, **kw)]
+            want = [r[0] for r in self.store.db.execute(
+                reference.format(w=w, o=o, m=marks), [*arg, 'old_a', 'old_a', 'old_a', *UI_NATIVE])]
+            self.assertEqual(got, sorted(want), kw)
+            self.assertEqual(len(got), 25)
 
     def test_where_sees_state_updates_in_place(self):
         # 状态变化后索引必须同步：结束的回合不能再被当作 running 续租。
