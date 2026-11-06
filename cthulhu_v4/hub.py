@@ -272,7 +272,7 @@ class Hub:
                 s.put('lease', j)
                 jobs.append(j); free -= 1
             # 文件读取请求不是业务状态，不进事务、不落盘；随同步响应捎给节点即可。
-            reply = {'ack': n['ack'], 'lease_seconds': LEASE, 'jobs': jobs, 'files': c.files.requests_for(node)}
+            reply = {'ack': n['ack'], 'lease_seconds': LEASE, 'now': c.clock(), 'jobs': jobs, 'files': c.files.requests_for(node)}
             if plan == 'ready':
                 reply['update'] = c.release.offer()
             return reply

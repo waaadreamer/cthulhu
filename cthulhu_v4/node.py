@@ -230,8 +230,18 @@ class Node:
                 self.stop(jid, task, '中心不再续租（已要求停止、暂停或租约在中心已失效）')
         for job in result['jobs']:
             jid = job['id']
-            # 用请求发出时的单调时钟，扣除停止进程的余量，不依赖两机时钟一致。
-            self.expires[jid] = started + result['lease_seconds'] - LEASE_MARGIN
+            # 用中心下发的当前时间计算到期时刻，消除心跳 RTT 的影响。
+            # 旧中心不下发 now：退回请求发出时的单调时钟（可能受 RTT 影响提前到期）。
+            # 为什么：节点的到期基准是"请求发出时"，中心是"响应发出时"；RTT 超过 LEASE_MARGIN
+            # 时节点会比中心提前停止任务。用中心的 now 后两边基准一致，容忍任意长的 RTT。
+            # now 是墙上时钟，依赖两机时钟大致同步（NTP 偏差通常在几百毫秒内，远小于 10 秒余量）。
+            # expires 存储单调时钟：墙上时钟减去当前墙上时钟再加上当前单调时钟，转成本地单调基准。
+            if 'now' in result:
+                expires_wall = result['now'] + result['lease_seconds'] - LEASE_MARGIN
+                self.expires[jid] = expires_wall - time.time() + time.monotonic()
+            else:
+                # 旧中心：用单调时钟，保持原有行为
+                self.expires[jid] = started + result['lease_seconds'] - LEASE_MARGIN
             if jid in self.active or self.store.find('execution', jid):
                 continue
             if 'agent_spec' not in job:
