@@ -112,6 +112,7 @@ class Hub:
     def expire(self):
         now = self.c.clock()
         with self.c.store.atomic():
+            self.c.executions.expire()
             for j in self.c.store.where('lease', 'running'):
                 if j['state'] == 'running' and j['until'] <= now:
                     self.uncertain(j, f"节点 {j['node']} 回合租约到期：{j['agent']}，结果未知")
@@ -161,6 +162,9 @@ class Hub:
         s, c = self.c.store, self.c
         batch = {'owner': {}, 'task': {}} if batch is None else batch
         kind, job = event['kind'], event['job']
+        if kind.startswith('command:'):
+            self.c.executions.ingest(node, event)
+            return
         # steer/finished 会读写租约的其余字段并改状态，必须读最新；其余事件只需要回合的归属，
         # 归属在回合存续期间不会变，可以整批复用。
         j = None
@@ -236,7 +240,9 @@ class Hub:
                         # 待插入的消息随续租下发，直到节点报告结果；节点按消息 id 去重，重复下发不会重复插入。
                         item['steer'] = [{'id': mid, 'text': c.steer_text(mid)} for mid in j['steer']]
                     jobs.append(item)
-            plan = c.update_plan(n, running)
+            # 通用命令也拥有本地进程；更新必须等它们收尾，不能在执行期间换代码/重启。
+            command_count = sum(x['node_id'] == node for x in c.executions.active())
+            plan = c.update_plan(n, running + command_count)
             s.put('node', n)
             # 等待更新时不派发新回合：消息留在队列里，更新完成（或失败）后照常派发。
             # 主人调低上限时不打断已在跑的回合，只是暂不派发新的，直到 running 降到上限以下。
@@ -272,7 +278,8 @@ class Hub:
                 s.put('lease', j)
                 jobs.append(j); free -= 1
             # 文件读取请求不是业务状态，不进事务、不落盘；随同步响应捎给节点即可。
-            reply = {'ack': n['ack'], 'lease_seconds': LEASE, 'now': c.clock(), 'jobs': jobs, 'files': c.files.requests_for(node)}
+            reply = {'ack': n['ack'], 'lease_seconds': LEASE, 'now': c.clock(), 'jobs': jobs, 'files': c.files.requests_for(node),
+                     'commands': c.executions.requests_for(node, body.get('commands_have') or ())}
             if plan == 'ready':
                 reply['update'] = c.release.offer()
             return reply

@@ -204,7 +204,7 @@ export const auth = {
   set(value) { localStorage.setItem('cthulhu-token', value.trim()); },
 };
 
-export async function api(path, body) {
+export async function api(path, body, { resultError = false } = {}) {
   const r = await fetch(new URL(path, document.baseURI), {
     method: body === undefined ? 'GET' : 'POST',
     headers: { Authorization: 'Bearer ' + auth.token, 'Content-Type': 'application/json' },
@@ -212,6 +212,7 @@ export async function api(path, body) {
   });
   let value = {};
   try { value = await r.json(); } catch { /* 非 JSON 响应 */ }
-  if (!r.ok || value.error) { const e = Error(value.error || r.statusText); e.status = r.status; throw e; }
+  // 执行结果本身含 error 字段（如取消/unknown原因），HTTP 200 的这类记录仍是有效响应。
+  if (!r.ok || (!resultError && value.error)) { const e = Error(value.error || r.statusText); e.status = r.status; throw e; }
   return value;
 }

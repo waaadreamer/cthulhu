@@ -179,6 +179,10 @@ class Web:
                     before=None if before is None else int(before), compact=before is not None)
                 events = [ui_event(e) for e in events]
                 return {'events': events, 'more': len(events) >= limit, 'highwater': top}
+            if path == '/api/executions':
+                if q('id'):
+                    return c.executions.get(q('id'))
+                return c.executions.list(q('node_id'), q('limit', 20))
             if path == '/api/file':
                 return await c.files.read(q('ref'), refresh=q('refresh') == '1')
             if path == '/api/history':
@@ -194,6 +198,10 @@ class Web:
                 c.deployer.available = await asyncio.to_thread(c.deployer.check)
                 return c.deployer.status()
             raise ValueError('未知接口')
+        if path == '/api/executions':
+            return c.executions.create(**body)
+        if path == '/api/executions/cancel':
+            return c.executions.cancel(body['id'])
         if path == '/api/deploy':
             # 部署会 fetch、跑测试并最终重启中心：只能由主人在网页触发，agent 没有对应工具。
             return await c.deployer.start()

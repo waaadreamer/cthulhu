@@ -17,6 +17,7 @@ import time
 import uuid
 
 from . import proxy
+from .execution import FEATURE as COMMAND_FEATURE, NodeCommands
 from .files import FEATURE, MAX_BYTES, read_path
 from .models import REFRESH as MODELS_REFRESH, discover
 from .runtime import make_runtime
@@ -120,6 +121,8 @@ class Node:
                     j['state'] = 'stopped'; self.store.put('execution', j)
                     self.queue(j['id'], 'finished', {'outcome': 'unknown', 'error': '节点进程曾退出，上一回合结果未知；未重放'})
 
+        self.commands = NodeCommands(self)
+
     @property
     def instance(self):
         return self.settings['instance']
@@ -136,7 +139,9 @@ class Node:
             item = {'seq': e['seq'], 'job': e['data']['job'], 'kind': e['kind'], 'text': e['text'],
                     'at': e['at'], 'data': e['data']['payload'], 'visible': e['data']['visible']}
             cost = len(json.dumps(item, ensure_ascii=False).encode())
-            if batch and size + cost > max_bytes:
+            # 命令输出分成小批走 data；旧中心回退控制连接时也限制每批，避免挤占心跳。
+            cap = min(max_bytes, 128 * 1024) if item['kind'].startswith('command:') else max_bytes
+            if batch and size + cost > cap:
                 break
             batch.append(item); size += cost
         return batch
@@ -189,15 +194,15 @@ class Node:
             self.settings['ack'] = value; self.store.put('settings', self.settings)
 
     async def sync_once(self):
-        events = [] if self.data_link() else self.outbox()
+        events = [] if self.data_link() else self.outbox(max_bytes=64 * 1024)
         started = time.monotonic()
         dirty = self.models_dirty
         extra = {'models': self.models} if dirty else {}
         result = await self.link.request(extra | {'op': 'sync', 'instance': self.instance, 'base': str(self.state_dir.parent),
                                           # 已收到全文的回合：中心续租时只回 id，不再重发 prompt。
-                                          'have': list(self.expires),
+                                          'have': list(self.expires), 'commands_have': list(self.commands.known),
                                           'backends': self.backends, 'version': VERSION,
-                                          'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE, 'steer'], 'code': self.code,
+                                          'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE, COMMAND_FEATURE, 'steer'], 'code': self.code,
                                           'managed': self.managed, 'events': events})
         self.accept(result, started)
         if dirty:
@@ -210,7 +215,9 @@ class Node:
 
     def accept(self, result, started):
         self.ack(result['ack'])
-        if result.get('update') and self.managed and not self.updating and not self.active:
+        command_base = (result['now'] - time.time() + time.monotonic()) if 'now' in result else started
+        self.commands.accept(result.get('commands', []), command_base)
+        if result.get('update') and self.managed and not self.updating and not self.active and not self.commands.active:
             self.updating = True
             task = asyncio.create_task(self.apply_update(result['update']))
             self.reads.add(task); task.add_done_callback(self.reads.discard)
@@ -405,3 +412,4 @@ class Node:
         for jid, task in list(self.active.items()):
             if not task.cancelling(): self.stop(jid, task, '节点进程关闭')
         await asyncio.gather(*jobs, return_exceptions=True)
+        await self.commands.close()

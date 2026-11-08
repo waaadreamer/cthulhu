@@ -14,6 +14,7 @@ from .domain.messages import Messages
 from .domain.questions import Questions
 from .domain.review import Review
 from .domain.tasks import Tasks
+from .execution import ExecutionService
 from .files import FileService
 from .update import FEATURE as UPDATE_FEATURE
 from .history import History
@@ -38,6 +39,7 @@ class Center(Messages, Questions, Tasks, Review):
         self.hub = Hub(self)
         self.feishu = None  # 由 App 按启动参数挂载；没有它时中心完全不接触飞书
         self.files = FileService(self)
+        self.executions = ExecutionService(self)
         # Master 的 cwd 就是状态目录，所以它可以直接 grep master-history/。
         self.history = History(self.store, self.state_dir / 'master-history')
         self.release = None  # 由 App 设置为中心正在运行的代码包；没有时不发起远程更新
@@ -53,6 +55,7 @@ class Center(Messages, Questions, Tasks, Review):
                                 'status': 'idle', 'failures': 0, 'idle_at': clock(), 'paused': False})
                 s.put('settings', {'id': 'schedule', 'next_review': clock() + review_interval})
             self.upgrade()
+            self.executions.recover()
 
     def upgrade(self):
         """启动修复，幂等。兼容首版状态目录：保留 session、节点 instance 与事件，不重放任何输入。"""

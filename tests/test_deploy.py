@@ -74,6 +74,19 @@ class DeployTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.d.restart); self.assertEqual(self.exits, [True])
         self.assertTrue(any(e['kind'] == 'deploy' for e in self.c.store.events(visible=True, limit=50)))
 
+    async def test_drain_waits_for_local_commands_as_well_as_native_turns(self):
+        command = {'id': 'cmd_drain', 'node_id': 'local', 'state': 'running'}
+        self.c.store.put('command', command)
+        drain = asyncio.create_task(self.d._drain())
+        try:
+            await asyncio.sleep(.05)
+            self.assertFalse(drain.done())
+            self.assertIn('cmd_drain', self.d.state['waiting_for'])
+            command['state'] = 'completed'; self.c.store.put('command', command)
+            await asyncio.wait_for(drain, 3)
+        finally:
+            drain.cancel(); await asyncio.gather(drain, return_exceptions=True)
+
     async def test_running_commit_counts_even_if_head_already_moved(self):
         class R: commit = None
         r = R(); r.commit = subprocess.run(['git', '-C', str(self.live), 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True).stdout.strip()

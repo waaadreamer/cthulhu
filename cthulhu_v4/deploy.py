@@ -158,6 +158,8 @@ class Deployer:
         c, end = self.app.center, time.monotonic() + DRAIN_TIMEOUT
         while True:
             busy = [j['agent'] for j in c.store.where('lease', 'running') if j['node'] == LOCAL]
+            # 网页命令和采集命令也拥有进程；更新应等待它们结束，不能趁 agent 空闲中断命令。
+            busy += [j['id'] for j in c.executions.active() if j['node_id'] == LOCAL]
             if not busy:
                 return
             self._set(waiting_for=busy)

@@ -9,6 +9,7 @@ import { Chat } from './chat.js';
 import { applyDelta } from './delta.js';
 import { modelChoices, effortChoices, catalogNote } from './models.js';
 import { initHistory } from './history.js';
+import { initCommands, openCommands } from './commands.js';
 import { groupTasks, groupOpen, setGroupOpen } from './tasks.js';
 
 const STATE = { running: '进行中', waiting: '等待', paused: '已暂停', review: '待审核', completed: '已完成', failed: '未达成', cancelled: '已取消' };
@@ -570,7 +571,7 @@ function openNode(id) {
   $('#node-retry').hidden = n.update?.state !== 'failed';
   $('#node-retry').onclick = () => act(async () => { await api('api/node/update', { node: id }); $('#node-dialog').close(); });
   delete f.dataset.backend; $('#node-custom').value = '';
-  syncNodeForm(); dialog('#node-dialog');
+  syncNodeForm(); openCommands(n); dialog('#node-dialog');
 }
 function recoverCommand(n) {
   if (n.id === 'local' || !snap.install_url) return '';
@@ -683,7 +684,7 @@ const fromHash = () => {
   if (location.hash === '#master') return openTask(MASTER);
   const id = location.hash.match(/task=([\w-]+)/)?.[1]; if (id) openTask(id);
 };
-initMonitor(); initAcl();
+initMonitor(); initAcl(); initCommands();
 initViewer({ returnHash: () => (drawer ? (drawer.task === MASTER ? '#master' : '#task=' + drawer.task) : '') });
 initHistory();
 $('#master-open').onclick = () => (drawer?.task === MASTER ? closeDrawer() : openTask(MASTER));
