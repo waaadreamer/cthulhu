@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from .canvas import Canvases
 from .domain.messages import Messages
 from .domain.questions import Questions
 from .domain.review import Review
@@ -40,6 +41,7 @@ class Center(Messages, Questions, Tasks, Review):
         self.feishu = None  # 由 App 按启动参数挂载；没有它时中心完全不接触飞书
         self.files = FileService(self)
         self.executions = ExecutionService(self)
+        self.canvases = Canvases(self)
         # Master 的 cwd 就是状态目录，所以它可以直接 grep master-history/。
         self.history = History(self.store, self.state_dir / 'master-history')
         self.release = None  # 由 App 设置为中心正在运行的代码包；没有时不发起远程更新

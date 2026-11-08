@@ -11,6 +11,7 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from .canvas import BOARD_CSP
 from .tools import HTML_TEXT_LIMIT
 from .util import ROOT, cut
 
@@ -113,7 +114,7 @@ class Web:
                 mime = MIME.get(target.suffix, 'application/octet-stream')
                 # 字体是二进制，不能带 charset；也不再 gzip（woff2 本身已压缩）。
                 self.respond(200, target.read_bytes(), mime + '; charset=utf-8' if mime.startswith(TEXT_MIME) else mime,
-                             csp=CANVAS_CSP if target.name == 'canvas.html' else CSP)
+                             csp=BOARD_CSP if target.name == 'board-frame.html' else CANVAS_CSP if target.name == 'canvas.html' else CSP)
 
             def respond(self, status, value, content_type='application/json; charset=utf-8', csp=CSP):
                 raw = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
@@ -150,6 +151,8 @@ class Web:
             raise PermissionError('请填写访问凭证')
         c, app = self.app.center, self.app
         q = lambda k, d=None: query.get(k, [d])[0]
+        if path == '/api/canvas' or path.startswith('/api/canvas/'):
+            return await c.canvases.route(method, path, query, body)
         if method == 'GET':
             if path == '/api/state':
                 # 状态没变就不重发：客户端带上次的 etag，只回 now（倒计时用）。now 不参与 etag。

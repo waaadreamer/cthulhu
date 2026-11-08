@@ -18,6 +18,11 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.app = App(self.tmp.name, port=0, ws_port=0, public_url='https://example.test:8001/v4',
                        allowed_origins=['https://alias.test:8001/'])
         await self.app.start()
+        # 网页快照测试不测模型目录/远端版本；后台探测可能在两次快照间修改状态，
+        # 让 delta 还原断言与外网速度竞争，也会在退出时等待无关 git fetch。
+        self.app.node.discover_models = False
+        self.app.deployer.check = lambda: {}
+        self.app.deployer.available = {}
         self.url, self.token = self.app.web.url, self.app.web.token
 
     async def asyncTearDown(self):

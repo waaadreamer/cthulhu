@@ -212,6 +212,12 @@ def main(argv=None):
     i = sub.add_parser('invite', help='生成节点接入命令（需中心在运行）')
     i.add_argument('name'); i.add_argument('--state', default='.state')
 
+    canvas = sub.add_parser('canvas', help='独立 local Canvas 服务（业务状态保存在中心）')
+    canvas.add_argument('--center', default='http://127.0.0.1:8767')
+    canvas.add_argument('--token-file', required=True)
+    canvas.add_argument('--port', type=int, default=8780)
+    canvas.add_argument('--tick-interval', type=float, default=1)
+
     n = sub.add_parser('node', help='执行节点')
     nsub = n.add_subparsers(dest='node_cmd', required=True)
     j = nsub.add_parser('join'); j.add_argument('invite'); j.add_argument('--home')
@@ -228,6 +234,9 @@ def main(argv=None):
         asyncio.run(run_center(args))
     elif args.cmd == 'invite':
         invite(args)
+    elif args.cmd == 'canvas':
+        from .canvas_server import serve
+        asyncio.run(serve(args))
     elif args.node_cmd == 'join':
         asyncio.run(join(args))
     elif args.node_cmd == 'run':

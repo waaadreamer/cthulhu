@@ -1,0 +1,15 @@
+# 可选独立服务；先按实际安装位置/中心端口修改，再安装。不要为了 Canvas 重启中心的原生会话。
+[Unit]
+Description=Cthulhu independent Canvas collector and dashboard
+After=network-online.target cthulhu-v4.service
+
+[Service]
+WorkingDirectory=/root/cthulhu-v4
+ExecStart=/root/cthulhu-v4/.venv/bin/python -m cthulhu_v4 canvas --center http://127.0.0.1:8767 --token-file /root/cthulhu-v4/.state/web-token --port 8780
+Restart=on-failure
+RestartSec=5
+# 服务无业务状态目录。停止只停止后续调度，已提交的采集由节点命令超时收尾。
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

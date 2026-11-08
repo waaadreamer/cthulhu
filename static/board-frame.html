@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<script>
+// 只有 allow-scripts，没有 allow-same-origin；不透明来源和独立 CSP 共同阻止模板读取凭证/访问中心。
+// 模板从固定消息接口收数据，不把采集 stdout 拼到 HTML。只信任父窗口的初始化与更新。
+(function () {
+  var initialized = false;
+  addEventListener('message', function (event) {
+    if (initialized || event.source !== parent || !event.data || event.data.type !== 'cthulhu:canvas:init'
+        || typeof event.data.template !== 'string') return;
+    initialized = true;
+    var initial = event.data.snapshot;
+    var template = event.data.template;
+    document.open(); document.write(template); document.close();
+    var current = initial;
+    Object.defineProperty(window, 'Canvas', { value: Object.freeze({ getData: function () { return current; } }) });
+    function update(snapshot) {
+      current = snapshot;
+      dispatchEvent(new CustomEvent('canvas:update', { detail: snapshot }));
+    }
+    addEventListener('message', function (message) {
+      if (message.source === parent && message.data && message.data.type === 'cthulhu:canvas:data') update(message.data.snapshot);
+    });
+    update(initial);
+  });
+  parent.postMessage({ type: 'cthulhu:canvas:ready' }, '*');
+})();
+</script>

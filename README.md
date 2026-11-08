@@ -113,6 +113,8 @@ static/js/       model（事件 → 会话块，可单测）、render、chat、a
 
 ## 测试
 
+独立多实验看板见 [Canvas 使用与部署](docs/canvas.md)；节点详情中的命令行与采集共用的执行接口见 [远程命令说明](docs/remote-execution.md)。Canvas 无需绑定 task，独立服务使用 `cthulhu canvas --center http://127.0.0.1:8767 --token-file /path/to/web-token` 启动。
+
 ```bash
 .venv/bin/python -m unittest discover -s tests -v     # 不调用模型
 for f in static/js/*.js; do node --check $f; done && node tests/test_model.mjs
