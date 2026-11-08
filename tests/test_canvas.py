@@ -139,6 +139,23 @@ class CanvasTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data['attempt']['truncated'])
         self.assertEqual(data['status'], 'failed'); self.assertFalse(data['fresh'])
 
+    async def test_closed_panel_stays_closed_after_late_unknown_receipt(self):
+        board = await self.create()
+        await self.tick()
+        await self.api.route('POST', '/api/canvas/' + board['id'] + '/close', {}, {})
+        self.finish(board['id'], 'unknown', error='中心恢复，旧命令结果未知')
+        await self.tick()
+        data = self.api.data(self.board(board['id']))
+        self.assertEqual(data['state'], 'closed')
+        self.assertEqual(data['status'], 'closed')
+        self.assertTrue(data['blocked_unknown'])
+        self.assertEqual(data['attempt']['state'], 'unknown')
+        self.assertTrue(data['attempt']['discarded'])
+        self.now += 100
+        self.assertEqual((await self.tick())['started'], [])
+        with self.assertRaises(ValueError):
+            await self.api.route('POST', '/api/canvas/' + board['id'] + '/resume', {}, {'acknowledge_unknown': True})
+
     async def test_worker_delayed_result_and_future_node_clock_do_not_refresh_old_data(self):
         board = await self.create()
         await self.tick()

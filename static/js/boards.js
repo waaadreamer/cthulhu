@@ -50,11 +50,12 @@ function makeCard(board, data, previous = null) {
 
 function updateCard(card, summary) {
   card.summary = summary;
+  const snapshot = frameSnapshot(card.data, summary);
   card.title.textContent = summary.name;
-  card.badge.textContent = STATUS[summary.status] || summary.status;
-  card.badge.classList.toggle('fresh', summary.fresh);
-  card.meta.textContent = `${summary.node_id} · 最近成功采集：${time(summary.sampled_at)} · 间隔 ${summary.interval}s / 超时 ${summary.timeout}s`
-    + (summary.stale && summary.sampled_at ? ' · 保留的数据已过期' : '')
+  card.badge.textContent = STATUS[snapshot.status] || snapshot.status;
+  card.badge.classList.toggle('fresh', snapshot.fresh);
+  card.meta.textContent = `${summary.node_id} · 最近成功采集：${time(snapshot.sampled_at)} · 间隔 ${summary.interval}s / 超时 ${summary.timeout}s`
+    + (snapshot.stale && snapshot.sampled_at ? ' · 保留的数据已过期' : '')
     + (summary.task_ids.length ? ` · 关联：${summary.task_ids.join(', ')}` : ' · 独立面板');
   const attempt = card.data?.attempt;
   card.errors.textContent = attempt ? `状态：${attempt.state} · exit_code：${attempt.exit_code ?? '无'} · 采集回执：${time(attempt.collected_at)}`

@@ -184,7 +184,8 @@ class Canvases:
         stale = not success or success['revision'] != board['revision'] or now - success.get('freshness_at', success['sampled_at']) > max(2 * board['interval'], board['interval'] + board['timeout'])
         attempt = board['last_attempt']
         failed = attempt and not attempt['discarded'] and (attempt['state'] != 'completed' or attempt.get('exit_code') != 0 or attempt.get('truncated'))
-        status = ('unknown' if board['blocked_unknown'] else board['state'] if board['state'] != 'active'
+        # 关闭是终态；迟到的 unknown 仍留作回执，但不能把已关闭面板重新显示成“已暂停可恢复”。
+        status = ('closed' if board['state'] == 'closed' else 'unknown' if board['blocked_unknown'] else board['state'] if board['state'] != 'active'
                   else 'node_offline' if not node_online else 'collector_offline' if not worker_online
                   else 'failed' if failed else 'stale' if stale and success else 'collecting' if board['inflight']
                   else 'waiting' if not success else 'fresh')
