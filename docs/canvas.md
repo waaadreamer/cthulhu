@@ -19,6 +19,7 @@ Canvas 是独立实体，不需要现有 task。一个面板的一次 stdout 可
 
 - 现有中心网页顶部的 **Canvas** 进入 `./boards.html`，沿用本浏览器已有的中心访问凭证。通过现有中心反向代理也能访问，不需要新开公网端口。
 - 独立服务也提供 `http://127.0.0.1:8780/` 看板；首次访问需要填写同一中心 web-token（不同浏览器来源有各自的 localStorage）。后端不会把凭证嵌进页面或模板。
+- 两个入口的左上角品牌链接均返回中心主会话；独立入口保留 `--center` 的路径前缀。
 - `deploy/cthulhu-canvas.service` 是可选 systemd 示例，先修改中心状态路径和安装路径，再安装。它不随中心自动启动，不会隐式创建任何生产采集。
 - 若现有中心仍运行旧代码，需要通过原有部署流程升级中心和节点，节点须报告 `commands-v1`。这可能涉及原生会话，不要为试用 Canvas 直接重启生产中心。可先使用下面的全隔离演示。
 
@@ -39,6 +40,8 @@ demo_state=$(mktemp -d /tmp/cthulhu-canvas-demo.XXXXXX)
 必填：`name`、`html_template`、`node_id`、节点上的绝对 `cwd`、`script`、`interval`（1–86400 秒）、`timeout`（0.1–3600 秒）。可选 `task_ids: []`。HTML 模板上限 256KiB，脚本上限 64000 字节。脚本由节点用户执行，和节点命令行一致；应选择短时、只读、范围明确的采集脚本。
 
 创建后等待独立服务采集；编辑使用 `revision` 防止覆盖其他页面的并发修改。暂停不再启动新采集，本次已提交的采集仍可回收。恢复立即进入下次采集窗口。关闭是终态，停止后续采集，已提交采集等待自身超时收尾并丢弃迟到结果；关闭不会向它展示的训练/评测发送任何停止命令。需要重新采集时新建面板。
+
+创建与编辑的输入在当前标签页的 sessionStorage 中暂存，关闭编辑器、刷新或返回看板后，重新打开对应的新建/编辑入口即可继续；保存或“丢弃草稿”会清除该草稿，关闭标签页后不保证保留。存储被浏览器禁用或写满时会显示无法暂存的提示。草稿不含访问凭证；编辑草稿保留最初的 revision，其他窗口已修改时仍会拒绝覆盖并保留输入。名称上限按 UTF-8 字节计算，界面会在提交前显示对应字段的错误。切换配置时保持模板未变的 iframe、采集详情展开状态和键盘焦点；模板变化才重载隔离 iframe。
 
 同一面板只保留一个在途命令。采集未结束时跳过 tick，结束回收后从当前时间再等待一个 `interval`，不补跑错过的采集。中心事务同时保存命令和在途记录，多个服务实例、HTTP 响应丢失和 Canvas 服务重启均沿用原票据。节点每个最多 4 个未结束命令；容量满或升级时本面板显示失败并等待下一间隔，其他面板仍可回收。
 
@@ -65,7 +68,7 @@ demo_state=$(mktemp -d /tmp/cthulhu-canvas-demo.XXXXXX)
 python3 /path/to/canvas_collect.py /path/to/manifest.json
 ```
 
-模板使用 `static/examples/canvas-summary.html`，显示数据源、多个实验行和文件路径。这里的 `demo: false` 表示读了明确指定的文件，不保证文件内容来自真实训练；数据可信度由你指定的数据源决定。
+模板使用 `static/examples/canvas-summary.html`，显示数据源、多个实验行、文件路径与文件修改时间。这里的 `demo: false` 表示读了明确指定的文件，不保证文件内容来自真实训练；数据可信度由你指定的数据源决定。
 
 ## 模板固定接口与隔离
 
@@ -110,7 +113,10 @@ for f in static/js/*.js; do node --check "$f"; done
 node tests/test_model.mjs
 node tests/test_board_data.mjs
 PLAYWRIGHT_PATH=/path/to/playwright-core node tests/ui_canvas.cjs
+PLAYWRIGHT_PATH=/path/to/playwright-core node tests/ui_canvas_review.cjs
 # 缓存浏览器与 Playwright 版本不同时可加 PLAYWRIGHT_EXECUTABLE=/path/to/chrome
 ```
 
 单元测试验证票据/事务/恢复不变量；HTTP 端到端和可选浏览器测试通过真实隔离命令读取两份状态文件，再将 completed 从 3 改为 4 验证模板更新。它们不调用模型，也不把 fixture 当成真实训练表现。浏览器脚本的隔离进程/目录会清理，截图默认 `/tmp/cthulhu-canvas-preview.png`。
+
+第二轮浏览器脚本另外覆盖主入口导航、凭证失败、草稿与并发编辑冲突、窄屏输入错误、长标题、多面板响应乱序、失败保留数据、浏览器离线及 Canvas 服务停止/恢复；截图默认保存在 `/tmp/cthulhu-canvas-review-ui`，可用 `CANVAS_REVIEW_ARTIFACTS` 指定位置。其 HTTP 乱序由测试主动延迟请求实现，文件采集与失败/恢复则使用实际隔离命令。

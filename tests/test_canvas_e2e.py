@@ -10,6 +10,8 @@ from pathlib import Path
 
 from cthulhu_v4.app import App
 from cthulhu_v4.canvas_server import CanvasServer
+from cthulhu_v4.node import Node
+from cthulhu_v4.transport import RemoteLink
 from cthulhu_v4.util import ROOT
 
 
@@ -93,6 +95,39 @@ class CanvasE2ETests(unittest.IsolatedAsyncioTestCase):
         finally:
             second.server.server_close()
 
+    async def test_canvas_uses_node_initiated_websocket_and_keeps_data_when_node_leaves(self):
+        registered = self.app.center.hub.register('canvas-remote')
+        node = Node(self.root / 'remote-node', backends=['demo'])
+        node.discover_models = False
+        url = 'ws://127.0.0.1:' + str(self.app.ws_actual_port)
+        def link(channel=None):
+            return RemoteLink(url, 'canvas-remote', token=registered['token'], hello=node.hello(),
+                              channel=channel, log=lambda *a, **kw: None)
+        node.link, node.data = link(), link('data')
+        runner = asyncio.create_task(node.run())
+        try:
+            async with asyncio.timeout(10):
+                while 'commands-v1' not in self.app.center.store.get('node', 'canvas-remote').get('features', []):
+                    await asyncio.sleep(.03)
+            cwd = self.root / 'remote-work'; cwd.mkdir()
+            (cwd / 'source.json').write_text('{"experiments":[{"name":"WS file A"},{"name":"WS file B"}]}')
+            board = await self.create('cat source.json', node_id='canvas-remote', cwd=str(cwd), interval=60)
+            data = await self.result(board['id'])
+            self.assertEqual([item['name'] for item in data['data']['experiments']], ['WS file A', 'WS file B'])
+            self.assertTrue(data['fresh'])
+        finally:
+            await node.close()
+            runner.cancel(); await asyncio.gather(runner, return_exceptions=True)
+            await node.link.close(); await node.data.close()
+            node.store.close()
+        async with asyncio.timeout(10):
+            while self.app.center.hub.online('canvas-remote'):
+                await asyncio.sleep(.03)
+        data = await self.api('/api/canvas/' + board['id'] + '/data')
+        self.assertEqual(data['status'], 'node_offline')
+        self.assertFalse(data['fresh'])
+        self.assertEqual(len(data['data']['experiments']), 2)
+
     async def test_real_timeout_stderr_and_nonzero_exit_keep_success_data(self):
         board = await self.create("printf 'last success'")
         await self.result(board['id'])
@@ -104,6 +139,18 @@ class CanvasE2ETests(unittest.IsolatedAsyncioTestCase):
         data = await self.result(board['id'], lambda d: d['attempt'] and d['attempt']['exit_code'] == 7)
         self.assertIn('broken', data['attempt']['stderr'])
         self.assertEqual(data['data'], 'last success')
+
+    async def test_real_source_truncation_keeps_last_success_and_reports_combined_limit(self):
+        board = await self.create("printf 'last success'")
+        await self.result(board['id'])
+        await self.api('/api/canvas/' + board['id'], {'revision': 1, 'timeout': 5,
+            'script': "python3 -c \"import sys;sys.stdout.write('a'*700000);sys.stderr.write('b'*700000)\""})
+        data = await self.result(board['id'], lambda d: d['attempt'] and d['attempt'].get('truncated'))
+        self.assertEqual(data['attempt']['exit_code'], 0)
+        self.assertEqual(len(data['attempt']['stdout'].encode()) + len(data['attempt']['stderr'].encode()), 1024 * 1024)
+        self.assertEqual(data['data'], 'last success')
+        self.assertEqual(data['status'], 'failed')
+        self.assertFalse(data['fresh'])
 
     async def test_service_and_center_auth_frame_csp_and_no_credential_in_static(self):
         for path, kwargs, code in [('/api/canvas', {'token': ''}, 401),
@@ -118,7 +165,23 @@ class CanvasE2ETests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.server.token.encode(), raw)
         _, raw = await asyncio.to_thread(self.request, '/boards.html', token='')
         self.assertNotIn(self.server.token.encode(), raw)
+        self.assertIn(('id="board-home" href="' + self.app.web.url + '/"').encode(), raw)
+        with urllib.request.urlopen(self.app.web.url + '/boards.html', timeout=10) as response:
+            self.assertIn(b'id="board-home" href="./"', response.read())
         with self.assertRaises(ValueError): CanvasServer('https://example.com', self.server.token, port=0)
+
+    async def test_standalone_home_link_preserves_prefix_and_escapes_html(self):
+        service = CanvasServer('http://127.0.0.1:1/v4/"<test>', self.server.token, port=0)
+        service.start()
+        try:
+            def read():
+                with urllib.request.urlopen(service.url + '/', timeout=10) as response:
+                    return response.read()
+            raw = await asyncio.to_thread(read)
+            self.assertIn(b'id="board-home" href="http://127.0.0.1:1/v4/&quot;&lt;test&gt;/"', raw)
+            self.assertNotIn(self.server.token.encode(), raw)
+        finally:
+            await asyncio.to_thread(service.stop)
 
     async def test_close_inflight_real_command_is_not_cancelled_and_result_is_discarded(self):
         board = await self.create("sleep .3; printf 'finished' > collector-finished; printf 'late data'")

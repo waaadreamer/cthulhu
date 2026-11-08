@@ -1,22 +1,25 @@
 <!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="color-scheme" content="dark">
 <style>
-body{margin:0;padding:20px;font:14px/1.6 system-ui,sans-serif;color:#e8e9ef;background:#1a1d26}h1{font-size:20px;margin:0 0 8px}.muted{color:#a1a7ba}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{text-align:left;border-bottom:1px solid #383f52;padding:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere}.alert{color:#ffbca8}
+body{margin:0;padding:20px;font:14px/1.6 system-ui,sans-serif;color:#e8e9ef;background:#1a1d26;overflow-wrap:anywhere}h1{font-size:20px;margin:0 0 8px}.muted{color:#a9adbd}table{width:100%;table-layout:fixed;border-collapse:collapse;margin-top:16px}td,th{text-align:left;vertical-align:top;border-bottom:1px solid #383f52;padding:10px;overflow-wrap:anywhere}th:first-child{width:27%}th:nth-child(2){width:40%}td:last-child{white-space:pre-line;font-size:12px}pre{white-space:pre-wrap;overflow-wrap:anywhere}.alert{color:#f0b866}@media(max-width:480px){body{padding:12px}td,th{padding:8px 5px}}
 </style>
 <h1>多实验汇总</h1><div id="source" class="muted">等待首次采集</div><div id="freshness" class="alert"></div>
 <table><thead><tr><th>实验</th><th>状态 / 指标</th><th>数据文件</th></tr></thead><tbody id="rows"></tbody></table><pre id="text"></pre>
 <script>
 addEventListener('canvas:update', function (event) {
   const snapshot = event.detail, data = snapshot.data;
+  const statuses = {fresh:'采集正常',collecting:'采集中',waiting:'等待首次采集',stale:'数据已过期',failed:'采集失败',node_offline:'节点离线',collector_offline:'Canvas 服务离线',paused:'已暂停',closed:'已关闭',unknown:'命令结果未知，已暂停'};
   document.getElementById('freshness').textContent = snapshot.fresh ? '最近成功采集：' + new Date(snapshot.sampled_at * 1000).toLocaleString()
-    : '当前状态：' + snapshot.status + '。以下可能是先前成功采集的旧数据；请结合面板外的时间判断。';
+    : '当前状态：' + (statuses[snapshot.status] || snapshot.status) + '。以下可能是先前成功采集的旧数据；请结合面板外的时间判断。';
   document.getElementById('source').textContent = data && typeof data === 'object'
     ? (data.demo ? '演示数据 · ' : '来源：') + (data.source || '采集脚本 stdout') : '采集脚本 stdout（文本）';
   const rows = document.getElementById('rows'); rows.replaceChildren();
   if (data && Array.isArray(data.experiments)) for (const experiment of data.experiments) {
     const row = document.createElement('tr');
     const state = experiment.error || [experiment.status || '', experiment.metrics ? JSON.stringify(experiment.metrics) : ''].filter(Boolean).join(' · ');
-    for (const value of [experiment.name, state, experiment.path || '脚本输出']) {
+    // 采集成功只说明读到了文件，不能让久未更新的状态文件看起来像新的训练进度。
+    const modified = typeof experiment.file_modified_at === 'number' ? '\n文件更新：' + new Date(experiment.file_modified_at * 1000).toLocaleString() : '\n未提供文件时间';
+    for (const value of [experiment.name, state, (experiment.path || '脚本输出') + modified]) {
       const cell = document.createElement('td'); cell.textContent = String(value ?? ''); row.append(cell);
     }
     rows.append(row);

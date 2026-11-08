@@ -204,11 +204,12 @@ export const auth = {
   set(value) { localStorage.setItem('cthulhu-token', value.trim()); },
 };
 
-export async function api(path, body, { resultError = false } = {}) {
+export async function api(path, body, { resultError = false, signal } = {}) {
   const r = await fetch(new URL(path, document.baseURI), {
     method: body === undefined ? 'GET' : 'POST',
     headers: { Authorization: 'Bearer ' + auth.token, 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
   let value = {};
   try { value = await r.json(); } catch { /* 非 JSON 响应 */ }

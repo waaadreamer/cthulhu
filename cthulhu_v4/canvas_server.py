@@ -4,6 +4,7 @@
 """
 import argparse
 import asyncio
+import html
 import json
 import secrets
 import signal
@@ -57,7 +58,13 @@ class CanvasServer:
                     if not target.is_relative_to(ROOT / 'static') or not target.is_file():
                         return self.respond(404, {'error': '文件不存在'})
                     mime = MIME.get(target.suffix, 'application/octet-stream')
-                    return self.respond(200, target.read_bytes(), mime, BOARD_CSP if target.name == 'board-frame.html' else CSP)
+                    raw = target.read_bytes()
+                    if target.name == 'boards.html':
+                        # 独立服务的 ./ 是看板自身；主会话必须返回所连接的中心，并保留代理路径前缀。
+                        # 只注入公开地址，永远不把服务端凭证写进 HTML。
+                        raw = raw.replace(b'id="board-home" href="./"',
+                            ('id="board-home" href="' + html.escape(owner.center_url + '/', quote=True) + '"').encode())
+                    return self.respond(200, raw, mime, BOARD_CSP if target.name == 'board-frame.html' else CSP)
                 if self.headers.get('Origin') and self.headers['Origin'] not in owner.origins:
                     return self.respond(403, {'error': '跨站请求被拒绝'})
                 token = self.headers.get('Authorization', '').removeprefix('Bearer ')
