@@ -20,6 +20,8 @@ Canvas 是独立实体，不需要现有 task。一个面板的一次 stdout 可
 - 现有中心网页顶部的 **Canvas** 进入 `./boards.html`，沿用本浏览器已有的中心访问凭证。通过现有中心反向代理也能访问，不需要新开公网端口。
 - 独立服务也提供 `http://127.0.0.1:8780/` 看板；首次访问需要填写同一中心 web-token（不同浏览器来源有各自的 localStorage）。后端不会把凭证嵌进页面或模板。
 - 两个入口的左上角品牌链接均返回中心主会话；独立入口保留 `--center` 的路径前缀。
+- 页面左侧为 Canvas 导航，右侧只展示所选的一个面板；首次打开优先选择未关闭的面板。选择写入 URL 的 `#canvas=面板ID`，可直接分享，也会在当前浏览器记住；刷新、前进后退恢复对应选择，失效 ID 回退到首个未关闭面板。“已关闭”分组仍可查看历史结果。窄屏用顶部“Canvas 列表”打开导航抽屉，选择后收起，模板占满主区剩余宽高；编辑、暂停/恢复、关闭和采集详情在右上角“管理”中。
+- 选择切换只发起 GET 读取，不会触发采集或恢复命令；未选中的面板照常按中心配置采集。页面只读取当前选择的详细数据，已打开的 iframe 保留交互状态；只有模板变化才重载。Alluxio、RoboTwin 等业务模板沿用同一隔离数据接口。
 - `deploy/cthulhu-canvas.service` 是可选 systemd 示例，先修改中心状态路径和安装路径，再安装。它不随中心自动启动，不会隐式创建任何生产采集。
 - 若现有中心仍运行旧代码，需要通过原有部署流程升级中心和节点，节点须报告 `commands-v1`。这可能涉及原生会话，不要为试用 Canvas 直接重启生产中心。可先使用下面的全隔离演示。
 
@@ -114,6 +116,7 @@ node tests/test_model.mjs
 node tests/test_board_data.mjs
 PLAYWRIGHT_PATH=/path/to/playwright-core node tests/ui_canvas.cjs
 PLAYWRIGHT_PATH=/path/to/playwright-core node tests/ui_canvas_review.cjs
+PLAYWRIGHT_PATH=/path/to/playwright-core node tests/ui_canvas_selection.cjs
 # 缓存浏览器与 Playwright 版本不同时可加 PLAYWRIGHT_EXECUTABLE=/path/to/chrome
 ```
 

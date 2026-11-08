@@ -10,9 +10,17 @@
 <script type="module" src="./js/boards.js"></script>
 </head>
 <body class="boards-page">
-<header class="boards-bar"><a id="board-home" href="./" class="boards-home" aria-label="返回 Cthulhu 主会话"><span class="logo" aria-hidden="true">✳</span> Cthulhu</a><h1>Canvas</h1><span class="muted">独立看板 · 一个面板可汇总多个实验</span><button id="board-new" class="btn primary" disabled>新建面板</button><button id="board-auth" class="btn ghost">访问凭证</button></header>
-<p id="boards-status" class="muted" role="status">连接中心…</p>
-<main id="boards" class="boards-grid"></main>
+<aside id="boards-sidebar" class="boards-sidebar" aria-label="Canvas 导航">
+  <div class="boards-brand"><a id="board-home" href="./" class="boards-home" aria-label="返回 Cthulhu 主会话"><span class="logo" aria-hidden="true">✳</span> Cthulhu</a><button id="boards-list-close" class="icon" type="button" aria-label="关闭 Canvas 列表">✕</button></div>
+  <div class="boards-nav-head"><h1>Canvas</h1><button id="board-new" class="icon" type="button" aria-label="新建面板" title="新建面板" disabled>＋</button></div>
+  <nav id="boards-list" aria-label="Canvas 列表"></nav>
+  <div class="boards-nav-foot"><p id="boards-status" class="muted" role="status">连接中心…</p><button id="board-auth" class="btn ghost" type="button">访问凭证</button></div>
+</aside>
+<button id="boards-mask" type="button" aria-label="关闭 Canvas 列表" hidden></button>
+<main id="boards-main" class="boards-main">
+  <div class="boards-mobile-bar"><button id="boards-list-toggle" class="btn ghost" type="button" aria-expanded="false" aria-controls="boards-sidebar">☰ Canvas 列表</button></div>
+  <div id="boards" class="boards-stage" aria-label="选中的 Canvas"><p id="boards-stage-state" class="board-empty muted" role="status">正在载入 Canvas…</p></div>
+</main>
 <dialog id="board-editor" aria-labelledby="board-editor-title">
   <form id="board-form" class="board-form">
     <header class="viewer-head"><h2 id="board-editor-title">新建 Canvas</h2><button type="button" id="board-editor-close" class="icon" aria-label="关闭编辑器（保留草稿）">✕</button></header>

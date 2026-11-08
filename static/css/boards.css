@@ -1,28 +1,51 @@
-/* 沿用 v4 的字体、层级和状态色；看板仅增加自己的栅格与阅读布局。 */
-.boards-page { height: auto; min-height: 100vh; overflow: auto; padding: 24px; }
-.boards-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
-.boards-home { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-2); font: 600 15px/1 var(--serif); text-decoration: none; }
+/* Canvas 是一个工作区：左边选对象，右边只阅读一个模板，管理操作留在菜单中。 */
+.boards-page { display: grid; grid-template-columns: 268px minmax(0, 1fr); height: 100dvh; overflow: hidden; }
+.boards-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-2); border-right: 1px solid var(--line); }
+.boards-brand { display: flex; align-items: center; justify-content: space-between; padding: 20px 18px 16px; }
+.boards-home { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font: 600 16px/1 var(--serif); text-decoration: none; }
 .boards-home:hover { color: var(--live); }
-.boards-bar h1 { font: 600 22px/1.3 var(--serif); margin: 0; }
-.boards-bar > span { flex: 1; }
-#boards-status { font-size: 12.5px; margin: 12px 0 20px; }
-.boards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr)); gap: 20px; align-items: start; }
-.board-card { min-width: 0; background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-.board-card header { padding: 14px 16px; display: flex; gap: 12px; align-items: start; flex-wrap: wrap; }
-.board-card h2 { font: 600 17px/1.5 var(--serif); margin: 0; flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
-.board-card iframe { display: block; width: 100%; height: 360px; border: 0; background: var(--bg-2); }
-.board-meta { padding: 0 16px 12px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+#boards-list-close { display: none; }
+.boards-nav-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 8px 18px; }
+.boards-nav-head h1 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+#board-new { background: var(--s1); color: var(--live); }
+#boards-list { flex: 1; min-height: 0; overflow: auto; padding: 0 10px 16px; }
+.board-nav-item { display: flex; flex-direction: column; gap: 5px; padding: 12px; margin: 3px 0; border-radius: 9px; border: 1px solid transparent; text-decoration: none; color: var(--ink-2); }
+.board-nav-item:hover { background: var(--s1); color: var(--ink); }
+.board-nav-item[aria-current=page] { background: var(--s2); border-color: var(--line-2); color: var(--ink); }
+.board-nav-name { font-size: 13.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.board-nav-item[aria-current=page] .board-nav-name { color: var(--live); }
+.board-nav-meta { font-size: 11.5px; color: var(--ink-3); line-height: 1.5; }
+.board-nav-meta[data-fresh=true] { color: var(--done); }
+.board-nav-closed { margin-top: 16px; font-size: 12px; }
+.board-nav-closed > summary { color: var(--ink-3); padding: 6px 12px; cursor: pointer; }
+.boards-nav-foot { padding: 12px 18px 18px; border-top: 1px solid var(--line); }
+#boards-status { font-size: 11.5px; line-height: 1.6; margin: 0 0 10px; overflow-wrap: anywhere; }
+.boards-nav-foot .btn { padding: 4px 10px; font-size: 12px; }
+.boards-main, .boards-stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.boards-stage { position: relative; flex: 1; }
+.boards-mobile-bar { display: none; }
+.board-empty { margin: auto; padding: 32px; max-width: 540px; line-height: 1.8; text-align: center; }
+.board-card { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; background: var(--bg-2); }
+.board-card > header { display: flex; align-items: start; gap: 14px; padding: 18px 24px 8px; }
+.board-card h2 { min-width: 0; flex: 1; font: 600 18px/1.5 var(--serif); margin: 0; overflow-wrap: anywhere; }
+.board-card iframe { display: block; flex: 1; min-height: 0; width: 100%; border: 0; background: var(--bg-2); }
+.board-meta { padding: 0 24px 12px; font-size: 11.5px; line-height: 1.7; overflow-wrap: anywhere; color: var(--ink-3); border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.board-status { max-width: 100%; font-size: 11.5px; border-radius: 5px; padding: 3px 8px; background: color-mix(in srgb, var(--need) 12%, transparent); color: var(--need); }
+.board-status.fresh { background: color-mix(in srgb, var(--done) 12%, transparent); color: var(--done); }
+.board-tools { display: flex; align-items: center; gap: 8px; flex: none; }
+.board-tools > .btn, .board-management > summary { font-size: 12px; padding: 4px 10px; }
+.board-management { position: relative; }
+.board-management > summary { list-style: none; }
+.board-management > summary::-webkit-details-marker { display: none; }
+.board-management[open] > summary { background: var(--s2); color: var(--ink); }
+.board-menu { position: absolute; top: calc(100% + 8px); right: 0; z-index: 25; width: min(420px, calc(100vw - 32px)); max-height: min(66dvh, 640px); overflow: auto; padding: 16px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: var(--shadow); }
 .board-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.board-card .board-actions { padding: 12px 16px; border-top: 1px solid var(--line); }
-.board-card details { padding: 0 16px 12px; font-size: 12.5px; }
-.board-card summary { padding-top: 10px; cursor: pointer; color: var(--ink-2); }
-.board-card pre { white-space: pre-wrap; max-height: 240px; overflow: auto; font: 12px/1.5 var(--mono); }
+.board-receipt { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 12px; }
+.board-receipt > summary { cursor: pointer; color: var(--ink-2); }
+.board-card pre { white-space: pre-wrap; max-height: 280px; overflow: auto; font: 12px/1.5 var(--mono); }
 .board-error { color: var(--bad); white-space: pre-wrap; overflow-wrap: anywhere; }
 .board-card .board-error { color: var(--ink-2); }
 .board-card .board-error[data-failed=true] { color: var(--bad); }
-.board-status { max-width: 100%; font-size: 12px; border-radius: 5px; padding: 3px 8px; background: color-mix(in srgb, var(--need) 12%, transparent); color: var(--need); }
-.board-status.fresh { background: color-mix(in srgb, var(--done) 12%, transparent); color: var(--done); }
-.board-empty { grid-column: 1 / -1; padding: 24px; border: 1px dashed var(--line-2); border-radius: 12px; }
 .board-form { display: grid; gap: 14px; min-width: 0; padding: 0; }
 .board-form label { min-width: 0; display: grid; gap: 6px; }
 .board-form textarea { font: 13px/1.5 var(--mono); min-width: 0; resize: vertical; }
@@ -34,14 +57,25 @@
 #board-editor [type=submit] { margin-left: auto; }
 #board-draft-status, #board-form-error, #board-login-error { font-size: 12.5px; }
 #board-login { width: min(500px, 94vw); }
-.board-card.fullscreen { position: fixed; inset: 12px; z-index: 50; overflow: auto; border-color: var(--line-2); box-shadow: 0 0 0 20px rgb(8 9 14 / .8); }
-.board-card.fullscreen iframe { height: calc(100dvh - 230px); min-height: 240px; }
-.board-card.fullscreen .board-actions { position: sticky; bottom: 0; background: var(--bg-2); }
-@media (max-width: 600px) {
-  .boards-page { padding: 12px; }
+.board-card.fullscreen { position: fixed; inset: 0; z-index: 50; }
+#boards-mask { position: fixed; inset: 0; border: 0; background: rgb(8 9 14 / .7); z-index: 60; }
+@media (max-width: 760px) {
+  .boards-page { grid-template-columns: minmax(0, 1fr); }
+  .boards-sidebar { position: fixed; inset: 0 auto 0 0; width: min(300px, 86vw); z-index: 61; transform: translateX(-100%); transition: transform .16s; }
+  .boards-list-open .boards-sidebar { transform: none; }
+  #boards-list-close { display: inline-block; }
+  .boards-mobile-bar { display: flex; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--bg-2); }
+  .boards-mobile-bar .btn { font-size: 12px; }
+  .board-card > header { padding: 12px 12px 8px; gap: 8px; display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .board-card h2 { font-size: 16px; grid-column: 1; }
+  .board-tools { grid-column: 2; grid-row: 1; }
+  .board-meta { padding: 0 12px 10px; font-size: 11px; }
+  .board-status { grid-column: 1 / -1; justify-self: start; }
+  /* 按钮本身很窄，菜单不能跟着它右对齐到视口外；固定在安全边距内供键盘与触摸操作。 */
+  .board-menu { position: fixed; top: 104px; left: 12px; right: 12px; width: auto; max-height: calc(100dvh - 128px); }
   .board-row { grid-template-columns: minmax(0, 1fr); }
-  .boards-bar > span { flex-basis: 100%; }
   #board-editor { padding: 16px; }
   #board-editor .board-actions { bottom: -16px; }
   #board-editor .board-actions .btn { padding-inline: 10px; }
 }
+@media (prefers-reduced-motion: reduce) { .boards-sidebar { transition: none; } }

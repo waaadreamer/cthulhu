@@ -23,6 +23,18 @@ async function stop(proc) {
   if (!proc || proc.exitCode != null) return;
   await new Promise(resolve => { proc.once('exit', resolve); proc.kill('SIGTERM'); });
 }
+async function choose(page, id) {
+  if (await page.locator('#boards-list-toggle').isVisible() && await page.locator('#boards-sidebar').evaluate(e => e.inert)) await page.locator('#boards-list-toggle').click();
+  const item = page.locator(`.board-nav-item[data-canvas-id="${id}"]`);
+  if (await item.evaluate(e => e.parentElement.matches('details') && !e.parentElement.open)) await page.locator('.board-nav-closed > summary').click();
+  await item.click(); await page.locator(`.board-card[data-canvas-id="${id}"]:visible iframe`).waitFor();
+}
+async function action(card, name) {
+  const menu = card.locator('.board-management');
+  if (!await menu.evaluate(e => e.open)) await menu.locator(':scope > summary').click();
+  await card.getByRole('button', { name, exact: true }).click();
+}
+
 (async () => {
   const state = fs.mkdtempSync(path.join(os.tmpdir(), 'cthulhu-canvas-review-state-'));
   let center, service, browser;
@@ -87,34 +99,35 @@ async function stop(proc) {
     assert.equal(await page.getByRole('region', { name: '文件汇总 · 两个隔离实验', exact: true }).count(), 1);
     assert.equal(await first.getByRole('status').count(), 1);
     await first.frameLocator('iframe').getByText('验收实验 B', { exact: true }).waitFor();
-    let frame = page.frames().find(f => f.url().endsWith('/board-frame.html'));
+    let frame = await (await first.locator('iframe').elementHandle()).contentFrame();
     assert.equal(await frame.evaluate(() => Canvas.getData().data.experiments[0].metrics.completed), 3);
     fs.writeFileSync(path.join(state, 'a.json'), JSON.stringify({ status: '实际读取到更新的隔离文件', metrics: { completed: 4 } }));
     await frame.waitForFunction(() => Canvas.getData().data.experiments[0].metrics.completed === 4);
     console.log('PASS close/reopen/reload draft, labelled controls, UTF-8/path feedback, narrow create, delayed save protects draft, real files 3 -> 4');
 
-    await first.getByRole('button', { name: '暂停', exact: true }).click(); await first.locator('.board-status').getByText('已暂停', { exact: true }).waitFor();
-    await first.locator('summary').click(); await frame.evaluate(() => { window.reviewMarker = 'preserved'; });
+    await action(first, '暂停'); await first.locator('.board-status').getByText('已暂停', { exact: true }).waitFor();
+    if (!await first.locator('.board-management').evaluate(e => e.open)) await first.locator('.board-management > summary').click();
+    if (!await first.locator('.board-receipt').evaluate(e => e.open)) await first.locator('.board-receipt > summary').click(); await frame.evaluate(() => { window.reviewMarker = 'preserved'; });
     await first.getByRole('button', { name: '全屏', exact: true }).click(); await page.keyboard.press('Escape');
     assert.equal(await first.evaluate(e => e.classList.contains('fullscreen')), false);
-    await first.getByRole('button', { name: '编辑', exact: true }).click();
+    await action(first, '编辑');
     const longTitle = 'LongContinuousTitle'.repeat(8);
     await form.locator('[name=name]').fill(longTitle); await form.locator('[type=submit]').click();
     await first.locator('h2').getByText(longTitle, { exact: true }).waitFor();
     assert.equal(await frame.evaluate(() => window.reviewMarker), 'preserved');
-    assert.equal(await first.locator('details').evaluate(e => e.open), true);
+    assert.equal(await first.locator('.board-receipt').evaluate(e => e.open), true);
     assert.ok(await first.locator('h2').evaluate(e => e.scrollWidth <= e.clientWidth + 1));
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await shot('narrow-long-title');
-    await first.getByRole('button', { name: '恢复', exact: true }).click(); await first.locator('.board-status.fresh').waitFor();
+    await action(first, '恢复'); await first.locator('.board-status.fresh').waitFor();
     console.log('PASS pause/edit/resume, long title wraps, iframe/details preserved, keyboard Escape');
 
     const firstId = await first.getAttribute('data-canvas-id');
-    await first.getByRole('button', { name: '编辑', exact: true }).click(); await form.locator('[name=name]').fill('尚未提交的编辑草稿');
+    await action(first, '编辑'); await form.locator('[name=name]').fill('尚未提交的编辑草稿');
     const latest = await api('/' + firstId); await api('/' + firstId, { revision: latest.revision, name: '另一个窗口的新配置' });
     await form.locator('[type=submit]').click(); await page.locator('#board-form-error').getByText('已被修改', { exact: false }).waitFor();
     assert.equal(await form.locator('[name=name]').inputValue(), '尚未提交的编辑草稿'); await shot('edit-conflict');
-    await page.reload(); first = page.locator('.board-card').first(); await first.getByRole('button', { name: '编辑', exact: true }).click();
+    await page.reload(); first = page.locator('.board-card').first(); await action(first, '编辑');
     await page.locator('#board-editor[open]').waitFor();
     assert.equal(await form.locator('[name=name]').inputValue(), '尚未提交的编辑草稿');
     await form.locator('[type=submit]').click(); await page.locator('#board-form-error').getByText('已被修改', { exact: false }).waitFor();
@@ -128,19 +141,23 @@ async function stop(proc) {
     let second = page.locator('.board-card').nth(1); await second.frameLocator('iframe').getByText('RoboTwin 示例 A', { exact: true }).waitFor();
     const secondId = await second.getAttribute('data-canvas-id');
     await page.route('**/api/canvas/' + firstId, async route => { await new Promise(resolve => setTimeout(resolve, 400)); await route.continue(); });
-    await page.reload(); await page.locator('.board-card').nth(1).waitFor();
-    assert.deepEqual(await page.locator('.board-card').evaluateAll(es => es.map(e => e.dataset.canvasId)), [firstId, secondId]);
-    await page.unroute('**/api/canvas/' + firstId); first = page.locator('.board-card').first(); second = page.locator('.board-card').nth(1);
+    await page.reload(); await page.locator('.board-card:visible').waitFor();
+    assert.deepEqual(await page.locator('.board-nav-item').evaluateAll(es => es.map(e => e.dataset.canvasId)), [firstId, secondId]);
+    assert.equal(await page.locator('.board-card:visible').count(), 1);
+    await choose(page, firstId);
+    await page.unroute('**/api/canvas/' + firstId); first = page.locator(`.board-card[data-canvas-id="${firstId}"]`);
+    await choose(page, secondId); second = page.locator(`.board-card[data-canvas-id="${secondId}"]`); await choose(page, firstId);
     await shot('desktop-multiple');
     console.log('PASS multi-panel order remains stable with deliberately reordered HTTP responses');
 
-    await first.getByRole('button', { name: '编辑', exact: true }).click(); await form.locator('[name=script]').fill('echo review-failure >&2; exit 7'); await form.locator('[type=submit]').click();
+    await action(first, '编辑'); await form.locator('[name=script]').fill('echo review-failure >&2; exit 7'); await form.locator('[type=submit]').click();
     await first.locator('.board-status').getByText('采集失败', { exact: false }).waitFor();
-    await first.locator('summary').click(); await first.locator('.board-error').getByText('review-failure', { exact: false }).waitFor();
-    frame = page.frames().find(f => f.url().endsWith('/board-frame.html'));
+    if (!await first.locator('.board-management').evaluate(e => e.open)) await first.locator('.board-management > summary').click();
+    if (!await first.locator('.board-receipt').evaluate(e => e.open)) await first.locator('.board-receipt > summary').click(); await first.locator('.board-error').getByText('review-failure', { exact: false }).waitFor();
+    frame = await (await first.locator('iframe').elementHandle()).contentFrame();
     assert.equal(await frame.evaluate(() => Canvas.getData().data.experiments[0].metrics.completed), 4);
     assert.equal(await frame.evaluate(() => Canvas.getData().fresh), false); await shot('failure-keeps-data');
-    await first.getByRole('button', { name: '编辑', exact: true }).click(); await form.locator('[name=script]').fill(script); await form.locator('[type=submit]').click(); await first.locator('.board-status.fresh').waitFor();
+    await action(first, '编辑'); await form.locator('[name=script]').fill(script); await form.locator('[type=submit]').click(); await first.locator('.board-status.fresh').waitFor();
     await context.setOffline(true); await first.locator('.board-status').getByText('中心连接中断', { exact: false }).waitFor();
     assert.equal(await frame.evaluate(() => Canvas.getData().fresh), false);
     await context.setOffline(false); await first.locator('.board-status.fresh').waitFor();
@@ -157,21 +174,21 @@ async function stop(proc) {
 
     const local = await context.newPage(); await local.goto(serviceURL + '/');
     assert.equal(await local.locator('#board-home').getAttribute('href'), centerURL + '/');
-    await local.locator('#board-token').fill(token); await local.locator('#board-login-form button').click(); await local.locator('.board-card').nth(1).waitFor();
+    await local.locator('#board-token').fill(token); await local.locator('#board-login-form button').click(); await choose(local, secondId);
     await local.locator('#board-home').click(); await local.waitForURL(centerURL + '/'); await local.close();
-    await second.getByRole('button', { name: '编辑', exact: true }).click();
+    await choose(page, secondId); await action(second, '编辑');
     await form.locator('[name=script]').fill("python3 -c \"print('long-output-' * 9000)\""); await form.locator('[type=submit]').click();
     await second.locator('.board-status.fresh').waitFor();
-    const textFrame = page.frames().filter(f => f.url().endsWith('/board-frame.html'))[1];
+    const textFrame = await (await second.locator('iframe').elementHandle()).contentFrame();
     await textFrame.waitForFunction(() => Canvas.getData().format === 'text' && Canvas.getData().data.length > 100000);
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await second.screenshot({ path: path.join(artifacts, 'long-output.png') });
     console.log('PASS real 108KB stdout displayed as text with bounded card layout');
-    page.once('dialog', d => d.accept()); await second.getByRole('button', { name: '关闭采集', exact: true }).click(); await second.locator('.board-status').getByText('已关闭', { exact: true }).waitFor();
-    await stop(service.proc); await first.locator('.board-status').getByText('Canvas 服务离线', { exact: true }).waitFor({ timeout: 22000 });
+    page.once('dialog', d => d.accept()); await action(second, '关闭采集'); await second.locator('.board-status').getByText('已关闭', { exact: true }).waitFor();
+    await choose(page, firstId); await stop(service.proc); await first.locator('.board-status').getByText('Canvas 服务离线', { exact: true }).waitFor({ timeout: 22000 });
     assert.equal(await frame.evaluate(() => Canvas.getData().fresh), false); await shot('collector-offline');
     service = startService(Number(new URL(serviceURL).port)); await service.ready; await first.locator('.board-status.fresh').waitFor();
-    await first.getByRole('button', { name: '暂停', exact: true }).click(); await first.locator('.board-status').getByText('已暂停', { exact: true }).waitFor();
+    await action(first, '暂停'); await first.locator('.board-status').getByText('已暂停', { exact: true }).waitFor();
     assert.deepEqual(errors, []);
     assert.equal((await api('')).canvases.length, 2);
     console.log('PASS standalone return link, close, collector offline/restart, no page errors; artifacts ' + artifacts);

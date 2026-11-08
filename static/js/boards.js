@@ -3,6 +3,10 @@ import { frameSnapshot, STATUS } from './board-data.js';
 
 const cards = new Map();
 const pending = new Set();
+const reads = new Map(), navItems = new Map();
+let summaries = [], selectedId = '', selectionEpoch = 0, reloadQueued = false;
+const selectionKey = 'cthulhu-canvas-selected:' + new URL('api/canvas', document.baseURI).pathname;
+try { selectedId = new URLSearchParams(location.hash.slice(1)).get('canvas') || localStorage.getItem(selectionKey) || ''; } catch { /* 存储不可用仍可从列表选择 */ }
 let nodes = [], editing = null, loading = false, saving = false, editorEpoch = 0;
 const time = at => at == null ? '尚无' : new Date(at * 1000).toLocaleString();
 const frameURL = new URL('../board-frame.html', import.meta.url).href;
@@ -85,14 +89,16 @@ function makeCard(board, data, previous = null) {
     if (confirm('关闭这个 Canvas 的后续采集？正在展示的训练和评测会继续运行。已发出的本次采集由命令超时收尾，结果将丢弃。')) control(board.id, 'close');
   } });
   const box = el('section', { class: 'board-card', 'data-canvas-id': board.id, 'aria-labelledby': title.id },
-    el('header', {}, title, badge), meta, frame,
-    el('details', {}, el('summary', { text: '最近采集详情' }), errors),
-    el('div', { class: 'board-actions' }, edit, pause, close,
+    el('header', {}, title, badge, el('div', { class: 'board-tools' },
+      el('details', { class: 'board-management' }, el('summary', { class: 'btn ghost', text: '管理', 'aria-label': '管理 Canvas' }),
+        el('div', { class: 'board-menu' }, el('div', { class: 'board-actions' }, edit, pause, close),
+          el('details', { class: 'board-receipt' }, el('summary', { text: '最近采集详情' }), errors))),
       el('button', { class: 'btn ghost', type: 'button', text: '全屏', 'aria-pressed': 'false', onclick: event => {
         const full = !box.classList.contains('fullscreen'); exitFullscreen();
         box.classList.toggle('fullscreen', full); event.target.textContent = full ? '退出全屏' : '全屏';
         event.target.setAttribute('aria-pressed', String(full));
-      } })));
+      } }))), meta, frame);
+  title.tabIndex = -1;
   const card = { box, frame, title, badge, meta, errors, pause, edit, close, template: board.html_template,
     revision: board.revision, ready: false, summary: board, data, stamp: JSON.stringify(board.data_stamp) };
   cards.set(board.id, card);
@@ -105,7 +111,129 @@ function exitFullscreen() {
     const button = card.box.querySelector('[aria-pressed]'); button.textContent = '全屏'; button.setAttribute('aria-pressed', 'false');
   }
 }
-addEventListener('keydown', event => { if (event.key === 'Escape' && !document.querySelector('dialog[open]')) exitFullscreen(); });
+addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
+  exitFullscreen(); closeMenus(); sidebar(false);
+});
+function closeMenus() { for (const menu of document.querySelectorAll('.board-management[open]')) menu.open = false; }
+addEventListener('click', event => { if (!event.target.closest('.board-management')) closeMenus(); });
+
+const narrow = matchMedia('(max-width: 760px)');
+function sidebar(open, focus = true) {
+  const visible = narrow.matches && open;
+  document.body.classList.toggle('boards-list-open', visible);
+  $('#boards-mask').hidden = !visible;
+  $('#boards-sidebar').inert = narrow.matches && !visible;
+  $('#boards-main').inert = visible;
+  $('#boards-list-toggle').setAttribute('aria-expanded', String(visible));
+  if (visible && focus) $('#boards-list-close').focus();
+  else if (narrow.matches && focus) $('#boards-list-toggle').focus();
+}
+$('#boards-list-toggle').onclick = () => sidebar(!document.body.classList.contains('boards-list-open'));
+$('#boards-list-close').onclick = $('#boards-mask').onclick = () => sidebar(false);
+narrow.addEventListener('change', () => sidebar(false, false));
+sidebar(false, false);
+addEventListener('keydown', event => {
+  if (event.key !== 'Tab' || !document.body.classList.contains('boards-list-open')) return;
+  const stops = [...$('#boards-sidebar').querySelectorAll('a,button:not(:disabled),summary')].filter(e => e.getClientRects().length);
+  if (event.shiftKey && document.activeElement === stops[0]) { event.preventDefault(); stops.at(-1).focus(); }
+  else if (!event.shiftKey && document.activeElement === stops.at(-1)) { event.preventDefault(); stops[0].focus(); }
+});
+
+function rememberSelection(id, push = false) {
+  try { localStorage.setItem(selectionKey, id); } catch { /* URL 仍然记录当前选择 */ }
+  const url = new URL(location.href); url.hash = new URLSearchParams({ canvas: id }).toString();
+  if (url.href !== location.href) history[push ? 'pushState' : 'replaceState'](null, '', url);
+}
+
+function renderNavigation() {
+  let closed = $('#boards-list .board-nav-closed');
+  if (!closed) {
+    closed = el('details', { class: 'board-nav-closed' }, el('summary', { text: '已关闭' }));
+    $('#boards-list').append(closed);
+  }
+  for (const summary of summaries) {
+    let item = navItems.get(summary.id);
+    if (!item) {
+      item = el('a', { class: 'board-nav-item', href: '#canvas=' + encodeURIComponent(summary.id), 'data-canvas-id': summary.id,
+        onclick: event => { event.preventDefault(); select(summary.id, true); } },
+        el('span', { class: 'board-nav-name' }), el('span', { class: 'board-nav-meta' }));
+      navItems.set(summary.id, item);
+    }
+    setText(item.querySelector('.board-nav-name'), summary.name);
+    const meta = item.querySelector('.board-nav-meta');
+    setText(meta, `${summary.node_id} · ${STATUS[summary.status] || summary.status}`);
+    meta.dataset.fresh = String(summary.fresh);
+    const wasSelected = item.getAttribute('aria-current') === 'page', previousParent = item.parentElement;
+    if (summary.id === selectedId) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
+    const parent = summary.state === 'closed' ? closed : $('#boards-list');
+    if (item.parentElement !== parent) parent === closed ? parent.append(item) : parent.insertBefore(item, closed);
+    if (summary.state === 'closed' && summary.id === selectedId && (!wasSelected || previousParent !== closed)) closed.open = true;
+  }
+  for (const [id, item] of navItems) if (!summaries.some(b => b.id === id)) { item.remove(); navItems.delete(id); }
+  closed.hidden = !summaries.some(b => b.state === 'closed');
+}
+
+function showCard(card) {
+  for (const other of cards.values()) other.box.hidden = other !== card;
+  if (!card.box.isConnected) $('#boards').append(card.box);
+  $('#boards-stage-state').hidden = true;
+  $('#boards').removeAttribute('aria-busy');
+}
+
+async function readCard(summary) {
+  const key = JSON.stringify([summary.id, summary.revision, summary.data_stamp]);
+  if (reads.has(key)) return reads.get(key);
+  const work = (async () => {
+    let card = cards.get(summary.id);
+    if (!card || card.revision !== summary.revision) {
+      const [board, data] = await Promise.all([api(`api/canvas/${summary.id}`), api(`api/canvas/${summary.id}/data`)]);
+      card = makeCard(board, data, card);
+    } else if (card.stamp !== JSON.stringify(summary.data_stamp)) {
+      card.data = await api(`api/canvas/${summary.id}/data`); card.stamp = JSON.stringify(summary.data_stamp);
+    }
+    updateCard(card, summary);
+    return card;
+  })();
+  reads.set(key, work);
+  try { return await work; } finally { reads.delete(key); }
+}
+
+async function displaySelected(focus = false) {
+  const summary = summaries.find(b => b.id === selectedId), epoch = selectionEpoch;
+  if (!summary) return;
+  try {
+    const card = await readCard(summary);
+    // 切换是纯展示行为。迟到的 A 请求只能更新 A 的缓存，不能把用户已选的 B 再切回去。
+    if (epoch !== selectionEpoch || selectedId !== summary.id) return;
+    showCard(card);
+    if (focus) card.title.focus({ preventScroll: true });
+  } catch (error) {
+    if (epoch !== selectionEpoch) return;
+    const cached = cards.get(summary.id);
+    if (cached?.box.isConnected) showCard(cached);
+    else { $('#boards-stage-state').hidden = false; setText($('#boards-stage-state'), '无法打开 Canvas：' + error.message + '。可重试或从左侧选择其他面板。'); }
+    throw error;
+  }
+}
+
+function select(id, push = false) {
+  if (!summaries.some(b => b.id === id)) return;
+  const changed = selectedId !== id;
+  selectedId = id; selectionEpoch++; rememberSelection(id, push);
+  if (changed) {
+    exitFullscreen(); closeMenus();
+    for (const card of cards.values()) card.box.hidden = true;
+    $('#boards-stage-state').hidden = false; setText($('#boards-stage-state'), '正在打开 Canvas…');
+    $('#boards').setAttribute('aria-busy', 'true');
+  }
+  renderNavigation(); sidebar(false, false);
+  displaySelected(push).catch(error => { markOffline(error); });
+}
+addEventListener('hashchange', () => {
+  const id = new URLSearchParams(location.hash.slice(1)).get('canvas');
+  select(summaries.some(b => b.id === id) ? id : summaries.find(b => b.state !== 'closed')?.id || summaries[0]?.id);
+});
 
 function updateCard(card, summary) {
   card.summary = summary;
@@ -132,48 +260,49 @@ function updateCard(card, summary) {
   publish(card);
 }
 
+function markOffline(error) {
+  setText($('#boards-status'), '无法读取中心：' + error.message + '。当前画面为缓存，不能视为实时数据。');
+  // 网络中断时同时撤销当前模板和列表中的 fresh，不能让缓存继续看起来像实时数据。
+  summaries = summaries.map(b => ({ ...b, fresh: false, collector_online: false,
+    status: b.state === 'active' ? 'collector_offline' : b.status }));
+  renderNavigation();
+  for (const card of cards.values()) {
+    card.summary = { ...card.summary, status: 'collector_offline', fresh: false, collector_online: false };
+    setText(card.badge, '中心连接中断 · 缓存画面'); card.badge.classList.remove('fresh'); publish(card);
+  }
+  $('#boards').removeAttribute('aria-busy');
+  if (![...cards.values()].some(c => !c.box.hidden && c.box.isConnected)) {
+    $('#boards-stage-state').hidden = false; setText($('#boards-stage-state'), '无法连接中心。请检查连接，或通过左侧访问凭证重新登录。');
+  }
+  if ($('#board-login').open || error.status === 401) {
+    $('#board-login-error').textContent = error.status === 401 ? '凭证无效，请检查中心 web-token 后重试。' : error.message;
+    if (!$('#board-login').open) $('#board-login').showModal();
+  }
+}
+
 async function load() {
-  if (loading || !auth.token) return;
+  if (!auth.token) return;
+  if (loading) { reloadQueued = true; return; }
   loading = true;
   try {
     const value = await api('api/canvas');
-    nodes = value.nodes;
+    nodes = value.nodes; summaries = value.canvases;
     $('#board-new').disabled = !nodes.length;
-    for (const child of $('#boards').querySelectorAll('.board-empty')) child.remove();
-    const results = await Promise.allSettled(value.canvases.map(async summary => {
-      let card = cards.get(summary.id);
-      if (!card || card.revision !== summary.revision) {
-        const [board, data] = await Promise.all([api(`api/canvas/${summary.id}`), api(`api/canvas/${summary.id}/data`)]);
-        card = makeCard(board, data, card);
-      } else if (card.stamp !== JSON.stringify(summary.data_stamp)) {
-        card.data = await api(`api/canvas/${summary.id}/data`);
-        card.stamp = JSON.stringify(summary.data_stamp);
-      }
-      updateCard(card, summary);
-    }));
-    // 等所有读取结束后再统一报离线，避免一个失败后另一个迟到成功又把缓存标为 fresh。
-    const failed = results.find(result => result.status === 'rejected');
-    if (failed) throw failed.reason;
-    for (const [index, summary] of value.canvases.entries()) {
-      const box = cards.get(summary.id).box;
-      // 首次详情并发加载的响应顺序不稳定，按中心列表排列；不移动已就位 iframe，以免重新加载。
-      if ($('#boards').children[index] !== box) $('#boards').insertBefore(box, $('#boards').children[index] || null);
-    }
-    if (!value.canvases.length) $('#boards').append(el('p', { class: 'board-empty muted', text: '还没有 Canvas。新建独立面板，选择节点、脚本和模板即可；不需要已有任务。' }));
-    setText($('#boards-status'), `${value.canvases.length} 个面板 · 数据与配置保存在中心 · 关闭采集不会停止训练或评测`);
+    const chosen = summaries.find(b => b.id === selectedId)?.id
+      || summaries.find(b => b.state !== 'closed')?.id || summaries[0]?.id;
+    if (chosen && chosen !== selectedId) { selectedId = chosen; selectionEpoch++; }
+    if (chosen) rememberSelection(chosen);
+    renderNavigation();
+    setText($('#boards-status'), `${summaries.filter(b => b.state !== 'closed').length} 个面板 · ${summaries.filter(b => b.state === 'closed').length} 个已关闭`);
     $('#board-login-error').textContent = '';
-  } catch (error) {
-    setText($('#boards-status'), '无法读取中心：' + error.message + '。当前画面为缓存，不能视为实时数据。');
-    // 网络中断时不能让 iframe 继续保留 fresh=true；即使模板只看数据面，也会收到离线更新。
-    for (const card of cards.values()) {
-      card.summary = { ...card.summary, status: 'collector_offline', fresh: false, collector_online: false };
-      setText(card.badge, '中心连接中断 · 缓存画面'); card.badge.classList.remove('fresh'); publish(card);
+    if (chosen) await displaySelected();
+    else {
+      for (const card of cards.values()) card.box.hidden = true;
+      $('#boards-stage-state').hidden = false;
+      setText($('#boards-stage-state'), '还没有 Canvas。点击左侧 ＋ 新建面板，选择节点、脚本和模板即可；不需要已有任务。');
     }
-    if ($('#board-login').open || error.status === 401) {
-      $('#board-login-error').textContent = error.status === 401 ? '凭证无效，请检查中心 web-token 后重试。' : error.message;
-      if (!$('#board-login').open) $('#board-login').showModal();
-    }
-  } finally { loading = false; }
+  } catch (error) { markOffline(error); }
+  finally { loading = false; if (reloadQueued) { reloadQueued = false; load(); } }
 }
 
 async function openEditor(id = null) {
@@ -197,6 +326,7 @@ async function openEditor(id = null) {
     $('#board-draft-status').textContent = draft ? '已恢复当前标签页的草稿，尚未保存到中心。'
       : '输入会在当前标签页暂存；保存或丢弃后清除草稿。';
     $('#board-editor-title').textContent = editing ? '编辑 Canvas' : '新建 Canvas';
+    sidebar(false, false); closeMenus();
     $('#board-editor').showModal();
   } catch (error) { toast(error.message); }
 }
@@ -204,7 +334,13 @@ async function openEditor(id = null) {
 $('#board-new').onclick = () => openEditor();
 $('#board-editor-close').onclick = () => $('#board-editor').close();
 $('#board-editor').oncancel = event => { if (saving) event.preventDefault(); };
-$('#board-editor').onclose = () => { if (!$('#board-editor').open) editorEpoch++; };
+$('#board-editor').onclose = () => {
+  if ($('#board-editor').open) return;
+  editorEpoch++;
+  const card = cards.get(selectedId);
+  if (narrow.matches) (card && !card.box.hidden ? card.title : $('#boards-list-toggle')).focus({ preventScroll: true });
+  else if (card) card.box.querySelector('.board-management > summary').focus({ preventScroll: true });
+};
 $('#board-form').oninput = event => {
   event.target.setCustomValidity?.(''); $('#board-form-error').textContent = ''; rememberDraft();
 };
@@ -231,7 +367,13 @@ $('#board-form').onsubmit = async event => {
   saving = true; event.target.setAttribute('aria-busy', 'true'); submit.textContent = '正在保存…';
   for (const field of event.target.elements) field.disabled = true;
   try {
-    await api('api/canvas' + (editing ? '/' + editing.id : ''), values);
+    const saved = await api('api/canvas' + (editing ? '/' + editing.id : ''), values);
+    if (!editing) {
+      selectedId = saved.id; selectionEpoch++; rememberSelection(saved.id, true);
+      // 创建成功后立即撤下旧面板，不能让新选择的管理操作暂时落到之前的 Canvas 上。
+      for (const card of cards.values()) card.box.hidden = true;
+      $('#boards-stage-state').hidden = false; setText($('#boards-stage-state'), '正在打开新 Canvas…');
+    }
     clearDraft();
     $('#board-editor').close(); load();
   } catch (error) {

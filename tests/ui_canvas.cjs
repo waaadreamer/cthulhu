@@ -29,6 +29,18 @@ async function stop(proc) {
   await new Promise(resolve => { proc.once('exit', resolve); proc.kill('SIGTERM'); });
 }
 
+async function choose(page, id) {
+  if (await page.locator('#boards-list-toggle').isVisible() && await page.locator('#boards-sidebar').evaluate(e => e.inert)) await page.locator('#boards-list-toggle').click();
+  const item = page.locator(`.board-nav-item[data-canvas-id="${id}"]`);
+  if (await item.evaluate(e => e.parentElement.matches('details') && !e.parentElement.open)) await page.locator('.board-nav-closed > summary').click();
+  await item.click(); await page.locator(`.board-card[data-canvas-id="${id}"]:visible iframe`).waitFor();
+}
+async function action(card, name) {
+  const menu = card.locator('.board-management');
+  if (!await menu.evaluate(e => e.open)) await menu.locator(':scope > summary').click();
+  await card.getByRole('button', { name, exact: true }).click();
+}
+
 (async () => {
   const state = fs.mkdtempSync(path.join(os.tmpdir(), 'cthulhu-canvas-ui-'));
   let center, service, browser;
@@ -68,9 +80,9 @@ async function stop(proc) {
     await frame.waitForFunction(() => Canvas.getData().data.experiments[0].metrics.completed === 4);
     assert.equal(await frame.evaluate(() => { try { return parent.localStorage.getItem('cthulhu-token'); } catch { return 'blocked'; } }), 'blocked');
     assert.ok(!(await frame.evaluate(() => JSON.stringify(Canvas.getData()))).includes(token));
-    await first.getByRole('button', { name: '暂停', exact: true }).click();
+    await action(first, '暂停');
     await first.locator('.board-status').getByText('已暂停', { exact: true }).waitFor();
-    await first.getByRole('button', { name: '恢复', exact: true }).click();
+    await action(first, '恢复');
     await first.locator('.board-status.fresh').waitFor();
     // 第二面板来自显式演示脚本；无 task 创建/关联，与第一面板同时展示。
     await page.locator('#board-new').click(); await page.locator('#board-example').click();
@@ -79,7 +91,7 @@ async function stop(proc) {
     await second.frameLocator('iframe').getByText('RoboTwin 示例 A', { exact: true }).waitFor();
     await page.screenshot({ path: process.env.CANVAS_SCREENSHOT || '/tmp/cthulhu-canvas-preview.png', fullPage: true });
     // 模板只能收固定快照；采集 stdout 中的 HTML 仍作为纯文本进入模板。
-    await second.getByRole('button', { name: '编辑', exact: true }).click();
+    await action(second, '编辑');
     await form.locator('[name=script]').fill("printf '<script>window.injected=true</script>'");
     await form.locator('[type=submit]').click();
     await second.frameLocator('iframe').locator('#text').getByText('<script>window.injected=true</script>', { exact: true }).waitFor();
@@ -90,10 +102,12 @@ async function stop(proc) {
     // 独立服务自身也提供展示页面，浏览器凭证仍需显式填写，页面不注入后端凭证。
     const local = await browser.newPage(); await local.goto(serviceURL + '/');
     await local.locator('#board-token').fill(token); await local.locator('#board-login-form button').click();
-    await local.locator('.board-card').nth(1).waitFor();
+    await choose(local, await second.getAttribute('data-canvas-id'));
+    await choose(page, await first.getAttribute('data-canvas-id'));
     page.once('dialog', dialog => dialog.accept());
-    await first.getByRole('button', { name: '关闭采集', exact: true }).click();
+    await action(first, '关闭采集');
     await first.locator('.board-status').getByText('已关闭', { exact: true }).waitFor();
+    await choose(page, await second.getAttribute('data-canvas-id'));
     await stop(service.proc);
     await second.locator('.board-status').getByText('Canvas 服务离线', { exact: true }).waitFor({ timeout: 20000 });
     frame = page.frames().filter(f => f.url().endsWith('/board-frame.html')).at(-1);
