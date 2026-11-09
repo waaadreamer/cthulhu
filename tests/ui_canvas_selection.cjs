@@ -70,10 +70,10 @@ async function stop(proc) {
 
     // 故意延迟尚未缓存的 A；用户已选 B 后，A 的迟到 GET 不能夺走选择。
     await page.goto(url + '/boards.html#canvas=' + b.id); await selected(b.id);
-    await page.route('**/api/canvas/' + a.id, async route => { await new Promise(resolve => setTimeout(resolve, 600)); await route.continue(); });
+    await page.route('**/api/canvas/' + a.id + '?view=config', async route => { await new Promise(resolve => setTimeout(resolve, 600)); await route.continue(); });
     await page.locator(`.board-nav-item[data-canvas-id="${a.id}"]`).click();
     await page.locator(`.board-nav-item[data-canvas-id="${b.id}"]`).click(); await selected(b.id);
-    await page.waitForTimeout(800); await selected(b.id); await page.unroute('**/api/canvas/' + a.id);
+    await page.waitForTimeout(800); await selected(b.id); await page.unroute('**/api/canvas/' + a.id + '?view=config');
     await page.screenshot({ path: path.join(artifacts, 'desktop.png'), fullPage: true });
     console.log('PASS late GET for old selection does not replace current Canvas');
 

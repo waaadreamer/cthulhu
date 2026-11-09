@@ -95,6 +95,14 @@ addEventListener('canvas:update', event => {
 
 每次更新后也可用 `window.Canvas.getData()` 读取当前快照。快照包含 `id/name/state/status/stale/fresh/node_online/collector_online/sampled_at/now/revision/blocked_unknown/data_revision/data/format/attempt`。`attempt` 为最近回执，带 stdout、stderr、exit_code、error、truncated、discarded 和命令 ID。首次没有成功数据时 `data` 为 null。模板应监听事件获取初始数据；API 在模板执行后的首次事件前建立。
 
+## 浏览器传输与后台行为
+
+前台仍每2秒读取中心状态，数据标记变化才取新数据。认证后的Canvas GET支持私有ETag：仅协议层当前时间不参与版本比较，304通过`X-Canvas-Now`给中心时间；鲜度/失败/离线/版本/业务data内的时间变化都仍返回新表示。客户端只在当前凭证的内存中保留至多24个HTTP表示，不允许公共代理缓存；切换凭证清除旧表示、面板iframe和编辑草稿，迟到旧响应不进入新作用域。网络失败不会把缓存当成新成功响应，重连会重新向中心验证。
+
+界面配置读取使用`?view=config`避免夹带采集历史；`/data?compact=1`在同一成功票据且原文可与既有JSON表示精确对应时只传一次stdout，浏览器恢复完整data及原始回执再交给模板。失败/丢弃的新回执与旧成功数据、未知或词法不等价情况保守返回完整表示，默认不带参数的API保持原契约。模板仍看到完整历史与相同图表数据，不删字段或降低精度。
+
+页面隐藏时只停止浏览器拉取并撤销缓存画面的实时标志，不停止中心采集；隐藏时中止在途GET，返回前台立即校验。旧页面需首次刷新加载新前端；条件读取、精确去重和独立服务压缩需要中心/独立服务加载新后端，未部署的旧后端仍兼容新前端但没有全部节流收益。
+
 ## 中心 API
 
 所有接口均要求现有中心 Bearer token 与 Origin 校验：
@@ -118,6 +126,7 @@ PATH="$PWD/.venv/bin:$PATH" python3 -m unittest discover -s tests -v
 for f in static/js/*.js; do node --check "$f"; done
 node tests/test_model.mjs
 node tests/test_board_data.mjs
+node tests/test_board_network.mjs
 PLAYWRIGHT_PATH=/path/to/playwright-core node tests/ui_canvas.cjs
 PLAYWRIGHT_PATH=/path/to/playwright-core node tests/ui_canvas_review.cjs
 PLAYWRIGHT_PATH=/path/to/playwright-core node tests/ui_canvas_selection.cjs

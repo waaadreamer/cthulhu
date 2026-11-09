@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { createCanvasReader } from '../static/js/board-network.js';
+let token = 'one', requests = [], queue = [];
+const reader = createCanvasReader({token:()=>token,base:'https://center.invalid/v4/',fetcher:async(url,options)=>{requests.push({url,options});return queue.shift()()}});
+const ok = (value,tag='v1',now='10')=>new Response(JSON.stringify(value),{status:200,headers:{ETag:tag,'X-Canvas-Now':now}});
+queue.push(()=>ok({data_from_stdout:'json',attempt:{stdout:' {"x":1}\n'},revision:1}));
+const first=await reader.get('api/canvas/A/data?compact=1');assert.deepEqual(first.data,{x:1});assert.equal(first.attempt.stdout,' {"x":1}\n');
+queue.push(()=>new Response(null,{status:304,headers:{ETag:'v1','X-Canvas-Now':'12'}}));const cached=await reader.get('api/canvas/A/data?compact=1');assert.equal(cached.now,12);assert.equal(cached.data,first.data);assert.equal(requests.at(-1).options.headers['If-None-Match'],'v1');
+queue.push(()=>ok({data:'B'},'b'));await reader.get('api/canvas/B/data');assert.equal(requests.at(-1).options.headers['If-None-Match'],undefined);
+queue.push(()=>{throw Error('offline')});await assert.rejects(reader.get('api/canvas/A/data?compact=1'),/offline/);
+queue.push(()=>new Response(null,{status:304,headers:{ETag:'v1','X-Canvas-Now':'14'}}));assert.deepEqual((await reader.get('api/canvas/A/data?compact=1')).data,{x:1});
+token='two';queue.push(()=>new Response('{"error":"auth"}',{status:401}));await assert.rejects(reader.get('api/canvas/A/data?compact=1'),/auth/);assert.equal(requests.at(-1).options.headers['If-None-Match'],undefined);
+let finish;queue.push(()=>new Promise(r=>finish=r));const pending=reader.get('api/canvas');token='three';finish(ok({canvases:[{id:'old'}]}));await assert.rejects(pending,e=>e.stale);
+queue.push(()=>ok({canvases:[{id:'new',now:1}]},'list','30'));assert.equal((await reader.get('api/canvas')).canvases[0].now,30);assert.equal(requests.at(-1).options.headers['If-None-Match'],undefined);
+let old;queue.push(()=>new Promise(r=>old=r));const older=reader.get('api/canvas');queue.push(()=>ok({canvases:[{id:'latest'}]},'list2','31'));await reader.get('api/canvas');old(ok({canvases:[{id:'late'}]},'old'));await assert.rejects(older,e=>e.stale);
+queue.push(()=>new Response(null,{status:304,headers:{ETag:'list2','X-Canvas-Now':'32'}}));assert.equal((await reader.get('api/canvas')).canvases[0].id,'latest');
+console.log('PASS reversible compact, private scope, 304 central time, canvas switch, offline/reconnect, auth changes, late responses');

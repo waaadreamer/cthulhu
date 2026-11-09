@@ -140,12 +140,12 @@ async function action(card, name) {
     await form.locator('[name=interval]').fill('1'); await form.locator('[type=submit]').click();
     let second = page.locator('.board-card').nth(1); await second.frameLocator('iframe').getByText('RoboTwin 示例 A', { exact: true }).waitFor();
     const secondId = await second.getAttribute('data-canvas-id');
-    await page.route('**/api/canvas/' + firstId, async route => { await new Promise(resolve => setTimeout(resolve, 400)); await route.continue(); });
+    await page.route('**/api/canvas/' + firstId + '?view=config', async route => { await new Promise(resolve => setTimeout(resolve, 400)); await route.continue(); });
     await page.reload(); await page.locator('.board-card:visible').waitFor();
     assert.deepEqual(await page.locator('.board-nav-item').evaluateAll(es => es.map(e => e.dataset.canvasId)), [firstId, secondId]);
     assert.equal(await page.locator('.board-card:visible').count(), 1);
     await choose(page, firstId);
-    await page.unroute('**/api/canvas/' + firstId); first = page.locator(`.board-card[data-canvas-id="${firstId}"]`);
+    await page.unroute('**/api/canvas/' + firstId + '?view=config'); first = page.locator(`.board-card[data-canvas-id="${firstId}"]`);
     await choose(page, secondId); second = page.locator(`.board-card[data-canvas-id="${secondId}"]`); await choose(page, firstId);
     await shot('desktop-multiple');
     console.log('PASS multi-panel order remains stable with deliberately reordered HTTP responses');

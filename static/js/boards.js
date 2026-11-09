@@ -1,7 +1,12 @@
 import { $, el, api as request, auth, toast } from './dom.js';
 import { frameSnapshot, STATUS } from './board-data.js';
+import { createCanvasReader } from './board-network.js';
+
+const reader = createCanvasReader({ token: () => auth.token, base: document.baseURI });
+let canvasCredential = auth.token;
 
 const cards = new Map();
+const readControllers = new Set();
 const pending = new Set();
 const reads = new Map(), navItems = new Map();
 let summaries = [], selectedId = '', selectionEpoch = 0, reloadQueued = false;
@@ -18,15 +23,35 @@ try { drafts = JSON.parse(sessionStorage.getItem(draftKey) || '{}'); } catch { /
 if (!drafts || typeof drafts !== 'object' || Array.isArray(drafts)) drafts = {};
 const editorKey = () => editing?.id || 'new';
 
+function checkCredential() {
+  if (canvasCredential === auth.token) return;
+  canvasCredential = auth.token; reader.clear(); selectionEpoch++; editorEpoch++;
+  // HTTP 缓存与已渲染的 iframe 都属于旧凭证；不能只清 ETag 却继续给新身份展示旧业务数据。
+  for (const controller of readControllers) controller.abort('canvas-credential');
+  for (const card of cards.values()) card.box.remove();
+  cards.clear(); reads.clear();
+  for (const item of navItems.values()) item.remove();
+  navItems.clear(); summaries = []; nodes = [];
+  drafts = {}; persistDrafts();
+  if ($('#board-editor').open) $('#board-editor').close();
+  $('#boards-stage-state').hidden = false; setText($('#boards-stage-state'), '正在校验访问凭证…');
+}
+
 async function api(path, body) {
+  checkCredential();
   // 半断开的连接不能永久占住 loading，让缓存一直带着旧的 fresh 标志。
   const controller = new AbortController();
+  if (body === undefined) readControllers.add(controller);
   const timer = setTimeout(() => controller.abort(), 10000);
-  try { return await request(path, body, { signal: controller.signal }); }
+  try {
+    if (body === undefined) return await reader.get(path, { signal: controller.signal });
+    const value = await request(path, body, { signal: controller.signal }); reader.clear(); return value;
+  }
   catch (error) {
+    if (['canvas-hidden', 'canvas-credential'].includes(controller.signal.reason)) { error.stale = true; throw error; }
     if (error.name === 'AbortError') throw Error('中心请求超时，请检查连接后重试');
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); readControllers.delete(controller); }
 }
 
 function persistDrafts() {
@@ -42,7 +67,7 @@ function rememberDraft() {
 function clearDraft() { delete drafts[editorKey()]; persistDrafts(); }
 
 function publish(card) {
-  if (card.ready) card.frame.contentWindow.postMessage({ type: 'cthulhu:canvas:data', snapshot: frameSnapshot(card.data, card.summary) }, '*');
+  if (card.ready && card.frame.isConnected) card.frame.contentWindow.postMessage({ type: 'cthulhu:canvas:data', snapshot: { ...frameSnapshot(card.data, card.summary), ...(document.hidden ? { fresh: false, stale: true } : {}) } }, '*');
 }
 
 // 只接收指定 iframe 的 ready，不处理模板提出的请求。模板没有命令通道，也得不到页面凭证。
@@ -51,7 +76,7 @@ addEventListener('message', event => {
   const card = [...cards.values()].find(c => c.frame.contentWindow === event.source);
   if (!card || card.ready) return;
   card.ready = true;
-  event.source.postMessage({ type: 'cthulhu:canvas:init', template: card.template, snapshot: frameSnapshot(card.data, card.summary) }, '*');
+  event.source.postMessage({ type: 'cthulhu:canvas:init', template: card.template, snapshot: { ...frameSnapshot(card.data, card.summary), ...(document.hidden ? { fresh: false, stale: true } : {}) } }, '*');
 });
 
 async function control(id, action, acknowledge_unknown = false) {
@@ -187,10 +212,10 @@ async function readCard(summary) {
   const work = (async () => {
     let card = cards.get(summary.id);
     if (!card || card.revision !== summary.revision) {
-      const [board, data] = await Promise.all([api(`api/canvas/${summary.id}`), api(`api/canvas/${summary.id}/data`)]);
+      const [board, data] = await Promise.all([api(`api/canvas/${summary.id}?view=config`), api(`api/canvas/${summary.id}/data?compact=1`)]);
       card = makeCard(board, data, card);
     } else if (card.stamp !== JSON.stringify(summary.data_stamp)) {
-      card.data = await api(`api/canvas/${summary.id}/data`); card.stamp = JSON.stringify(summary.data_stamp);
+      card.data = await api(`api/canvas/${summary.id}/data?compact=1`); card.stamp = JSON.stringify(summary.data_stamp);
     }
     updateCard(card, summary);
     return card;
@@ -209,7 +234,7 @@ async function displaySelected(focus = false) {
     showCard(card);
     if (focus) card.title.focus({ preventScroll: true });
   } catch (error) {
-    if (epoch !== selectionEpoch) return;
+    if (epoch !== selectionEpoch || error.stale) return;
     const cached = cards.get(summary.id);
     if (cached?.box.isConnected) showCard(cached);
     else { $('#boards-stage-state').hidden = false; setText($('#boards-stage-state'), '无法打开 Canvas：' + error.message + '。可重试或从左侧选择其他面板。'); }
@@ -281,7 +306,7 @@ function markOffline(error) {
 }
 
 async function load() {
-  if (!auth.token) return;
+  if (!auth.token || document.hidden) return;
   if (loading) { reloadQueued = true; return; }
   loading = true;
   try {
@@ -301,14 +326,14 @@ async function load() {
       $('#boards-stage-state').hidden = false;
       setText($('#boards-stage-state'), '还没有 Canvas。点击左侧 ＋ 新建面板，选择节点、脚本和模板即可；不需要已有任务。');
     }
-  } catch (error) { markOffline(error); }
+  } catch (error) { if (!error.stale) markOffline(error); }
   finally { loading = false; if (reloadQueued) { reloadQueued = false; load(); } }
 }
 
 async function openEditor(id = null) {
   const epoch = ++editorEpoch;
   try {
-    const board = id ? await api(`api/canvas/${id}`) : null;
+    const board = id ? await api(`api/canvas/${id}?view=config`) : null;
     if (epoch !== editorEpoch) return;
     editing = board;
     const form = $('#board-form'); form.reset(); $('#board-form-error').textContent = '';
@@ -414,4 +439,13 @@ $('#board-login-form').onsubmit = async event => {
   finally { submit.disabled = false; }
 };
 if (!auth.token) $('#board-login').showModal(); else load();
+// 后台不消耗下行，中心采集照常。返回前台马上校验，不等下一轮，也不把隐藏期间缓存称为实时。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { load(); return; }
+  for (const controller of readControllers) controller.abort('canvas-hidden');
+  for (const card of cards.values()) {
+    if (card.ready && card.frame.isConnected) card.frame.contentWindow.postMessage({ type: 'cthulhu:canvas:data',
+      snapshot: { ...frameSnapshot(card.data, card.summary), fresh: false, stale: true } }, '*');
+  }
+});
 setInterval(() => { if (!$('#board-login').open) load(); }, 2000);
