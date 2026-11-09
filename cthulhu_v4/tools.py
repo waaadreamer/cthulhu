@@ -33,7 +33,7 @@ MASTER = [
          'cwd 是该节点上的项目绝对路径，决定执行者读到的 AGENTS.md/CLAUDE.md；省略时用 list_nodes 里该节点的 defaults.cwd，没有默认则必须填写。'
          'backend/model 省略时依次使用节点默认、Master 配置。',
          {'title': S, 'description': S, 'acceptance': S, 'deadline': S, 'cwd': S, 'node': S,
-          'backend': {'type': 'string', 'enum': ['codex', 'claude', 'demo']}, 'model': S,
+          'backend': {'type': 'string', 'enum': ['codex', 'claude', 'antigravity', 'demo']}, 'model': S,
           'reasoning_effort': {'type': 'string', 'enum': ['low', 'medium', 'high', 'xhigh']}},
          ['title', 'description', 'acceptance', 'deadline']),
     spec('tell_owner', '主动向主人主聊天框汇报判断、操作结果和风险。format 默认 markdown（支持表格、$公式$、$$块公式$$、任务列表）。'

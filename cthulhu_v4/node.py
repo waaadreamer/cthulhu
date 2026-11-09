@@ -44,6 +44,7 @@ class Turn:
         self.token = secrets.token_urlsafe(32)  # 每回合的本机 MCP token；节点凭证绝不交给模型子进程。
         self.url = node.bridge_url
         self.proxy = node.model_proxy
+        self.native_dir = node.state_dir / 'antigravity' / self.agent
 
     def native(self, kind, payload):
         self.node.queue(self.job['id'], 'native:' + kind, payload)
@@ -56,6 +57,16 @@ class Turn:
         with n.store.atomic():
             a['session'] = sid; n.store.put('agent', a)
             n.queue(self.job['id'], 'session', {'session': sid})
+
+    def model_evidence(self, profile, status, error, model):
+        n = self.node
+        evidence = {'id': profile, 'inference_status': status, 'inference_error': error[:300],
+                    'inference_model': model, 'inference_at': time.time()}
+        n.store.put('model_evidence', evidence)
+        if n.model_profiles.get('antigravity') == profile and 'antigravity' in n.models:
+            # 新字典保证同步中途出现的证据不会被旧回执清掉 dirty；只影响同配置的节点目录。
+            n.models = {**n.models, 'antigravity': {**n.models['antigravity'], **{k: v for k, v in evidence.items() if k != 'id'}}}
+            n.models_dirty = True; n.kick.set()
 
     def pid(self, pid, identity):
         a = self.node.store.get('agent', self.agent)
@@ -92,9 +103,12 @@ class Node:
         self.updating = False
         self.restart = False
         self.on_synced = None
-        self.backends = backends or ['demo'] + [b for b in ('codex', 'claude') if shutil.which(b)]
+        self.backends = backends or ['demo'] + [b for b, cli in (('codex', 'codex'), ('claude', 'claude'), ('antigravity', 'agy')) if shutil.which(cli)]
         # 本机可用模型：后台定期发现；有变化时随下一次同步上报一次，中心持久保存。
         self.models, self.models_dirty = {}, False
+        self.models_wake = asyncio.Event()
+        self.model_profiles = {}
+        self.models_requested, self.models_completed = None, None
         self.discover_models = not backends   # 测试显式指定后端时不启动真实 CLI
         self.link = link             # 由传输层注入：request(body) → result；控制连接（同步与续租）
         self.data = None             # 远端节点的 data 连接（见 data_link）；本机节点为 None
@@ -154,13 +168,25 @@ class Node:
         env.pop('CLAUDECODE', None)
         while not self.closed:
             try:
+                self.models_wake.clear()
+                requested = self.models_requested
                 found = await discover(self.backends, env, self.models, cwd=self.state_dir / 'model-probe')
-                if found != self.models:
+                for backend, info in found.items():
+                    profile = info.pop('_profile', None)
+                    self.model_profiles[backend] = profile
+                    evidence = self.store.find('model_evidence', profile) if profile else None
+                    if evidence:
+                        info.update({k: v for k, v in evidence.items() if k != 'id'})
+                completed = self.models_completed
+                self.models_completed = requested
+                if found != self.models or completed != requested:
                     self.models, self.models_dirty = found, True
                     self.kick.set()
             except Exception as e:
                 print('模型发现失败：' + str(e), flush=True)
-            await asyncio.sleep(MODELS_REFRESH)
+            # 刷新只唤醒同一个发现循环，避免连点启动重叠 CLI；发现期间的新请求保留到下一轮。
+            try: await asyncio.wait_for(self.models_wake.wait(), MODELS_REFRESH)
+            except asyncio.TimeoutError: pass
 
     def data_link(self):
         """工具调用、事件上传、文件与更新包走 data 连接；中心不支持时退回控制连接。
@@ -197,15 +223,16 @@ class Node:
         events = [] if self.data_link() else self.outbox(max_bytes=64 * 1024)
         started = time.monotonic()
         dirty = self.models_dirty
-        extra = {'models': self.models} if dirty else {}
+        reported = self.models
+        extra = {'models': reported, 'models_completed': self.models_completed} if dirty else {}
         result = await self.link.request(extra | {'op': 'sync', 'instance': self.instance, 'base': str(self.state_dir.parent),
                                           # 已收到全文的回合：中心续租时只回 id，不再重发 prompt。
                                           'have': list(self.expires), 'commands_have': list(self.commands.known),
                                           'backends': self.backends, 'version': VERSION,
-                                          'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE, COMMAND_FEATURE, 'steer'], 'code': self.code,
+                                          'host': socket.gethostname(), 'home': str(Path.home()), 'features': [FEATURE, UPDATE_FEATURE, COMMAND_FEATURE, 'steer', 'models-refresh'], 'code': self.code,
                                           'managed': self.managed, 'events': events})
         self.accept(result, started)
-        if dirty:
+        if dirty and self.models is reported:
             # 只有中心确认收到才清掉标记；连接中断时下一次同步重报，列表不会丢。
             self.models_dirty = False
         if self.on_synced:
@@ -215,6 +242,10 @@ class Node:
 
     def accept(self, result, started):
         self.ack(result['ack'])
+        requested = result.get('models_refresh')
+        if requested and requested != self.models_requested:
+            self.models_requested = requested
+            self.models_wake.set()
         command_base = (result['now'] - time.time() + time.monotonic()) if 'now' in result else started
         self.commands.accept(result.get('commands', []), command_base)
         if result.get('update') and self.managed and not self.updating and not self.active and not self.commands.active:

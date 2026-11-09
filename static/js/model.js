@@ -176,6 +176,7 @@ export class Model {
     }
     if (m === 'declined_request') return this.put(k, e, { type: 'notice', level: 'warn', text: '原生审批/输入请求未执行：' + d.method });
     if (m === 'demo') return this.put(k, e, { type: 'reasoning', text: d.text });
+    if (m === 'agy_update') return this.antigravity(d, e);
     if (m === 'stream_event') return this.claudeStream(d.event || {}, e);
     if (m === 'assistant') {
       const msg = d.message || {};
@@ -219,6 +220,30 @@ export class Model {
       case 'contextCompaction': this.put(key, e, { type: 'notice', level: 'info', text: '原生 CLI 已整理会话上下文' }); return;
       default: this.put(key, e, { type: 'tool', name: it.type || '原生活动', input: it, status });
     }
+  }
+
+  antigravity(d, e) {
+    const kind = d.sessionUpdate, key = `agy:${this.turn}:${d.toolCallId || 'text'}`;
+    if (kind === 'agent_message_chunk' || kind === 'agent_thought_chunk') {
+      if (this.agyLastKind !== kind || this.agyTurn !== this.turn) this.agyTextKey = `agy:${this.turn}:text:${e.seq}`;
+      this.agyLastKind = kind; this.agyTurn = this.turn;
+      if (d.content?.type === 'text') this.append(this.agyTextKey, e, kind === 'agent_thought_chunk' ? 'reasoning' : 'text', d.content.text || '');
+      return;
+    }
+    if (kind === 'plan') return this.put('plan:' + this.turn, e, { type: 'plan', steps: (d.entries || []).map(x => ({ text: x.content, status: x.status })) });
+    if (kind !== 'tool_call' && kind !== 'tool_call_update') return;
+    this.agyLastKind = kind;
+    const old = this.byKey.get(key), status = d.status === 'failed' ? 'failed' : d.status === 'completed' ? 'completed' : d.status ? 'running' : old?.status || 'running';
+    const content = d.content || [], output = content.filter(x => x.type === 'content').map(x => toText(x.content)).join('\n');
+    const diffs = content.filter(x => x.type === 'diff');
+    if (diffs.length) return this.put(key, e, { type: 'patch', status, files: diffs.map(x => ({ path: x.path, diff: editDiff({ old_string: x.oldText, new_string: x.newText }) })) });
+    // 原生 tool_call_update 常只含增量字段，不能用空值擦掉之前收到的命令/参数。
+    const fields = { status };
+    if (d.title != null) fields.name = d.title;
+    if (d.rawInput != null) fields.input = d.rawInput;
+    if (content.length) fields.output = output;
+    if (d.rawOutput != null) fields.output = toText(d.rawOutput);
+    this.put(key, e, { type: old?.type || 'tool', name: old?.name || '原生工具', ...fields });
   }
 
   claudeStream(ev, e) {

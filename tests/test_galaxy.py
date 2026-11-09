@@ -88,6 +88,32 @@ class GalaxyTests(unittest.IsolatedAsyncioTestCase):
         shim.chmod(0o755)
         return dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'])
 
+    async def test_antigravity_backend_and_model_reach_each_ws_node(self):
+        bin_dir = self.path / 'agy-bin'; bin_dir.mkdir()
+        shim = bin_dir / 'agy'
+        shim.write_text('#!/bin/sh\nexec ' + sys.executable + ' ' + str(ROOT / 'tests/fake_agy.py') + ' "$@"\n')
+        shim.chmod(0o755)
+        config = self.path / 'claude-config'; config.mkdir()
+        (config / 'settings.json').write_text(json.dumps({'env': {
+            'ANTHROPIC_AUTH_TOKEN': 'protocol-fixture-key', 'ANTHROPIC_BASE_URL': 'http://127.0.0.1:1'}}))
+        # PATH 只暴露协议夹具，默认测试不能因本机安装了真实 CLI 而隐式运行原生冒烟。
+        env = dict(os.environ, PATH=str(bin_dir) + ':/usr/bin:/bin', CLAUDE_CONFIG_DIR=str(config))
+        for name in ('S', 'ali'):
+            await self.start_node(name, env=env)
+        await self.wait(lambda: all(self.c.store.get('node', name).get('models', {}).get('antigravity', {}).get('list') for name in ('S', 'ali')))
+        tasks = [self.c.create_task(task_args(name, self.path, backend='antigravity', model='gemini-4-argon-high')) for name in ('S', 'ali')]
+        await self.wait(lambda: all(self.c.store.get('agent', t['agent']).get('session') for t in tasks))
+        await self.wait(lambda: not any(self.hub.busy(t['agent']) for t in tasks))
+        for task in tasks:
+            agent = self.c.store.get('agent', task['agent'])
+            self.assertEqual(agent['backend'], 'antigravity')
+            self.assertEqual(agent['model'], 'gemini-4-argon-high')
+            self.assertEqual(agent['node'], task['node'])
+            self.assertEqual(agent['session'], 'agy-session')
+            configs = [e['data'] for e in self.c.store.events(limit=1000) if e['actor'] == task['agent'] and e['kind'] == 'native:runtime_config']
+            self.assertEqual(configs[-1]['model'], agent['model'])
+        self.assertEqual({n['id'] for n in self.hub.nodes()}, {'local', 'S', 'ali'})
+
     async def test_invite_join_two_nodes_messages_and_sessions(self):
         (pa, home_a), _ = await self.start_node('alpha'), await self.start_node('beta')
         tasks = [self.c.create_task(task_args(n, self.path)) for n in ('alpha', 'beta')]

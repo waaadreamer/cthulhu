@@ -211,12 +211,14 @@ class Hub:
             if n['instance'] and n['instance'] != body['instance']:
                 raise PermissionError(f'节点 {node} 的状态目录已改变：请恢复原目录；不能用新目录接管原 session')
             n.update(instance=body['instance'], seen=c.clock(), version=body.get('version'),
-                     backends=[b for b in body.get('backends', []) if b in {'demo', 'codex', 'claude'}],
+                     backends=[b for b in body.get('backends', []) if b in {'demo', 'codex', 'claude', 'antigravity'}],
                      host=body.get('host'), home=body.get('home'), features=list(body.get('features') or []),
                      code=body.get('code'), managed=bool(body.get('managed')), base=body.get('base'))
             if 'models' in body:
                 # 节点只在列表变化时上报；未上报时沿用中心保存的上一份。
                 n['models'] = clean_models(body['models'])
+                if body.get('models_completed') == n.get('models_refresh'):
+                    n.pop('models_refresh', None)
             self.ingest_batch(node, n, body.get('events', []))
             s.put('node', n)
             jobs, running = [], 0
@@ -280,6 +282,8 @@ class Hub:
             # 文件读取请求不是业务状态，不进事务、不落盘；随同步响应捎给节点即可。
             reply = {'ack': n['ack'], 'lease_seconds': LEASE, 'now': c.clock(), 'jobs': jobs, 'files': c.files.requests_for(node),
                      'commands': c.executions.requests_for(node, body.get('commands_have') or ())}
+            if n.get('models_refresh'):
+                reply['models_refresh'] = n['models_refresh']
             if plan == 'ready':
                 reply['update'] = c.release.offer()
             return reply

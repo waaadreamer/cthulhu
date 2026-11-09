@@ -1,6 +1,6 @@
 # Cthulhu v4 · 中心 + 星系
 
-一个 Master 原生会话负责和你对齐目标；每个任务交给一个独立的 old_one（Codex 或 Claude Code 原生会话），运行在你选的执行机上。
+一个 Master 原生会话负责和你对齐目标；每个任务交给一个独立的 old_one（Codex、Claude Code 或 Antigravity 原生会话），运行在你选的执行机上。
 中心保存全部业务状态；执行机（星系节点）主动用 WebSocket 连中心，不需要 SSH、入站端口或共享文件系统。原生进程和会话文件留在执行机上。
 
 Linux / Python 3.11+，唯一依赖 `websockets==15.0.1`，前端无构建。
@@ -49,6 +49,54 @@ curl -fsSL https://raw.githubusercontent.com/waaadreamer/cthulhu/v4/deploy/insta
 - 同一台机器想跑第二个节点：设置 `CTHULHU_HOME=~/.cthulhu-2` 再执行。
 - Claude Code 拒绝在 root 下使用 `--dangerously-skip-permissions`，请用普通用户运行节点。
 
+## Antigravity（agy 1.5.3+）
+
+节点在 PATH 找到 `agy` 后会上报 `antigravity`。中心的模型、节点默认值和新任务均可选择
+Antigravity；选择的原生模型 slug 通过现有 WebSocket 派发到所属节点。
+“刷新目录”让该节点重新发现模型，离线或旧版节点会明确提示。不会重启已有 Codex/Claude 回合。
+
+认证默认在节点本机继承 Claude 的有效 `ANTHROPIC_AUTH_TOKEN`（或 `ANTHROPIC_API_KEY`）与
+`ANTHROPIC_BASE_URL`。读取节点进程环境，再应用用户、任务目录 `.claude/settings.json`、
+`.claude/settings.local.json` 和 managed settings 的 env 覆盖。节点目录探测不带任务目录覆盖，
+实际运行时按任务 cwd 重读。不会执行交互 shell 函数、apiKeyHelper，也不会替用户修改认证文件。
+若当前 Claude 依赖这些外部认证方式，需要先让节点能够读取等效设置；不能假定继承了交互终端的配置。
+
+agy 子进程仅以同一 auth/base_url 设置 `GEMINI_API_KEY` / `GOOGLE_GEMINI_BASE_URL`，原生
+`authenticate(gemini-api-key)` 只选择认证方式，**不证明网关支持 Gemini 协议或账户有额度**。
+没有明确 base_url 时拒绝启动，不把继承的 key 发往默认 Google 地址。不实现协议转换代理。
+
+模型页区分本机 `agy models` 目录与同地址 `/v1beta/models` 的渠道目录：前者是 CLI 的候选 slug，
+后者也只证明列出模型，均不宣称推理成功。原生请求验证结果另行显示：已证实协议不支持与目录未列出/未经验证分别记录；
+证据仅在节点私有状态按同一 auth/base_url 的摘要关联，刷新或重启保留，换凭据/地址不沿用。
+渠道没列出候选模型时明确显示目录未列出，不能单凭缺项宣称协议不支持；认证缺失、查询失败、
+自定义路径尚未验证时分别显示待配置或错误。目录查询不发送生成请求，不跟随 HTTP 重定向。
+带路径的 base_url 不猜测改写；运行仍使用原地址，原生错误如实上报。
+
+原生 ACP 会话、日志保存在该节点 `<state>/antigravity/<agent>/`，每轮新进程通过原生
+`session/load` 恢复，不搬历史、不自建摘要。MCP 通过 new/load 的会话参数注入，每轮独立 token，
+不写全局 MCP。模型必须存在于原生目录，且原生配置确认生效后才发 prompt。
+agy 1.5.3 的 ACP 未暴露 headless 的 `customModelsConfig`：目前仅支持目录里的完整 slug，
+目录外裸 ID 或自定义映射在中心拒绝保存，不会静默改成 `-medium`。headless 自定义模型方案不能当作 ACP 已支持的证据。
+
+agy 1.5.3 存在一个失败边界：模型 HTTP 错误后 ACP 仍可能返回 `end_turn`。适配器识别其完整原生
+致命通知，并提取本进程、本轮日志中的有限脱敏错误；日志缺失时报告原因未知的失败，不自动重放。
+普通文本中的同句引用不算原生致命通知。后续 agy 版本若变更通知格式，需重新验证这一边界。
+
+手动验证（不在默认 unittest 中）：
+
+```bash
+# 真实 agy + 回环 HTTP 400 夹具：MCP 发现、同 session 恢复、原始输入/系统指令保留、失败语义。
+# 不访问真实模型；不能据此宣称模型推理成功。
+python3 tests/native_agy_protocol.py
+# 真实浏览器、隔离中心，回放 CLI 目录证据；不修改生产状态或调用模型。
+PLAYWRIGHT_PATH=/path/to/playwright PLAYWRIGHT_EXECUTABLE=/path/to/chrome \
+  AGY_MODELS_FILE=/path/to/agy-models.stdout node tests/ui_antigravity.cjs
+```
+
+发布继续使用既有网页更新入口：审核并合入 `origin/v4` 后，中心独立测试、local 排空后重启，
+远端节点在各自空闲时更新。保留原节点身份与状态目录。若要回滚，以 revert 提交沿相同入口发布；
+先暂停新增的 Antigravity 任务并恢复其节点默认后端，保留原生会话目录供以后恢复，不迁移至其他后端。
+
 ## 飞书（可选）
 
 中心用官方 `lark-cli`（`@larksuite/cli`）订阅机器人「奈亚」收到的消息。只处理私聊奈亚、或群里 @ 奈亚的消息。
@@ -80,6 +128,8 @@ cthulhu_v4/
   hub.py         唯一派发路径：回合租约、事件去重入库、停止确认、过期 → unknown
   node.py        执行节点（中心内嵌的 local 与远端星系共用）：发件箱、接单、watchdog
   runtime.py     Codex app-server / Claude stream-json / demo 适配器，只依赖窄接口 Sink
+  agy_runtime.py Antigravity 原生 ACP 适配器，逐会话 MCP 与原生 session/load
+  antigravity.py 节点本机 Claude 配置继承、agy 目录与渠道模型查询
   transport.py   本机内存通道、WebSocket 客户端/服务端、邀请与证书指纹
   bridge.py      节点本机 MCP HTTP 桥；mcp.py 是原生 CLI 启动的 stdio 端
   web.py app.py cli.py

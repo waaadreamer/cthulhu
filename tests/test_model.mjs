@@ -198,3 +198,27 @@ console.log('test_model: task groups ok');
   assert.equal(scan('\\*不是斜体\\*').map(g => g.text).join(''), '*不是斜体*');
 }
 console.log('test_model: markdown ok');
+
+// Antigravity：真实公开 ACP chunk 合并，但工具前后的正文保持顺序；更新不擦掉输入。
+{
+  const m = new Model('a'); let seq = 0;
+  const send = data => m.apply({ seq: ++seq, kind: 'native:agy_update', data });
+  send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'before ' } });
+  send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'tool' } });
+  send({ sessionUpdate: 'tool_call', toolCallId: 'x', title: 'list_tasks', rawInput: { q: 1 }, status: 'in_progress' });
+  send({ sessionUpdate: 'tool_call_update', toolCallId: 'x', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'ok' } }] });
+  send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'after tool' } });
+  assert.deepEqual(m.live().map(x => x.type), ['text', 'tool', 'text']);
+  assert.equal(m.live()[0].text, 'before tool');
+  assert.deepEqual(m.live()[1].input, { q: 1 });
+  assert.equal(m.live()[1].status, 'completed');
+  assert.equal(m.live()[1].output, 'ok');
+  assert.equal(m.live()[2].text, 'after tool');
+  const { modelChoices, catalogNote } = await import('../static/js/models.js');
+  assert.deepEqual(modelChoices({}, 'antigravity', ''), []);
+  assert.match(catalogNote({}, 'antigravity'), /待配置/);
+  const n = { models: { antigravity: { list: [{ id: 'gemini-4-argon-high', availability: 'unavailable' }], status: 'unavailable', source: '本机 CLI 目录', error: '渠道未报告模型' } } };
+  assert.match(modelChoices(n, 'antigravity', '')[0].tag, /渠道未列出/);
+  assert.match(catalogNote(n, 'antigravity'), /渠道目录未列出候选模型/);
+}
+console.log('test_model: antigravity ok');

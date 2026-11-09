@@ -31,7 +31,7 @@ class Tasks:
         due = deadline(p['deadline'])
         master = s.get('agent', 'master')
         backend = p.get('backend') or defaults.get('backend') or master['backend']
-        if backend not in {'codex', 'claude', 'demo'}:
+        if backend not in {'codex', 'claude', 'antigravity', 'demo'}:
             raise ValueError('不支持的 backend')
         if n.get('backends') and backend not in n['backends']:
             raise ValueError(f"节点 {node} 未报告可用的 {backend}；可用：{', '.join(n['backends'])}")
@@ -44,6 +44,7 @@ class Tasks:
                 return defaults[key]
             return master.get(key) if backend == master['backend'] else None
 
+        self.validate_backend_model(n, backend, inherit('model'))
         for key in ('title', 'description', 'acceptance'):
             if not str(p.get(key, '')).strip():
                 raise ValueError(f'{key} 不能为空')

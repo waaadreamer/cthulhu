@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from .util import CODEX_LEAN
+from .antigravity import catalog as antigravity_catalog, SOURCE as AGY_SOURCE, claude_credentials, credential_profile
 
 CLAUDE_ALIASES = ('fable', 'opus', 'sonnet', 'haiku')
 TIMEOUT = 60
@@ -100,7 +101,7 @@ async def claude_models(env, timeout=TIMEOUT, cwd=None):
     return out
 
 
-DISCOVER = {'codex': codex_models, 'claude': claude_models}
+DISCOVER = {'codex': codex_models, 'claude': claude_models, 'antigravity': antigravity_catalog}
 
 
 async def discover(backends, env, previous=None, cwd=None):
@@ -112,10 +113,16 @@ async def discover(backends, env, previous=None, cwd=None):
         if b not in DISCOVER:
             continue
         try:
-            out[b] = {'list': await DISCOVER[b](env, cwd=cwd), 'at': time.time(), 'error': None}
+            found = await DISCOVER[b](env, cwd=cwd)
+            out[b] = ({**found, 'at': time.time()} if b == 'antigravity' else
+                      {'list': found, 'at': time.time(), 'error': None})
         except Exception as e:
             old = previous.get(b) or {}
             out[b] = {'list': old.get('list') or [], 'at': old.get('at'), 'error': (str(e) or type(e).__name__)[:300]}
+            if b == 'antigravity':
+                out[b].update(source=AGY_SOURCE, status='error')
+                try: out[b]['_profile'] = credential_profile(*claude_credentials(env, cwd))
+                except ValueError: pass
     return out
 
 
@@ -135,10 +142,21 @@ def clean(raw):
             for k in ('default_effort', 'alias'):
                 if isinstance(m.get(k), str) and len(m[k]) <= 32:
                     item[k] = m[k]
+            if m.get('availability') in ('listed', 'unverified', 'unavailable'):
+                item['availability'] = m['availability']
             if m.get('default') is True:
                 item['default'] = True
             items.append(item)
         at = info.get('at')
         out[b] = {'list': items, 'at': at if isinstance(at, (int, float)) else None,
                   'error': str(info['error'])[:300] if info.get('error') else None}
+        if b == 'antigravity':
+            if info.get('inference_status') in ('protocol_unsupported', 'failed', 'completed'):
+                out[b]['inference_status'] = info['inference_status']
+                out[b]['inference_error'] = str(info.get('inference_error') or '')[:300]
+                out[b]['inference_model'] = str(info.get('inference_model') or '')[:100]
+                if isinstance(info.get('inference_at'), (int, float)):
+                    out[b]['inference_at'] = info['inference_at']
+            out[b]['source'] = AGY_SOURCE
+            out[b]['status'] = info.get('status') if info.get('status') in ('unconfigured', 'unverified', 'unavailable', 'error') else 'unverified'
     return out

@@ -187,7 +187,7 @@ def main(argv=None):
 
     c = sub.add_parser('center', help='运行中心（含本机执行节点）')
     c.add_argument('--state', default='.state')
-    c.add_argument('--backend', choices=['demo', 'codex', 'claude'], default='demo')
+    c.add_argument('--backend', choices=['demo', 'codex', 'claude', 'antigravity'], default='demo')
     c.add_argument('--model', help='不指定时使用原生 CLI 配置的模型')
     c.add_argument('--reasoning-effort', choices=['low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
     c.add_argument('--port', type=int, default=8767, help='网页端口，只绑定 127.0.0.1')

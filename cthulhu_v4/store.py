@@ -11,7 +11,8 @@ UI_NATIVE = ('native:item/started', 'native:item/completed', 'native:item/agentM
              'native:item/reasoning/textDelta', 'native:item/commandExecution/outputDelta',
              'native:turn/completed', 'native:turn/plan/updated', 'native:stderr', 'native:error',
              'native:declined_request', 'native:demo', 'native:stream_event', 'native:assistant',
-             'native:user', 'native:result')
+             'native:user', 'native:result', 'native:agy_update')
+# agy ACP 没有单独的完整正文事件，历史分页必须保留 agy_update 才能还原文本和工具顺序。
 DELTAS = ('native:item/agentMessage/delta', 'native:item/reasoning/summaryTextDelta',
           'native:item/reasoning/summaryPartAdded', 'native:item/reasoning/textDelta',
           'native:item/commandExecution/outputDelta', 'native:item/fileChange/outputDelta', 'native:stream_event')
@@ -309,7 +310,7 @@ class Store:
                     OR kind LIKE 'native:item/%'
                     OR kind LIKE 'native:hook/%'
                     OR kind IN ('native:turn/completed', 'native:stderr', 'native:runtime_config',
-                        'native:assistant', 'native:user', 'native:stream_event', 'native:result',
+                        'native:assistant', 'native:user', 'native:stream_event', 'native:result', 'native:agy_update',
                         'native:demo')
                 ))
             )''', (int(after), int(after))).fetchone()[0]

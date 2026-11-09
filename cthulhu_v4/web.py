@@ -235,6 +235,8 @@ class Web:
                 return c.control(body, actor='owner')
             if path == '/api/master':
                 return c.control_master(body['action'])
+            if path == '/api/node/models':
+                return c.refresh_node_models(body['node'])
             if path == '/api/node/update':
                 return c.retry_update(body['node'])
             if path == '/api/node':

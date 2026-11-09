@@ -381,4 +381,7 @@ class DemoRuntime:
 
 
 def make_runtime(sink, agent):
+    if agent['backend'] == 'antigravity':
+        from .agy_runtime import AntigravityRuntime
+        return AntigravityRuntime(sink, agent)
     return {'codex': CodexRuntime, 'claude': ClaudeRuntime, 'demo': DemoRuntime}[agent['backend']](sink, agent)

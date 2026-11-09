@@ -7,7 +7,7 @@ import { Model } from './model.js';
 import { View, Live } from './render.js';
 import { Chat } from './chat.js';
 import { applyDelta } from './delta.js';
-import { modelChoices, effortChoices, catalogNote } from './models.js';
+import { modelChoices, effortChoices, catalogNote, backendLabel } from './models.js';
 import { initHistory } from './history.js';
 import { initCommands, openCommands } from './commands.js';
 import { groupTasks, groupOpen, setGroupOpen } from './tasks.js';
@@ -45,6 +45,8 @@ async function poll() {
     fileCtx.nodes = snap.nodes.map(n => n.id);
     chat.demo = snap.agents.find(a => a.id === 'master')?.backend === 'demo';
     renderSide(); renderFeishu(); renderQuestions(); renderMaster();
+    if ($('#model-dialog').open) syncModelForm();
+    if ($('#node-dialog').open) syncNodeForm();
     const stick = nearBottom($('#chat'));
     if (!chatPager.started) { await chatPager.start(); chatCursor = Math.max(chatCursor, chatPager.highwater); }
     chatCursor = await follow('view=conversation' + (chat.demo ? '&harness=1' : ''), chatCursor, e => chat.apply(e));
@@ -423,6 +425,13 @@ $('#composer').onsubmit = e => {
 };
 
 // ---- 模型 ----
+function refreshButton(button, node) {
+  const supported = node?.features?.includes('models-refresh');
+  button.disabled = !supported || !node.online || !!node.models_refresh;
+  button.textContent = node?.models_refresh ? '刷新中…' : '刷新目录';
+  button.title = !supported ? '该节点需更新后才能刷新' : !node.online ? '节点离线' : '向该节点重新查询模型目录';
+  button.onclick = () => act(async () => { await api('api/node/models', { node: node.id }); await poll(); });
+}
 // 推理强度下拉跟随所选模型：只列该模型支持的档位；当前值不在其中时保留并标出，不静默改掉。
 function fillEfforts(select, node, backend, model) {
   const keep = select.value, list = effortChoices(node, backend, model);
@@ -432,7 +441,7 @@ function fillEfforts(select, node, backend, model) {
 }
 // 模型卡片列表：首项“CLI 默认”（空值），末项“自定义…”可填目录外的名字；选择写回表单里的隐藏 model 字段。
 // 目录里没有当前值时 modelChoices 已把它放在最前，所以打开对话框不会悄悄换掉现有设置。
-function fillPicker(box, hidden, custom, choices, onPick) {
+function fillPicker(box, hidden, custom, choices, onPick, allowCustom = true) {
   const value = hidden.value, known = !value || choices.some(c => c.id === value);
   const pick = (v, isCustom) => {
     hidden.value = isCustom ? custom.value.trim() : v;
@@ -446,7 +455,7 @@ function fillPicker(box, hidden, custom, choices, onPick) {
     el('span', { class: 'pick-h' }, el('span', { class: 'pick-n', text: c.title }), c.tag ? el('span', { class: 'pick-tag', text: c.tag }) : null),
     c.sub ? el('span', { class: 'pick-s', text: c.sub }) : null);
   box.replaceChildren(card({ id: '', title: '留空', sub: '用 CLI 默认模型' }, { soft: true }),
-    ...choices.map(c => card(c)), card({ id: '', title: '自定义…', sub: '输入其他模型名' }, { soft: true, custom: true }));
+    ...choices.map(c => card(c)), ...(allowCustom ? [card({ id: '', title: '自定义…', sub: '输入其他模型名' }, { soft: true, custom: true })] : []));
   custom.oninput = () => { hidden.value = custom.value.trim(); onPick(); };
   if (!known) custom.value = value;
   pick(known ? value : '', !known);
@@ -461,8 +470,8 @@ function openModel(aid) {
   const node = snap.nodes.find(n => n.id === (a.node || 'local'));
   f.dataset.agent = aid;
   $('#model-who').textContent = aid === 'master' ? 'Master' : (snap.tasks.find(t => t.agent === aid)?.title || aid);
-  f.elements.backend.replaceChildren(...['codex', 'claude', 'demo'].filter(b => !node?.backends?.length || node.backends.includes(b))
-    .map(b => el('option', { value: b, text: b })));
+  f.elements.backend.replaceChildren(...['codex', 'claude', 'antigravity', 'demo'].filter(b => !node?.backends?.length || node.backends.includes(b))
+    .map(b => el('option', { value: b, text: backendLabel(b) })));
   f.elements.backend.value = a.backend; f.elements.model.value = a.model || '';
   f.elements.reasoning_effort.replaceChildren(el('option', { value: a.reasoning_effort || '', text: a.reasoning_effort || '默认' }));
   f.elements.reasoning_effort.value = a.reasoning_effort || '';
@@ -474,12 +483,15 @@ function syncModelForm(a = snap.agents.find(x => x.id === $('#model-form').datas
   const f = $('#model-form'), b = f.elements.backend.value;
   const node = snap.nodes.find(n => n.id === (a.node || 'local'));
   $('#model-catalog').textContent = catalogNote(node, b);
-  if (b !== f.dataset.backend) {
-    // 只在换后端时重建卡片：选模型只更新推理强度，不重排列表、不丢滚动位置。
+  refreshButton($('#model-refresh'), node);
+  const changed = b !== f.dataset.backend, catalog = JSON.stringify(node?.models?.[b]);
+  if (changed || catalog !== f.dataset.catalog) {
+    f.dataset.catalog = catalog;
+    // 只在后端或目录更新时重建卡片；保留未保存的选择，不让轮询覆盖用户输入。
     f.dataset.backend = b;
-    f.elements.model.value = b === a.backend ? (a.model || '') : '';   // 切回原后端时恢复已保存的模型
-    fillPicker($('#model-pick'), f.elements.model, $('#model-custom'), modelChoices(node, b, b === a.backend ? a.model : null),
-               () => fillEfforts(f.elements.reasoning_effort, node, f.elements.backend.value, f.elements.model.value));
+    if (changed) f.elements.model.value = b === a.backend ? (a.model || '') : '';   // 切回原后端时恢复已保存的模型
+    fillPicker($('#model-pick'), f.elements.model, $('#model-custom'), modelChoices(node, b, f.elements.model.value),
+               () => fillEfforts(f.elements.reasoning_effort, node, f.elements.backend.value, f.elements.model.value), b !== 'antigravity');
   }
   $('#model-pick').closest('.field').hidden = b === 'demo';
   fillEfforts(f.elements.reasoning_effort, node, b, f.elements.model.value);
@@ -555,9 +567,9 @@ function openNode(id) {
   $('#node-dialog-t').textContent = '节点 ' + id;
   $('#node-info').textContent = [n.online ? '在线' : '离线', `运行 ${n.running || 0}/${n.max_turns || snap.max_turns}`, n.host, n.home && '用户目录 ' + n.home, updateLabel(n),
     n.update?.error && '原因：' + n.update.error,
-    (n.backends || []).length && '可用后端 ' + n.backends.join(' ')].filter(Boolean).join('；');
+    (n.backends || []).length && '已安装后端 ' + n.backends.map(backendLabel).join(' ')].filter(Boolean).join('；');
   f.elements.backend.replaceChildren(el('option', { value: '', text: '同 Master' }),
-    ...['codex', 'claude', 'demo'].filter(b => !n.backends?.length || n.backends.includes(b)).map(b => el('option', { value: b, text: b })));
+    ...['codex', 'claude', 'antigravity', 'demo'].filter(b => !n.backends?.length || n.backends.includes(b)).map(b => el('option', { value: b, text: backendLabel(b) })));
   f.elements.backend.value = d.backend || ''; f.elements.model.value = d.model || '';
   f.elements.reasoning_effort.replaceChildren(el('option', { value: d.reasoning_effort || '', text: d.reasoning_effort || '默认' }));
   f.elements.reasoning_effort.value = d.reasoning_effort || ''; f.elements.cwd.value = d.cwd || '';
@@ -589,11 +601,14 @@ function syncNodeForm() {
   const f = $('#node-form'), b = f.elements.backend.value;
   const n = snap.nodes.find(x => x.id === f.dataset.node), d = n?.defaults || {};
   $('#node-catalog').textContent = b ? catalogNote(n, b) : '';
-  if (b !== f.dataset.backend) {
+  refreshButton($('#node-model-refresh'), n);
+  const changed = b !== f.dataset.backend, catalog = JSON.stringify(n?.models?.[b]);
+  if (changed || catalog !== f.dataset.catalog) {
+    f.dataset.catalog = catalog;
     f.dataset.backend = b;
-    f.elements.model.value = b === (d.backend || '') ? (d.model || '') : '';
-    fillPicker($('#node-pick'), f.elements.model, $('#node-custom'), modelChoices(n, b, b === d.backend ? d.model : null),
-               () => fillEfforts(f.elements.reasoning_effort, n, f.elements.backend.value, f.elements.model.value));
+    if (changed) f.elements.model.value = b === (d.backend || '') ? (d.model || '') : '';
+    fillPicker($('#node-pick'), f.elements.model, $('#node-custom'), modelChoices(n, b, f.elements.model.value),
+               () => fillEfforts(f.elements.reasoning_effort, n, f.elements.backend.value, f.elements.model.value), b !== 'antigravity');
   }
   // “同 Master”没有自己的模型：隐藏整个模型区，保存时 model 为空。
   $('#node-model-field').hidden = !b || b === 'demo';
@@ -619,12 +634,17 @@ $('#new-task').onclick = () => {
   select.replaceChildren(...snap.nodes.map(n => el('option', { value: n.id, text: n.id + (n.online ? '' : '（离线）') })));
   select.value = snap.nodes.find(n => n.online && n.id !== 'local')?.id || 'local';
   const sync = () => {
-    const d = snap.nodes.find(n => n.id === select.value)?.defaults || {};
+    const node = snap.nodes.find(n => n.id === select.value), d = node?.defaults || {};
+    const backend = f.elements.backend.value || d.backend || snap.agents.find(a => a.id === 'master').backend;
+    $('#task-models').replaceChildren(...modelChoices(node, backend, '').map(m => el('option', { value: m.id, text: m.label })));
+    $('#task-catalog').textContent = catalogNote(node, backend);
+    for (const option of f.elements.backend.options) option.disabled = !!option.value && !!node?.backends?.length && !node.backends.includes(option.value);
     f.elements.cwd.placeholder = d.cwd ? '留空使用节点默认：' + d.cwd : '/home/user/project';
     f.elements.cwd.required = !d.cwd;
     f.elements.backend.options[0].textContent = d.backend ? `节点默认（${[d.backend, d.model].filter(Boolean).join(' ')}）` : '同 Master';
   };
-  select.onchange = sync; sync();
+  f.elements.backend.value = '';
+  select.onchange = sync; f.elements.backend.onchange = () => { f.elements.model.value = ''; sync(); }; sync();
   const d = new Date(Date.now() + 86400000); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   f.elements.deadline.value ||= d.toISOString().slice(0, 16);
   f.elements.backend.value = '';
@@ -635,6 +655,7 @@ $('#task-form').onsubmit = e => {
   const body = { title: v.title, description: v.description, acceptance: v.acceptance, cwd: v.cwd || undefined, node: v.node,
     deadline: new Date(v.deadline).toISOString() };
   if (v.backend) body.backend = v.backend;
+  if (v.model?.trim()) body.model = v.model.trim();
   act(async () => { const t = await api('api/task', body); $('#task-dialog').close(); f.reset(); await poll(); openTask(t.id); });
 };
 

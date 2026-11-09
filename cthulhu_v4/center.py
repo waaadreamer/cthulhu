@@ -138,6 +138,13 @@ class Center(Messages, Questions, Tasks, Review):
             self.apply_config(a, backend, model, effort, actor='system')
             return None
 
+    def validate_backend_model(self, node, backend, model):
+        if backend == 'antigravity' and model:
+            choices = ((node.get('models') or {}).get(backend) or {}).get('list') or []
+            if model not in {m['id'] for m in choices}:
+                # ACP 不暴露 headless 的 customModelsConfig；目录外字符串不能静默变成内置别名。
+                raise ValueError('Antigravity ACP 仅支持该节点已上报的完整模型 slug；请刷新目录并选择，裸 ID/自定义映射暂不支持')
+
     def set_agent_config(self, p):
         """网页切换模型。同后端：沿用原生会话，下一回合生效；换后端：必须明确开新会话。"""
         s = self.store
@@ -145,7 +152,7 @@ class Center(Messages, Questions, Tasks, Review):
         backend = p.get('backend') or a['backend']
         model = (p.get('model') or '').strip() or None
         effort = p.get('reasoning_effort') or None
-        if backend not in {'codex', 'claude', 'demo'}:
+        if backend not in {'codex', 'claude', 'antigravity', 'demo'}:
             raise ValueError('不支持的 backend')
         if effort and effort not in EFFORTS:
             raise ValueError('reasoning_effort 应为 ' + '/'.join(sorted(EFFORTS)))
@@ -154,6 +161,7 @@ class Center(Messages, Questions, Tasks, Review):
         node = s.get('node', a.get('node') or LOCAL)
         if node.get('backends') and backend not in node['backends']:
             raise ValueError(f"节点 {node['id']} 没有报告可用的 {backend}")
+        self.validate_backend_model(node, backend, model)
         task = self.task_for(a['id'])
         if task and task['state'] in TERMINAL:
             raise ValueError('任务已结束')
@@ -165,13 +173,23 @@ class Center(Messages, Questions, Tasks, Review):
         self.apply_config(a, backend, model, effort, actor='owner')
         return a
 
+    def refresh_node_models(self, node):
+        n = self.store.get('node', node)
+        if 'models-refresh' not in (n.get('features') or []):
+            raise ValueError('节点尚未支持模型刷新，请先更新节点')
+        # 相同未完成请求复用标识，断线重发不会触发多份探测；结果由所属节点走现有 WS 上报。
+        if not n.get('models_refresh'):
+            n['models_refresh'] = self.uid('models')
+            self.store.put('node', n)
+        return {'requested': n['models_refresh']}
+
     def set_node_defaults(self, p):
         """节点默认值：新任务未指定时使用。只影响之后创建的任务，不改已有任务与会话。"""
         s = self.store
         n = s.get('node', p['node'])
         clean = lambda k: (str(p.get(k) or '').strip() or None)
         d = {k: clean(k) for k in ('backend', 'model', 'reasoning_effort', 'cwd')}
-        if d['backend'] and d['backend'] not in {'codex', 'claude', 'demo'}:
+        if d['backend'] and d['backend'] not in {'codex', 'claude', 'antigravity', 'demo'}:
             raise ValueError('不支持的 backend')
         if d['reasoning_effort'] and d['reasoning_effort'] not in EFFORTS:
             raise ValueError('reasoning_effort 应为 ' + '/'.join(sorted(EFFORTS)))
@@ -184,6 +202,7 @@ class Center(Messages, Questions, Tasks, Review):
             if not path.is_absolute() or (n['id'] == LOCAL and not path.is_dir()):
                 raise ValueError('默认工作目录必须是该节点上存在的绝对路径')
             d['cwd'] = str(path)
+        self.validate_backend_model(n, d['backend'], d['model'])
         n['defaults'] = d
         if p.get('max_turns') not in (None, ''):
             try: limit = int(p['max_turns'])
