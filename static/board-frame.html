@@ -58,17 +58,19 @@
         .map(function (n) { return [reference(n), n.scrollLeft, n.scrollTop]; });
       function restore() {
         if (version !== interaction) return;
-        details.forEach(function (item) {
+        function restoreDetails() { details.forEach(function (item) {
           var n = find(item[0]);
           if (n && n.open !== item[1]) {
             // 展开后的内容可能由模板在 toggle 中惰性创建；仅等一帧并不保证它已存在。
             // 在该节点的模板处理器完成后再恢复一次，不能漏掉新建的同身份内部滚动容器。
             n.addEventListener('toggle', finish, { once: true }); n.open = item[1];
           }
-        });
+        }); }
         function finish() {
           // toggle 的惰性详情先补完内容再恢复滚动；等待期间的新操作优先，不能被旧位置拉回。
           if (version !== interaction) return;
+          // 外层 toggle 也可能刚创建内层 details，继续按原身份恢复，逐层展开后才有内部内容。
+          restoreDetails();
           var target = find(focused);
           if (target && target !== document.body && target !== document.activeElement && !target.closest('[hidden]')) target.focus({ preventScroll: true });
           if (target && selection && selection[0] != null) try { target.setSelectionRange.apply(target, selection); } catch (_) {}
