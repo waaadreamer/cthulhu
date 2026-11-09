@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .canvas import BOARD_CSP
+from .canvas_http import respond_canvas
 from .util import ROOT
 from .web import CSP, MIME
 
@@ -52,7 +53,8 @@ class CanvasServer:
                 except (BrokenPipeError, ConnectionResetError): pass
 
             def handle_request(self):
-                path = urlsplit(self.path).path
+                url = urlsplit(self.path)
+                path = url.path
                 if self.command == 'GET' and not path.startswith('/api/'):
                     target = (ROOT / 'static' / (path.lstrip('/') or 'boards.html')).resolve()
                     if not target.is_relative_to(ROOT / 'static') or not target.is_file():
@@ -78,7 +80,10 @@ class CanvasServer:
                     if not 0 <= length <= 1024 * 1024:
                         raise ValueError('请求体过大')
                     body = json.loads(self.rfile.read(length)) if length else None
-                    result = owner.request(self.command, path, body)
+                    # query 是固定 Canvas 表示层的一部分；不能丢掉 compact/config，也不扩大 API 白名单。
+                    result = owner.request(self.command, path + ('?' + url.query if url.query else ''), body)
+                    if self.command == 'GET':
+                        return respond_canvas(self, result, CSP)
                     self.respond(200, result)
                 except urllib.error.HTTPError as e:
                     self.respond(e.code, json.load(e))

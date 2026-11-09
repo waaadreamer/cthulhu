@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from .canvas import BOARD_CSP
+from .canvas_http import respond_canvas
 from .tools import HTML_TEXT_LIMIT
 from .util import ROOT, cut
 
@@ -100,7 +101,10 @@ class Web:
                     token = self.headers.get('Authorization', '').removeprefix('Bearer ')
                     future = asyncio.run_coroutine_threadsafe(
                         web.route(self.command, url.path, parse_qs(url.query), token, body), web.loop)
-                    self.respond(200, future.result(timeout=30))
+                    value = future.result(timeout=30)
+                    if self.command == 'GET' and (url.path == '/api/canvas' or url.path.startswith('/api/canvas/')):
+                        return respond_canvas(self, value, CSP)
+                    self.respond(200, value)
                 except PermissionError as e: self.respond(401, {'error': str(e)})
                 except Exception as e: self.respond(400, {'error': str(e)})
 

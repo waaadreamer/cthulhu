@@ -197,12 +197,26 @@ class Canvases:
                                attempt.get('collected_at') if attempt else None])
         return out
 
-    def data(self, board):
+    def data(self, board, *, compact=False):
         view = self.view(board)
         success, attempt = board['last_success'], board['last_attempt']
-        return {k: view[k] for k in ('id', 'name', 'state', 'status', 'stale', 'fresh', 'node_online', 'collector_online', 'sampled_at', 'now', 'revision', 'blocked_unknown')} | {
+        result = {k: view[k] for k in ('id', 'name', 'state', 'status', 'stale', 'fresh', 'node_online', 'collector_online', 'sampled_at', 'now', 'revision', 'blocked_unknown')} | {
             'data': success['data'] if success else None, 'format': success['format'] if success else None,
             'data_revision': success['revision'] if success else None, 'attempt': attempt}
+        # 同一成功票据的 data 是 stdout 的确定解析结果。只传一次原文，浏览器可精确恢复两者；
+        # 失败/丢弃/不同票据必须保留独立的最后成功数据，不能用新失败 stdout 覆盖它。
+        if compact and success and attempt and success['command_id'] == attempt['command_id']:
+            raw = attempt.get('stdout', '')
+            equivalent = result['format'] == 'text' and success['data'] == raw
+            if result['format'] == 'json':
+                # 只接受与既有 JSON 响应相同的数字/字符串词法；如原文 -0 被 Python 规范成 0，
+                # 或任意自定义格式不匹配，保守退回完整 data，不能改变浏览器看到的数值语义。
+                equivalent = raw.strip() in (json.dumps(success['data'], ensure_ascii=False),
+                    json.dumps(success['data'], ensure_ascii=False, separators=(',', ':')))
+            if equivalent:
+                result.pop('data')
+                result['data_from_stdout'] = result['format']
+        return result
 
     async def route(self, method, path, query, body):
         parts = path.removeprefix('/api/canvas').strip('/').split('/')
@@ -216,13 +230,17 @@ class Canvases:
                 return self.tick(body.get('worker'))
             if len(parts) == 1 and parts[0]:
                 if method == 'GET':
-                    return self.view(self.s.get('canvas', parts[0]))
+                    board = self.s.get('canvas', parts[0])
+                    result = self.view(board)
+                    if query.get('view') == ['config']:
+                        result = {k: v for k, v in result.items() if k not in ('last_success', 'last_attempt')}
+                    return result
                 if method == 'POST':
                     return self.edit(parts[0], body)
             if len(parts) == 2:
                 ident, action = parts
                 if method == 'GET' and action == 'data':
-                    return self.data(self.s.get('canvas', ident))
+                    return self.data(self.s.get('canvas', ident), compact=query.get('compact') == ['1'])
                 if method == 'POST':
                     return self.control(ident, action, body.get('acknowledge_unknown', False))
         raise ValueError('未知 Canvas 接口')
