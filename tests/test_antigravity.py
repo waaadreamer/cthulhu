@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
-from cthulhu_v4.antigravity import claude_credentials, native_env, gateway_models, catalog
+from cthulhu_v4.antigravity import claude_credentials, native_env, gateway_models, catalog, effective_base
 from cthulhu_v4.runtime import make_runtime
 from cthulhu_v4.store import Store
 from cthulhu_v4.node import Turn
@@ -44,6 +44,29 @@ class ConfigTests(unittest.TestCase):
                 claude_credentials({'CLAUDE_CONFIG_DIR': tmp, 'ANTHROPIC_AUTH_TOKEN': 'secret'})
         env = native_env({'GEMINI_API_KEY': 'other', 'GOOGLE_API_KEY': 'other', 'GOOGLE_GEMINI_BASE_URL': 'https://google.example'}, 'same-key', 'https://same.example')
         self.assertEqual(env, {'GEMINI_API_KEY': 'same-key', 'GOOGLE_GEMINI_BASE_URL': 'https://same.example'})
+
+    def test_explicit_same_origin_route_preserves_default_and_rejects_other_recipients(self):
+        self.assertEqual(effective_base('https://gateway.example/anthropic'), 'https://gateway.example/anthropic')
+        self.assertEqual(effective_base('https://gateway.example/anthropic', 'https://gateway.example/gemini'), 'https://gateway.example/gemini')
+        for bad in ('https://google.example/gemini', 'http://gateway.example/gemini', 'https://gateway.example:444/gemini', 'https://key@gateway.example/gemini'):
+            with self.assertRaisesRegex(ValueError, '同源'):
+                effective_base('https://gateway.example/anthropic', bad)
+
+    def test_explicit_gateway_model_route_keeps_configured_prefix(self):
+        calls = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                calls.append(self.path)
+                self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
+                self.wfile.write(b'{"models":[{"name":"models/gemini-4-argon"}]}')
+            def log_message(self, *a): pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever); thread.start()
+        try:
+            base = f'http://127.0.0.1:{server.server_port}/gemini'
+            self.assertEqual(gateway_models('fixture', base, {'CTHULHU_ANTIGRAVITY_BASE_URL': base})[0]['name'], 'models/gemini-4-argon')
+            self.assertEqual(calls, ['/gemini/v1beta/models'])
+        finally: server.shutdown(); thread.join(); server.server_close()
 
     def test_redirect_does_not_forward_auth_and_unknown_path_is_not_guessed(self):
         calls = []
@@ -123,6 +146,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(argv[argv.index('--gemini-dir') + 1], str(self.sink.native_dir))
         self.assertEqual(self.sink.pids[-1], None)
 
+    async def test_node_explicit_base_reaches_native_child_with_same_inherited_auth(self):
+        self.sink.agy_base_url = 'https://same.example/gemini'
+        self.assertEqual(await self.run_turn('one'), 'native result')
+        self.assertEqual(self.envs[0]['GOOGLE_GEMINI_BASE_URL'], 'https://same.example/gemini')
+        self.assertEqual(self.envs[0]['GEMINI_API_KEY'], 'secret-key')
+
     async def test_failed_load_never_creates_replacement_session(self):
         self.agent['session'] = 'agy-session'
         with patch.dict(os.environ, FAKE_AGY_MODE='load-fails'):
@@ -159,6 +188,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_refresh_reloads_node_route_for_catalog_and_future_turns_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(Path(tmp))
+            path = Path(tmp) / 'node.json'; path.write_text('{}')
+            h.node.antigravity_config_path = path
+            old = Turn(h.node, {'id': 'old', 'agent': 'master'})
+            finder = None
+            try:
+                with patch('cthulhu_v4.node.discover', AsyncMock(return_value={})) as query:
+                    finder = asyncio.create_task(h.node.refresh_models())
+                    while query.await_count < 1: await asyncio.sleep(.01)
+                    path.write_text(json.dumps({'antigravity_base_url': 'https://same.example/gemini'}))
+                    h.node.models_wake.set()
+                    while query.await_count < 2: await asyncio.sleep(.01)
+                    self.assertEqual(query.call_args.args[1]['CTHULHU_ANTIGRAVITY_BASE_URL'], 'https://same.example/gemini')
+                    new = Turn(h.node, {'id': 'new', 'agent': 'master'})
+                    self.assertEqual(new.agy_base_url, 'https://same.example/gemini')
+                    self.assertIsNone(old.agy_base_url)
+                    path.write_text('invalid json'); h.node.reload_antigravity_config()
+                    self.assertIn('未静默回退', h.node.agy_config_error)
+            finally:
+                if finder:
+                    finder.cancel(); await asyncio.gather(finder, return_exceptions=True)
+                await h.close()
+
     async def test_native_failure_evidence_is_scoped_to_node_credential_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             h = Harness(Path(tmp))

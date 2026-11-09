@@ -30,6 +30,7 @@ async def main():
         with tempfile.TemporaryDirectory(prefix='cthulhu-agy-native-') as tmp:
             h = Harness(Path(tmp), backend='antigravity', model='gemini-4-argon-medium')
             h.node.backends.append('antigravity')
+            h.node.antigravity_base_url = f'http://127.0.0.1:{server.server_port}/gemini'
             mcp_requests = []
             route = h.bridge.route
             async def observed_route(method, path, token, body):
@@ -41,7 +42,7 @@ async def main():
             a = h.c.store.get('agent', 'master'); a['cwd'] = str(empty); h.c.store.put('agent', a)
             try:
                 # 只向回环夹具送非秘密测试 key，不读取或修改本机用户认证，不访问真实网关。
-                with patch('cthulhu_v4.agy_runtime.claude_credentials', return_value=('protocol-fixture-key', f'http://127.0.0.1:{server.server_port}')):
+                with patch('cthulhu_v4.agy_runtime.claude_credentials', return_value=('protocol-fixture-key', f'http://127.0.0.1:{server.server_port}/anthropic')):
                     for i, text in enumerate(('Remember protocol_silverfish. Reply OK without tools.', 'Recall the marker in the previous user turn. No tools.')):
                         a = h.c.store.get('agent', 'master'); a['paused'] = False; h.c.store.put('agent', a)
                         h.c.enqueue('owner', 'master', text)
@@ -53,6 +54,7 @@ async def main():
                 events = h.c.store.events(limit=1000)
                 errors = [e['text'] for e in events if e['kind'] == 'runtime_error']
                 assert len(errors) == 2 and all('fixture protocol unsupported' in e for e in errors), errors
+                assert all(url.startswith('/gemini/v1beta/') for url, _ in requests), 'explicit route prefix not applied'
                 turns = [body for url, body in requests if '/models/gemini-4-argon:streamGenerateContent' in url]
                 assert len(turns) == 2, 'unexpected replay or retries'
                 assert json.loads(turns[1])['generationConfig']['thinkingConfig']['thinkingLevel'] == 'MEDIUM', 'selected medium effort not applied'
@@ -61,7 +63,7 @@ async def main():
                 assert '/internal/tools' in mcp_requests, 'native MCP discovery did not reach the harness bridge'
                 assert not list(empty.iterdir()), 'empty smoke workspace changed'
                 print(json.dumps({'result': 'PASS', 'cli': 'agy ACP', 'session': first,
-                    'checks': ['native MCP discovery reaches per-turn bridge', 'native new/load retains user input and harness system instructions', 'HTTP 400 despite end_turn becomes failure',
+                    'checks': ['explicit same-origin route preserves /gemini prefix', 'native MCP discovery reaches per-turn bridge', 'native new/load retains user input and harness system instructions', 'HTTP 400 despite end_turn becomes failure',
                                'same node identity and native session', 'no automatic prompt replay', 'empty workspace unchanged'],
                     'protocol_evidence': {'terminal': [e['data'] for e in events if e['kind'] == 'native:agy_result'],
                         'fatal_notice': [e['data'] for e in events if e['kind'] == 'native:agy_update' and 'terminated due to error' in json.dumps(e['data'])],

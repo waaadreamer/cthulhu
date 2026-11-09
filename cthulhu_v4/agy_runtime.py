@@ -9,7 +9,7 @@ import uuid
 import re
 from pathlib import Path
 
-from .antigravity import claude_credentials, native_env, redact, credential_profile
+from .antigravity import claude_credentials, native_env, redact, credential_profile, effective_base
 from .runtime import ProcessRuntime, bounded, lines
 
 
@@ -28,8 +28,13 @@ class AntigravityRuntime(ProcessRuntime):
 
     def env(self):
         env = super().env()
+        if getattr(self.sink, 'agy_config_error', None):
+            raise ValueError(self.sink.agy_config_error)
+        if getattr(self.sink, 'agy_base_url', None):
+            env['CTHULHU_ANTIGRAVITY_BASE_URL'] = self.sink.agy_base_url
         if self.key is None:
             self.key, self.base = claude_credentials(env, self.a['cwd'])
+            self.base = effective_base(self.base, env.get('CTHULHU_ANTIGRAVITY_BASE_URL'))
         return native_env(env, self.key, self.base)
 
     def safe(self, value):
@@ -107,7 +112,7 @@ class AntigravityRuntime(ProcessRuntime):
         self.loading = False
         self.sink.native('runtime_config', {'backend': 'antigravity', 'session': self.session,
             'model': self.a.get('model') or (response.get('models') or {}).get('currentModelId'),
-            'auth_source': 'claude', 'availability': 'unverified'})
+            'auth_source': 'claude', 'base_source': 'node' if self.env().get('CTHULHU_ANTIGRAVITY_BASE_URL') else 'claude', 'availability': 'unverified'})
 
     async def stderr(self):
         async for line in lines(self.proc.stderr):

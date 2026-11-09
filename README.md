@@ -65,6 +65,12 @@ agy 子进程仅以同一 auth/base_url 设置 `GEMINI_API_KEY` / `GOOGLE_GEMINI
 `authenticate(gemini-api-key)` 只选择认证方式，**不证明网关支持 Gemini 协议或账户有额度**。
 没有明确 base_url 时拒绝启动，不把继承的 key 发往默认 Google 地址。不实现协议转换代理。
 
+若同一网关为不同协议提供独立路径，可在节点 `node.json` 显式设置 `antigravity_base_url`，
+或通过节点 `--antigravity-base-url` / 进程环境 `CTHULHU_ANTIGRAVITY_BASE_URL` 提供。缺省仍完全继承 Claude 地址。
+覆盖仅允许相同 scheme/host/port，auth 仍从本机 Claude 读取；不自动猜测协议路径，不修改 Claude 设置。
+该入口同时用于原生 agy 与目录查询，模型页明确显示地址来自节点配置。修改 node.json 后点模型目录刷新：
+节点重读配置，刷新完成后用于新回合；已接单/运行的回合仍用原配置。无需为配置修改打断任务或重建节点身份。
+
 模型页区分本机 `agy models` 目录与同地址 `/v1beta/models` 的渠道目录：前者是 CLI 的候选 slug，
 后者也只证明列出模型，均不宣称推理成功。原生请求验证结果另行显示：已证实协议不支持与目录未列出/未经验证分别记录；
 证据仅在节点私有状态按同一 auth/base_url 的摘要关联，刷新或重启保留，换凭据/地址不沿用。

@@ -34,5 +34,5 @@ export function catalogNote(node, backend, now = Date.now() / 1000) {
   const age = info.at ? Math.round((now - info.at) / 60) : null;
   const when = age == null ? '' : age < 1 ? '刚刚更新' : age < 120 ? `${age} 分钟前更新` : `${Math.round(age / 60)} 小时前更新`;
   const proof = { protocol_unsupported: '原生验证失败：该渠道不支持 Gemini 协议', failed: '最近原生请求失败', completed: '最近原生请求完成' }[info.inference_status];
-  return [proof && `${proof}（${info.inference_model || '默认模型'}）`, info.inference_status === 'failed' && info.inference_error, info.source, `${info.list.length} 个模型`, when, info.status === 'unconfigured' && '待配置', info.status === 'unavailable' && '渠道目录未列出候选模型', info.error && (backend === 'antigravity' ? info.error : '上次发现失败：' + info.error)].filter(Boolean).join('，');
+  return [proof && `${proof}（${info.inference_model || '默认模型'}）`, info.inference_status === 'failed' && info.inference_error, info.base_source === 'node' && '认证继承 Claude，地址使用节点显式配置', info.source, `${info.list.length} 个模型`, when, info.status === 'unconfigured' && '待配置', info.status === 'unavailable' && '渠道目录未列出候选模型', info.error && (backend === 'antigravity' ? info.error : '上次发现失败：' + info.error)].filter(Boolean).join('，');
 }

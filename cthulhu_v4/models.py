@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from .util import CODEX_LEAN
-from .antigravity import catalog as antigravity_catalog, SOURCE as AGY_SOURCE, claude_credentials, credential_profile
+from .antigravity import catalog as antigravity_catalog, SOURCE as AGY_SOURCE, claude_credentials, credential_profile, effective_base
 
 CLAUDE_ALIASES = ('fable', 'opus', 'sonnet', 'haiku')
 TIMEOUT = 60
@@ -121,7 +121,9 @@ async def discover(backends, env, previous=None, cwd=None):
             out[b] = {'list': old.get('list') or [], 'at': old.get('at'), 'error': (str(e) or type(e).__name__)[:300]}
             if b == 'antigravity':
                 out[b].update(source=AGY_SOURCE, status='error')
-                try: out[b]['_profile'] = credential_profile(*claude_credentials(env, cwd))
+                try:
+                    key, base = claude_credentials(env, cwd)
+                    out[b]['_profile'] = credential_profile(key, effective_base(base, env.get('CTHULHU_ANTIGRAVITY_BASE_URL')))
                 except ValueError: pass
     return out
 
@@ -157,6 +159,7 @@ def clean(raw):
                 out[b]['inference_model'] = str(info.get('inference_model') or '')[:100]
                 if isinstance(info.get('inference_at'), (int, float)):
                     out[b]['inference_at'] = info['inference_at']
+            out[b]['base_source'] = 'node' if info.get('base_source') == 'node' else 'claude'
             out[b]['source'] = AGY_SOURCE
             out[b]['status'] = info.get('status') if info.get('status') in ('unconfigured', 'unverified', 'unavailable', 'error') else 'unverified'
     return out

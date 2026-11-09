@@ -48,13 +48,26 @@ def claude_credentials(env, cwd=None):
     return key, base
 
 
+def effective_base(base, override=None):
+    if not override:
+        return base
+    target = str(override).rstrip('/')
+    old, new = urllib.parse.urlsplit(base), urllib.parse.urlsplit(target)
+    origin = lambda u: (u.scheme, u.hostname, u.port or (443 if u.scheme == 'https' else 80))
+    if (new.scheme not in ('http', 'https') or not new.hostname or new.username or new.password
+            or new.query or new.fragment or origin(old) != origin(new)):
+        raise ValueError('Antigravity 显式地址必须与 Claude base_url 同源；不会把继承凭据发到其他域名/端口')
+    # 只接受节点显式配置的有据入口，不自动裁剪 /anthropic 或猜测 /gemini。
+    return target
+
+
 def credential_profile(key, base):
     # 只在节点私有状态中关联证据；不能把一套凭据/地址的失败推广到另一套配置。
     return hashlib.sha256((base + '\0' + key).encode()).hexdigest()
 
 
 def native_env(env, key, base):
-    # 不继承另一套 Google 凭据/地址。base 与 key 必须来自同一份 Claude 有效配置，
+    # 不继承另一套 Google 凭据/地址。key 来自本机 Claude，base 使用原地址或显式同源入口，
     # 不能仅设置 key 后让原生 CLI 默认把它发给 Google。凭据只进入本机子进程环境。
     out = {k: v for k, v in env.items() if not k.startswith(('GEMINI_', 'GOOGLE_', 'ANTHROPIC_'))}
     out.update(GEMINI_API_KEY=key, GOOGLE_GEMINI_BASE_URL=base)
@@ -73,7 +86,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def gateway_models(key, base, env, timeout=15):
     u = urllib.parse.urlsplit(base)
-    if u.path not in ('', '/'):
+    if u.path not in ('', '/') and not env.get('CTHULHU_ANTIGRAVITY_BASE_URL'):
         # 现有 agy 在 base 后附加 /v1beta，不能猜测 /v1、反向代理前缀如何改写。
         raise ValueError('渠道地址含路径，Gemini 模型查询路径尚未验证；请核验同地址的 Gemini 协议')
     proxy_url = env.get('HTTPS_PROXY') or env.get('https_proxy')
@@ -108,6 +121,8 @@ async def catalog(env, cwd=None, timeout=30):
     info = {'list': [], 'source': SOURCE, 'status': 'unconfigured', 'error': None}
     try:
         key, base = claude_credentials(env, cwd)
+        base = effective_base(base, env.get('CTHULHU_ANTIGRAVITY_BASE_URL'))
+        info['base_source'] = 'node' if env.get('CTHULHU_ANTIGRAVITY_BASE_URL') else 'claude'
     except ValueError as e:
         info['error'] = str(e)
         return info

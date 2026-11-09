@@ -145,7 +145,9 @@ async def run_node(args):
     lock = lock_dir(base / 'state', 'node.lock')
     try:
         node = Node(base / 'state', protected=[base], app=app, managed=managed,
-                    model_proxy=args.model_proxy or config.get('model_proxy'))
+                    model_proxy=args.model_proxy or config.get('model_proxy'),
+                    antigravity_base_url=args.antigravity_base_url or config.get('antigravity_base_url'),
+                    antigravity_config_path=None if args.antigravity_base_url else base / 'node.json')
     except RuntimeError as e:
         raise SystemExit(str(e))
     node.link = RemoteLink(config['center'], config['node'], token=config['token'], pin=config.get('pin'),
@@ -222,6 +224,7 @@ def main(argv=None):
     nsub = n.add_subparsers(dest='node_cmd', required=True)
     j = nsub.add_parser('join'); j.add_argument('invite'); j.add_argument('--home')
     r = nsub.add_parser('run'); r.add_argument('--home'); r.add_argument('--capacity', type=int, help='已废弃：并行上限改在中心网页按节点设置；保留参数以兼容旧启动命令')
+    r.add_argument('--antigravity-base-url', help='该节点有据的 Gemini 入口；仅允许与 Claude base_url 同源，也可写 node.json 的 antigravity_base_url')
     r.add_argument('--model-proxy', help='该节点上模型 CLI 的代理；也可写在 node.json 的 model_proxy')
     st = nsub.add_parser('status'); st.add_argument('--home')
 

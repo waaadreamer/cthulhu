@@ -44,6 +44,8 @@ class Turn:
         self.token = secrets.token_urlsafe(32)  # 每回合的本机 MCP token；节点凭证绝不交给模型子进程。
         self.url = node.bridge_url
         self.proxy = node.model_proxy
+        self.agy_base_url = node.antigravity_base_url
+        self.agy_config_error = node.agy_config_error
         self.native_dir = node.state_dir / 'antigravity' / self.agent
 
     def native(self, kind, payload):
@@ -89,11 +91,14 @@ def file_reply(req, body):
 
 class Node:
     def __init__(self, state_dir, *, backends=None, link=None, protected=(), app=None, managed=False,
-                 model_proxy=None):
+                 model_proxy=None, antigravity_base_url=None, antigravity_config_path=None):
         self.state_dir = Path(state_dir).resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.store = Store(self.state_dir / 'node.db')
         self.model_proxy = model_proxy
+        self.antigravity_base_url = antigravity_base_url
+        self.antigravity_config_path = Path(antigravity_config_path) if antigravity_config_path else None
+        self.agy_config_error = None
         # 网页可以打开节点上的文件，但凭证与状态目录除外（含 node.json 里的节点 token）。
         self.protected = [Path(p).resolve() for p in (self.state_dir, *protected)]
         self.reads = set()
@@ -163,14 +168,35 @@ class Node:
     def hello(self):
         return {'protocol': PROTOCOL, 'version': VERSION, 'instance': self.instance}
 
+    def reload_antigravity_config(self):
+        if not self.antigravity_config_path:
+            return
+        try:
+            config = json.loads(self.antigravity_config_path.read_text())
+            value = config.get('antigravity_base_url')
+            if value is not None and not isinstance(value, str):
+                raise ValueError('invalid base type')
+        except (OSError, ValueError, AttributeError):
+            self.agy_config_error = '节点 Antigravity 入口配置无法读取；请检查 node.json，未静默回退'
+            return
+        # 只改变以后创建的 Turn；已接单的回合持有旧值，不对运行中的进程宣称热切换。
+        self.antigravity_base_url = value or None
+        self.agy_config_error = None
+
     async def refresh_models(self):
-        env = proxy.model_env(os.environ, self.model_proxy)
-        env.pop('CLAUDECODE', None)
         while not self.closed:
             try:
                 self.models_wake.clear()
                 requested = self.models_requested
-                found = await discover(self.backends, env, self.models, cwd=self.state_dir / 'model-probe')
+                self.reload_antigravity_config()
+                env = proxy.model_env(os.environ, self.model_proxy)
+                env.pop('CLAUDECODE', None)
+                if self.antigravity_base_url:
+                    env['CTHULHU_ANTIGRAVITY_BASE_URL'] = self.antigravity_base_url
+                backends = [b for b in self.backends if b != 'antigravity' or not self.agy_config_error]
+                found = await discover(backends, env, self.models, cwd=self.state_dir / 'model-probe')
+                if self.agy_config_error and 'antigravity' in self.backends:
+                    found['antigravity'] = {'list': [], 'at': None, 'status': 'error', 'error': self.agy_config_error}
                 for backend, info in found.items():
                     profile = info.pop('_profile', None)
                     self.model_profiles[backend] = profile
