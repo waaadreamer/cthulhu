@@ -13,10 +13,80 @@
     var template = event.data.template;
     document.open(); document.write(template); document.close();
     var current = initial;
-    Object.defineProperty(window, 'Canvas', { value: Object.freeze({ getData: function () { return current; } }) });
+    // 数据事件允许模板重画图表，但不能把“更新数据”变成“重置阅读位置”。
+    // 只按稳定语义身份找回节点；消失的数据项不能按数组下标冒认成另一项。
+    var interaction = 0;
+    ['pointerdown', 'wheel', 'keydown', 'input'].forEach(function (name) {
+      addEventListener(name, function () { interaction++; }, { capture: true, passive: true });
+    });
+    function identity(node) {
+      if (!node || node === document.body || node === document.documentElement) return null;
+      if (node.id) return { id: node.id };
+      var attrs = ['data-canvas-key', 'data-key', 'data-chart', 'data-task', 'data-experiment',
+        'data-step', 'data-metric', 'data-dataset', 'data-series', 'name'];
+      var values = attrs.filter(function (a) { return node.hasAttribute(a); }).map(function (a) { return [a, node.getAttribute(a)]; });
+      var label = null;
+      if (!values.length && node.localName === 'details') label = node.querySelector(':scope > summary')?.textContent;
+      if (!values.length && node.localName === 'summary') return { summary: identity(node.parentElement) };
+      var cssClass = !values.length && node.localName === 'pre' ? node.getAttribute('class') : null;
+      if (!values.length && !label && !cssClass) return null;
+      var parent = node.parentElement;
+      while (parent && parent.localName !== 'details' && !parent.id && !attrs.some(function (a) { return parent.hasAttribute(a); })) parent = parent.parentElement;
+      return { tag: node.localName, values: values, label: label, cssClass: cssClass, parent: identity(parent) };
+    }
+    function resolve(key) {
+      if (!key) return null;
+      if (key.id) return document.getElementById(key.id);
+      if ('summary' in key) return resolve(key.summary)?.querySelector(':scope > summary');
+      var scope = key.parent ? resolve(key.parent) : document;
+      if (!scope) return null;
+      var matches = Array.from(scope.querySelectorAll(key.tag)).filter(function (node) {
+        return key.values.every(function (pair) { return node.getAttribute(pair[0]) === pair[1]; })
+          && (!key.cssClass || node.getAttribute('class') === key.cssClass)
+          && (!key.label || node.querySelector(':scope > summary')?.textContent === key.label);
+      });
+      return matches.length === 1 ? matches[0] : null;
+    }
+    function reference(node) { return { node: node, key: identity(node) }; }
+    function find(ref) { return ref.node?.isConnected ? ref.node : resolve(ref.key); }
+    function preserveView(render) {
+      var version = interaction, x = scrollX, y = scrollY;
+      var focused = reference(document.activeElement), selection = null;
+      try { selection = [focused.node.selectionStart, focused.node.selectionEnd, focused.node.selectionDirection]; } catch (_) {}
+      var details = Array.from(document.querySelectorAll('details')).map(function (n) { return [reference(n), n.open]; });
+      var scrolls = Array.from(document.querySelectorAll('body *')).filter(function (n) { return n.scrollTop || n.scrollLeft; })
+        .map(function (n) { return [reference(n), n.scrollLeft, n.scrollTop]; });
+      function restore() {
+        if (version !== interaction) return;
+        details.forEach(function (item) {
+          var n = find(item[0]);
+          if (n && n.open !== item[1]) {
+            // 展开后的内容可能由模板在 toggle 中惰性创建；仅等一帧并不保证它已存在。
+            // 在该节点的模板处理器完成后再恢复一次，不能漏掉新建的同身份内部滚动容器。
+            n.addEventListener('toggle', finish, { once: true }); n.open = item[1];
+          }
+        });
+        function finish() {
+          // toggle 的惰性详情先补完内容再恢复滚动；等待期间的新操作优先，不能被旧位置拉回。
+          if (version !== interaction) return;
+          var target = find(focused);
+          if (target && target !== document.body && target !== document.activeElement && !target.closest('[hidden]')) target.focus({ preventScroll: true });
+          if (target && selection && selection[0] != null) try { target.setSelectionRange.apply(target, selection); } catch (_) {}
+          scrolls.forEach(function (item) { var n = find(item[0]); if (n) { n.scrollLeft = item[1]; n.scrollTop = item[2]; } });
+          scrollTo(x, y);
+        }
+        finish(); requestAnimationFrame(finish);
+      }
+      var result;
+      try { result = render(); } catch (error) { restore(); throw error; }
+      // 异步解压/绘图和模板内计时更新可显式用同一事务；不拦截用户主动筛选/导航。
+      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(restore);
+      restore(); return result;
+    }
+    Object.defineProperty(window, 'Canvas', { value: Object.freeze({ getData: function () { return current; }, preserveView: preserveView }) });
     function update(snapshot) {
       current = snapshot;
-      dispatchEvent(new CustomEvent('canvas:update', { detail: snapshot }));
+      preserveView(function () { dispatchEvent(new CustomEvent('canvas:update', { detail: snapshot })); });
     }
     addEventListener('message', function (message) {
       if (message.source === parent && message.data && message.data.type === 'cthulhu:canvas:data') update(message.data.snapshot);

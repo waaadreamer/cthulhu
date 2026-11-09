@@ -89,6 +89,10 @@ addEventListener('canvas:update', event => {
 </script>
 ```
 
+普通数据更新通过 `canvas:update` 传入现有文档，模板版本的 HTML 变化才重新创建 iframe。运行时在同步事件前后保留详情展开、键盘焦点、输入光标及内外滚动；重建节点用 `id` 或 `data-canvas-key` 等业务身份匹配，不能用数组下标替代已消失的数据项。动态详情、图表标记和局部滚动容器应提供稳定且在所属容器中唯一的身份，避免把会变化的数值当 key。筛选、图表选择等业务状态由模板保存，并在所选对象消失时显示无数据或明确回退。
+
+异步解压后的绘图、模板自己的定时刷新要显式包在 `Canvas.preserveView(() => render())` 中；支持返回 Promise。捕获后若用户又进行了输入、点击、键盘或滚轮操作，用户操作优先，不再恢复过时的位置。此接口只保护视图，不停止采集、不忽略新数据；模板仍应更新数值和图表，并保留自己的筛选/选择状态。运行时更新通过静态文件热发布，已经打开的旧文档需要首次刷新一次才能加载新运行时；之后数据刷新不需要刷新整页。部署模板 HTML 新版本也会有一次有意的上下文重建。
+
 每次更新后也可用 `window.Canvas.getData()` 读取当前快照。快照包含 `id/name/state/status/stale/fresh/node_online/collector_online/sampled_at/now/revision/blocked_unknown/data_revision/data/format/attempt`。`attempt` 为最近回执，带 stdout、stderr、exit_code、error、truncated、discarded 和命令 ID。首次没有成功数据时 `data` 为 null。模板应监听事件获取初始数据；API 在模板执行后的首次事件前建立。
 
 ## 中心 API

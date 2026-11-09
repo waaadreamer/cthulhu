@@ -238,18 +238,18 @@ addEventListener('hashchange', () => {
 function updateCard(card, summary) {
   card.summary = summary;
   const snapshot = frameSnapshot(card.data, summary);
-  card.title.textContent = summary.name;
+  setText(card.title, summary.name);
   card.frame.title = summary.name;
   setText(card.badge, STATUS[snapshot.status] || snapshot.status);
   card.badge.classList.toggle('fresh', snapshot.fresh);
-  card.meta.textContent = `${summary.node_id} · 最近成功采集：${time(snapshot.sampled_at)} · 间隔 ${summary.interval}s / 超时 ${summary.timeout}s`
+  setText(card.meta, `${summary.node_id} · 最近成功采集：${time(snapshot.sampled_at)} · 间隔 ${summary.interval}s / 超时 ${summary.timeout}s`
     + (snapshot.stale && snapshot.sampled_at ? ' · 保留的数据已过期' : '')
-    + (summary.task_ids.length ? ` · 关联：${summary.task_ids.join(', ')}` : ' · 独立面板');
+    + (summary.task_ids.length ? ` · 关联：${summary.task_ids.join(', ')}` : ' · 独立面板'));
   const attempt = card.data?.attempt;
   card.errors.dataset.failed = String(Boolean(attempt && (attempt.state !== 'completed' || attempt.exit_code !== 0 || attempt.truncated)));
-  card.errors.textContent = attempt ? `状态：${attempt.state} · exit_code：${attempt.exit_code ?? '无'} · 采集回执：${time(attempt.collected_at)}`
+  setText(card.errors, attempt ? `状态：${attempt.state} · exit_code：${attempt.exit_code ?? '无'} · 采集回执：${time(attempt.collected_at)}`
     + (attempt.truncated ? '\n输出超过 1MiB 合计限制，已截断' : '') + (attempt.discarded ? '\n配置已变更或面板已关闭，本次结果已丢弃' : '')
-    + `\n${attempt.error || ''}\nstderr:\n${attempt.stderr || ''}\nstdout:\n${attempt.stdout || ''}` : '尚无采集结果';
+    + `\n${attempt.error || ''}\nstderr:\n${attempt.stderr || ''}\nstdout:\n${attempt.stdout || ''}` : '尚无采集结果');
   card.pause.textContent = summary.state === 'active' ? '暂停' : '恢复';
   card.pause.onclick = () => {
     if (summary.blocked_unknown) {
