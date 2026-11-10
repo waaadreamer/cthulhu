@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import secrets
+import sqlite3
 import sys
 import time
 
@@ -16,6 +17,7 @@ FEATURE = 'commands-v1'
 OUTPUT_LIMIT = 1024 * 1024
 SCRIPT_LIMIT = 64 * 1024
 MAX_COMMANDS = 4
+LIST_TIMEOUT = 5
 ACTIVE = ('queued', 'dispatched', 'running', 'cancelling')
 TERMINAL = ('completed', 'failed', 'cancelled', 'timed_out', 'unknown')
 
@@ -76,14 +78,38 @@ class ExecutionService:
         return self.c.store.get('command', ident)
 
     def list(self, node_id=None, limit=20):
+        return self._list(self.c.store.db, node_id, limit)
+
+    def list_snapshot(self, node_id=None, limit=20):
+        """在线程里读命令列表；独立只读连接不占中心事务，也不跨线程复用主连接。"""
+        db = sqlite3.connect(f'file:{self.c.store.path}?mode=ro', uri=True)
+        deadline = time.monotonic() + LIST_TIMEOUT
+        # 冷门/没有命令的节点仍可能要读很多历史输出。HTTP 超时并不会取消 SQLite，
+        # 因而必须在数据库层限制工作量，避免废弃查询长期占线程、磁盘和 WAL 快照。
+        db.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
+        try:
+            return self._list(db, node_id, limit)
+        except sqlite3.OperationalError as e:
+            if str(e) == 'interrupted' and time.monotonic() >= deadline:
+                raise ValueError('命令历史查询超时；请稍后重试') from e
+            raise
+        finally:
+            db.close()
+
+    @staticmethod
+    def _list(db, node_id, limit):
         # SQL 先取最近的小页，不能把所有历史 stdout 拉进内存后才切片。
         limit = max(1, min(100, int(limit)))
-        sql = "SELECT json_remove(data, '$.stdout', '$.stderr', '$.script', '$.late_result') FROM objects WHERE kind='command'"
+        # NOT INDEXED 让 SQLite 从表尾沿 rowid 倒序，找到 limit 条就停。
+        # objects_state 只按 kind 命中时会扫描全部状态再临时排序；线上两万多条历史
+        # 命令的 stdout 因而被全量解析，主循环曾停顿百秒。直接倒序取页还避免上线时建大索引。
+        sql = ("SELECT json_remove(data, '$.stdout', '$.stderr', '$.script', '$.late_result') "
+               "FROM objects NOT INDEXED WHERE kind='command'")
         args = []
         if node_id:
             sql += " AND json_extract(data, '$.node_id')=?"; args.append(node_id)
         sql += ' ORDER BY rowid DESC LIMIT ?'; args.append(limit)
-        return [json.loads(row[0]) for row in self.c.store.db.execute(sql, args)]
+        return [json.loads(row[0]) for row in db.execute(sql, args)]
 
     def cancel(self, ident):
         with (nullcontext() if self.c.store.db.in_transaction else self.c.store.atomic()):

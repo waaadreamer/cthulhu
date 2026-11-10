@@ -189,7 +189,8 @@ class Web:
             if path == '/api/executions':
                 if q('id'):
                     return c.executions.get(q('id'))
-                return c.executions.list(q('node_id'), q('limit', 20))
+                # 查询历史输出可能慢，但不能连带卡住所有节点续租；只读连接由工作线程独占。
+                return await asyncio.to_thread(c.executions.list_snapshot, q('node_id'), q('limit', 20))
             if path == '/api/file':
                 return await c.files.read(q('ref'), refresh=q('refresh') == '1')
             if path == '/api/history':

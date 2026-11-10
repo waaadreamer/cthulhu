@@ -8,12 +8,14 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 
 from websockets.asyncio.server import serve
 
 from cthulhu_v4.center import Center
-from cthulhu_v4.execution import ACTIVE, FEATURE, OUTPUT_LIMIT
+from cthulhu_v4.execution import ACTIVE, FEATURE, OUTPUT_LIMIT, ExecutionService
 from cthulhu_v4.node import Node
 from cthulhu_v4.transport import RemoteLink, make_handler
 from cthulhu_v4.util import MAX_FRAME, ROOT
@@ -418,7 +420,97 @@ print('{{"sample":2}}',flush=True)
         self.assertIsNone(result['exit_code'])
 
 
+class ExecutionListTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.c = Center(self.tmp.name)
+        with self.c.store.atomic():
+            for i in range(500):
+                self.c.store.put('command', {'id': f'cmd_{i}', 'node_id': 'local' if i % 2 else 'remote',
+                    'state': 'completed' if i % 3 else 'failed', 'stdout': 'large output' * 6000,
+                    'stderr': '', 'script': 'echo example', 'late_result': {'stdout': 'late'}})
+
+    async def asyncTearDown(self):
+        self.c.store.close()
+        self.tmp.cleanup()
+
+    async def test_list_small_page_uses_rowid_order_and_bounded_work(self):
+        sql = []
+        db = self.c.store.db
+        db.set_trace_callback(sql.append)
+        # 用真实 SQLite 指令预算验证小页不扫描全部历史，避免仅靠小库耗时宣称优化有效。
+        steps = 0
+        def progress():
+            nonlocal steps
+            steps += 100
+            return steps > 1000
+        db.set_progress_handler(progress, 100)
+        try:
+            result = self.c.executions.list('local', 3)
+        finally:
+            db.set_progress_handler(None, 0)
+            db.set_trace_callback(None)
+        self.assertEqual([r['id'] for r in result], ['cmd_499', 'cmd_497', 'cmd_495'])
+        self.assertTrue(all(not {'stdout', 'stderr', 'script', 'late_result'} & r.keys() for r in result))
+        query = next(s for s in sql if s.startswith('SELECT json_remove'))
+        plan = ' '.join(str(tuple(r)) for r in db.execute('EXPLAIN QUERY PLAN ' + query))
+        self.assertNotIn('objects_state', plan)
+        self.assertNotIn('TEMP B-TREE', plan)
+        self.c.store.put('command', {'id': 'cmd_0', 'node_id': 'local', 'state': 'completed'})
+        self.assertEqual(self.c.executions.list('local', 1)[0]['id'], 'cmd_499')
+        # 快照在真正的工作线程执行，不能偷偷使用绑定主线程的连接。
+        self.assertEqual(await asyncio.to_thread(self.c.executions.list_snapshot, 'local', 3), result)
+        self.assertEqual(await asyncio.to_thread(self.c.executions.list_snapshot, 'absent'), [])
+        self.assertEqual(len(self.c.executions.list(limit=1000)), 100)
+
+    async def test_snapshot_interrupts_expired_query_and_closes_reader(self):
+        # 整张历史扫描会耗尽预算；失败后独立读连接必须释放，后续查询和写入仍可进行。
+        with patch('cthulhu_v4.execution.LIST_TIMEOUT', -1):
+            with self.assertRaisesRegex(ValueError, '命令历史查询超时'):
+                await asyncio.to_thread(self.c.executions.list_snapshot, 'absent')
+        self.c.store.put('command', {'id': 'fresh', 'node_id': 'local', 'state': 'running'})
+        self.assertEqual((await asyncio.to_thread(self.c.executions.list_snapshot, 'local', 1))[0]['id'], 'fresh')
+
+
 class ExecutionWebTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_sqlite_list_keeps_real_node_heartbeats_and_writes_live(self):
+        from cthulhu_v4.app import App
+        with tempfile.TemporaryDirectory() as root:
+            app = App(root, port=0, ws_port=0, git_proxy='http://127.0.0.1:1')
+            await app.start()
+            entered, release = threading.Event(), threading.Event()
+            original = ExecutionService._list
+            def slow_read(db, node_id, limit):
+                def gate(value):
+                    entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError('test reader was not released')
+                    return value
+                db.create_function('test_gate', 1, gate)
+                db.execute("SELECT test_gate(data) FROM objects WHERE kind='node' LIMIT 1").fetchone()
+                return original(db, node_id, limit)
+            pending = None
+            try:
+                with patch.object(ExecutionService, '_list', side_effect=slow_read):
+                    pending = asyncio.create_task(app.web.route('GET', '/api/executions', {}, app.web.token, {}))
+                    async with asyncio.timeout(3):
+                        while not entered.is_set():
+                            await asyncio.sleep(.01)
+                        seen = app.center.store.get('node', 'local')['seen']
+                        # 主线程写事务与本机真实同步循环都必须在慢读结束前成功。
+                        with app.center.store.atomic():
+                            app.center.store.emit('test_write_while_history_is_reading')
+                        while app.center.store.get('node', 'local')['seen'] <= seen:
+                            await asyncio.sleep(.01)
+                        self.assertFalse(pending.done())
+                        release.set()
+                        self.assertEqual(await pending, [])
+            finally:
+                release.set()
+                if pending:
+                    await asyncio.gather(pending, return_exceptions=True)
+                await app.stop()
+
     async def test_http_owner_auth_local_execution_cancel_and_metadata(self):
         import urllib.error
         import urllib.request
