@@ -54,6 +54,8 @@ time.sleep(60)
                           hello=self.node.hello(), channel=channel, log=lambda *a, **kw: None)
 
     async def asyncTearDown(self):
+        for pidfile in self.root.glob('pipe-child-*'):
+            (self.root / ('pipe-release-' + pidfile.name.removeprefix('pipe-child-'))).touch()
         await self.node.close()
         self.run.cancel(); await asyncio.gather(self.run, return_exceptions=True)
         await self.node.link.close(); await self.node.data.close()
@@ -289,6 +291,121 @@ asyncio.run(main())
             replacement.store.close()
         # tearDown 仍关闭一个有效 store。
         self.node.store = Store(self.root / 'node' / 'node.db')
+
+    def inherited_pipe_script(self, *, wait=False, label='pipe'):
+        # 隔离子进程故意持有FD，测试显式释放或8秒自限退出；不靠调大生产预算掩盖竞态。
+        code = f'''import os,time
+from pathlib import Path
+r,w=os.pipe()
+if os.fork()==0:
+ os.close(r);os.setsid();Path('pipe-child-'+{label!r}).write_text(str(os.getpid()))
+ os.write(w,b'1');os.close(w);end=time.monotonic()+8
+ while not Path('pipe-release-'+{label!r}).exists() and time.monotonic()<end:time.sleep(.03)
+ os._exit(0)
+os.close(w);os.read(r,1);os.close(r)
+with open({label!r},'a') as f:f.write('once\\n')
+print('{{"sample":2}}',flush=True)
+{('time.sleep(30)' if wait else '')}
+'''
+        return shlex.quote(sys.executable) + ' -c ' + shlex.quote(code)
+
+    async def release_pipe(self, label):
+        (self.root / ('pipe-release-' + label)).touch()
+        pid = int((self.root / ('pipe-child-' + label)).read_text())
+        await self.wait(lambda: not alive(pid))
+
+    async def test_inherited_pipe_drain_keeps_receipt_cancel_timeout_and_no_replay(self):
+        for mode in ['complete', 'cancel', 'timeout', 'cancel-after-exit']:
+            with self.subTest(mode=mode):
+                item = self.create(self.inherited_pipe_script(wait=mode in ('cancel', 'timeout'), label=mode),
+                                   timeout=.5 if mode == 'timeout' else 10, request_id=mode)
+                receipt = self.node.commands.root / (item['id'] + '.json')
+                await self.wait(lambda: (self.root / mode).exists())
+                if mode == 'cancel-after-exit':
+                    await self.wait(receipt.exists)
+                    self.assertEqual(json.loads(receipt.read_text())['state'], 'completed')
+                if mode.startswith('cancel'):
+                    self.c.executions.cancel(item['id'])
+                result = await self.done(item)
+                self.assertEqual(result['state'], {'complete': 'completed', 'cancel-after-exit': 'completed',
+                                 'cancel': 'cancelled', 'timeout': 'timed_out'}[mode])
+                self.assertEqual(result['stdout'], '{"sample":2}\n')
+                self.assertTrue(result['truncated'])
+                self.assertIn('输出管道排空超时', result['error'])
+                self.assertIsNotNone(result['exit_code'])
+                if mode in ('complete', 'cancel-after-exit'):
+                    self.assertEqual(result['exit_code'], 0)
+                same = self.c.executions.create(result['node_id'], result['cwd'], result['script'],
+                                               timeout=result['timeout'], request_id=mode)
+                self.assertEqual(same['id'], item['id'])
+                self.assertEqual((self.root / mode).read_text(), 'once\n')
+                self.assertIsNone(self.sentinel.returncode)
+                await self.release_pipe(mode)
+
+    async def test_concurrent_pipe_revoke_preserves_unknown_and_other_command(self):
+        item = self.create(self.inherited_pipe_script(label='revoked'), timeout=10)
+        other = self.create('printf independent; sleep .2; printf done', timeout=10)
+        receipt = self.node.commands.root / (item['id'] + '.json')
+        await self.wait(receipt.exists)
+        # 真WS同步撤销本票据：即使看守已确认退出，也不能把中心封存unknown改写成成功。
+        self.c.executions.finish(self.c.executions.get(item['id']), 'unknown', '隔离中心撤销')
+        await self.wait(lambda: self.c.executions.get(item['id']).get('late_result'))
+        frozen = self.c.executions.get(item['id'])
+        self.assertEqual(frozen['state'], 'unknown')
+        self.assertEqual(frozen['late_result']['state'], 'unknown')
+        self.assertTrue(frozen['late_result']['truncated'])
+        result = await self.done(other)
+        self.assertEqual((result['state'], result['exit_code'], result['stdout']),
+                         ('completed', 0, 'independentdone'))
+        self.assertEqual((self.root / 'revoked').read_text(), 'once\n')
+        self.assertIsNone(self.sentinel.returncode)
+        await self.release_pipe('revoked')
+
+    async def test_inherited_pipe_without_valid_receipt_remains_unknown(self):
+        for mode in ['missing', 'invalid']:
+            item = self.create(self.inherited_pipe_script(label=mode), timeout=10, request_id=mode)
+            receipt = self.node.commands.root / (item['id'] + '.json')
+            await self.wait(receipt.exists)
+            if mode == 'missing': receipt.unlink()
+            else: receipt.write_text('{broken')
+            result = await self.done(item)
+            self.assertEqual(result['state'], 'unknown')
+            self.assertIsNone(result['exit_code'])
+            self.assertTrue(result['truncated'])
+            self.assertIn('回执', result['error'])
+            if mode == 'invalid': self.assertIn('JSONDecodeError', result['error'])
+            self.assertFalse(any(x['id'] == item['id'] for x in self.c.executions.requests_for('remote')))
+            self.assertEqual((self.root / mode).read_text(), 'once\n')
+            await self.release_pipe(mode)
+
+    async def test_canvas_incomplete_pipe_retains_data_without_unknown_replay(self):
+        from cthulhu_v4.canvas import Canvases
+        api = Canvases(self.c)
+        board = api.create(dict(name='隔离管道fixture', node_id='remote', cwd=str(self.root),
+                           script="printf '{\"sample\":1}'", interval=1, timeout=10,
+                           html_template='<pre>fixture</pre>', task_ids=[]))
+        async def collect():
+            await api.route('POST', '/api/canvas/tick', {}, {'worker': 'fixture'})
+            current = self.c.store.get('canvas', board['id'])
+            result = await self.done({'id': current['inflight']['command_id']})
+            await api.route('POST', '/api/canvas/tick', {}, {'worker': 'fixture'})
+            return result, self.c.store.get('canvas', board['id'])
+        _, current = await collect()
+        self.assertEqual(current['last_success']['data'], {'sample': 1})
+        api.edit(board['id'], {'revision': current['revision'], 'script': self.inherited_pipe_script(label='canvas')})
+        result, current = await collect()
+        self.assertEqual(result['state'], 'completed')
+        self.assertTrue(current['last_attempt']['truncated'])
+        self.assertEqual(current['last_success']['data'], {'sample': 1})
+        self.assertEqual(current['state'], 'active')
+        self.assertFalse(current['blocked_unknown'])
+        self.assertFalse(api.data(current)['fresh'])
+        api.edit(board['id'], {'revision': current['revision'], 'script': "printf '{\"sample\":3}'"})
+        _, current = await collect()
+        self.assertEqual(current['last_success']['data'], {'sample': 3})
+        self.assertTrue(api.data(current)['fresh'])
+        self.assertEqual((self.root / 'canvas').read_text(), 'once\n')
+        await self.release_pipe('canvas')
 
     async def test_invalid_utf8_is_bounded_and_bad_cwd_fails(self):
         script = shlex.quote(sys.executable) + ' -c ' + shlex.quote("import os;os.write(1,b'\\xff'*500000)")

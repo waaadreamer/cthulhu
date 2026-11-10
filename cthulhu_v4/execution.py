@@ -210,8 +210,17 @@ class NodeCommands:
 
     async def execute(self, spec, item):
         ident, proc, readers = spec['id'], None, []
+        stage = '启动看守'
         result = dict(state='failed', error='', exit_code=None, started_at=None, finished_at=None)
         result_path = self.root / (ident + '.json')
+
+        async def wait_guard_exit():
+            # Process.wait() 若先于退出进入等待，还会等继承管道的后代 EOF；取消路径尤其
+            # 容易踩中。先观察子进程已回收的 returncode，再 wait，执行结局与输出预算分开。
+            while proc.returncode is None:
+                await asyncio.sleep(.05)
+            return await proc.wait()
+
         try:
             if ident in self.reasons:
                 result.update(state=self.reasons[ident], error='启动前已要求停止')
@@ -228,6 +237,7 @@ class NodeCommands:
             item.update(pid=proc.pid, pid_identity=process_identity(proc.pid), started_at=time.time())
             self.n.store.put('command', item)
             self.n.queue(ident, 'command:started', {'started_at': item['started_at']})
+            stage = '交付脚本'
             proc.stdin.write((json.dumps(spec | {'result': str(result_path)}) + '\n').encode())
             await proc.stdin.drain()
             used = 0
@@ -264,9 +274,19 @@ class NodeCommands:
                     proc.stdin.write(b'C')
                     break
                 await asyncio.sleep(.05)
-            await asyncio.wait_for(proc.wait(), spec['timeout'] + 3)
+            stage = '等待看守退出'
+            await asyncio.wait_for(wait_guard_exit(), spec['timeout'] + 3)
             # 恶意脚本可能 setsid 后保留管道；它已离开本次进程组，不让这类 FD 无限阻塞节点。
-            await asyncio.wait_for(asyncio.gather(*readers), 1)
+            stage = '排空输出管道'
+            incomplete = False
+            try:
+                await asyncio.wait_for(asyncio.gather(*readers), 1)
+            except asyncio.TimeoutError:
+                # 执行结局须由下面读取的看守原子回执确认；后代持有 FD 只证明输出不完整，
+                # 不能抹掉已知退出码。仍标截断，Canvas 不会把残缺数据提升为成功样本。
+                incomplete = item['truncated'] = True
+                self.n.queue(ident, 'command:truncated', {})
+            stage = '读取看守回执'
             if result_path.is_file():
                 result.update(json.loads(result_path.read_text()))
             else:
@@ -274,15 +294,18 @@ class NodeCommands:
             reason = self.reasons.get(ident)
             if reason == 'unknown' or (reason and result['state'] == 'cancelled'):
                 result.update(state=reason, error='中心撤销/失联或节点关闭；须核验已有副作用' if reason == 'unknown' else '已停止命令进程组')
+            if incomplete:
+                result['error'] = '；'.join(filter(None, [result.get('error'), '输出管道排空超时，输出可能不完整']))
         except Exception as exc:
-            result.update(state='unknown' if proc else 'failed', error=str(exc) or type(exc).__name__)
+            # 不能仅留一个空 TimeoutError：命令期限、管道收尾和回执失败有不同的恢复边界。
+            result.update(state='unknown' if proc else 'failed', error=f'{stage}失败：{type(exc).__name__}: {exc}')
         finally:
             if proc:
                 if proc.returncode is None:
                     proc.stdin.close()
-                    try: await asyncio.wait_for(proc.wait(), 3)
+                    try: await asyncio.wait_for(wait_guard_exit(), 3)
                     except asyncio.TimeoutError:
-                        proc.kill(); await proc.wait()
+                        proc.kill(); await wait_guard_exit()
                 proc.stdin.close()
                 for reader in readers:
                     if not reader.done(): reader.cancel()

@@ -273,7 +273,7 @@ function updateCard(card, summary) {
   const attempt = card.data?.attempt;
   card.errors.dataset.failed = String(Boolean(attempt && (attempt.state !== 'completed' || attempt.exit_code !== 0 || attempt.truncated)));
   setText(card.errors, attempt ? `状态：${attempt.state} · exit_code：${attempt.exit_code ?? '无'} · 采集回执：${time(attempt.collected_at)}`
-    + (attempt.truncated ? '\n输出超过 1MiB 合计限制，已截断' : '') + (attempt.discarded ? '\n配置已变更或面板已关闭，本次结果已丢弃' : '')
+    + (attempt.truncated ? '\n输出不完整（超出合计上限或管道收尾超时），未作为成功数据使用' : '') + (attempt.discarded ? '\n配置已变更或面板已关闭，本次结果已丢弃' : '')
     + `\n${attempt.error || ''}\nstderr:\n${attempt.stderr || ''}\nstdout:\n${attempt.stdout || ''}` : '尚无采集结果');
   card.pause.textContent = summary.state === 'active' ? '暂停' : '恢复';
   card.pause.onclick = () => {

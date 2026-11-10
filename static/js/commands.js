@@ -31,7 +31,7 @@ function render(result) {
     result.exit_code != null && `退出码 ${result.exit_code}`,
     result.started_at && `开始 ${stamp(result.started_at)}`,
     result.finished_at && `结束 ${stamp(result.finished_at)}`,
-    result.truncated && '输出已截断（stdout + stderr 上限 1MiB，后续输出已丢弃）', result.error].filter(Boolean).join('；');
+    result.truncated && '输出不完整（超出 stdout + stderr 合计 1MiB 上限，或管道收尾超时）', result.error].filter(Boolean).join('；');
   for (const name of ['stdout', 'stderr']) {
     const box = $('#command-' + name), bottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
     const value = clean(result[name] || '');
